@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-007)
+- **Latest commit:** (pending — feat-008)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 85 tests pass (27 new for feat-007 + 58 existing)
+- **Test status:** green — 103 tests pass (18 new for feat-008 + 85 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -27,6 +27,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-005**: CodingAgent trait (provider abstraction, StreamEvent, StopReason, message types, all Send+Sync)
 - [x] **feat-006**: AnthropicAgent (SSE streaming, error mapping, retry logic, message conversion)
 - [x] **feat-007**: ProviderStore + ProviderRegistry (CRUD, agent lifecycle, API with api_key stripping)
+- [x] **feat-008**: SessionStore + MessageStore (session state machine, message pagination, session API)
 
 ## In Progress
 
@@ -42,23 +43,23 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-008: SessionStore (depends on feat-007 — now passing)
-2. Continue Phase 1 (Core Foundation): feat-009 through feat-010
+1. Start feat-009: SessionService (depends on feat-008 — now passing)
+2. Continue Phase 1 (Core Foundation): feat-010
 
 ## Notes for Next Session
 
-- feat-007 created: `src/store/providers.rs`, `src/agent/registry.rs`, `src/api/providers.rs`
-- `ProviderStore` is a unit struct (same pattern as WorkspaceStore) with CRUD + `has_sessions` check
-- `Provider` struct uses `#[serde(skip_serializing)]` on `config_json` to strip api_key from API responses
-- `ProviderRegistry` holds `Mutex<HashMap<String, Arc<dyn CodingAgent>>>` — std::sync::Mutex, not tokio
-- Registry `create_agent` is `pub(crate)` so API can use it to validate config before DB insert
-- `AppError::Conflict(String)` added for 409 responses (provider delete with sessions)
-- `AppState` now has two fields: `db: Arc<Db>` and `registry: Arc<ProviderRegistry>`
-- Startup loads providers from DB into registry; failures logged as warnings, don't abort
-- API routes: `GET /api/providers`, `POST /api/providers`, `DELETE /api/providers/{id}`, `GET /api/providers/{id}/models`
-- Only "anthropic" provider type supported for v1; type validated in handler
-- `list_models()` returns empty vec from AnthropicAgent — will be populated when more providers are added
-- feat-008 (SessionStore) depends on feat-007 — now passing, can start immediately
+- feat-008 created: `src/store/sessions.rs`, `src/api/sessions.rs`
+- `SessionStore` is a unit struct with CRUD + state machine enforcement
+- State machine: `connecting` -> `ready` -> `completed`/`cancelled`/`error`; terminal states are final
+- State machine enforcement is atomic via SQL `WHERE status NOT IN (...)` — no TOCTOU race
+- `VALID_STATUSES` constant validates target status against known values
+- `MessageStore` is immutable (create + list only, no update/delete)
+- Message pagination uses `id` cursor (consistent with session pagination), not `created_at`
+- FK violation for `provider_id` caught via `map_fk_violation` (extended code 787)
+- `seed_deps` test helper is `pub(crate)` in `store::sessions::tests` for reuse by API tests
+- `ListParams::effective_limit()` deduplicates pagination limit logic
+- API routes: `POST /api/workspaces/{wid}/sessions`, `GET /api/workspaces/{wid}/sessions`, `GET /api/sessions/{id}`, `PATCH /api/sessions/{id}`, `DELETE /api/sessions/{id}`, `GET /api/sessions/{sid}/history`
+- feat-009 (SessionService) depends on feat-008 — now passing, can start immediately
 
 ## Out-of-Scope Items Noticed
 

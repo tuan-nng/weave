@@ -1,6 +1,7 @@
 pub mod health;
 pub mod providers;
 pub mod responses;
+pub mod sessions;
 pub mod workspaces;
 
 use axum::routing::get;
@@ -36,6 +37,21 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
         .route(
             "/api/providers/{id}/models",
             get(providers::list_provider_models),
+        )
+        // Session routes
+        .route(
+            "/api/workspaces/{wid}/sessions",
+            get(sessions::list_sessions).post(sessions::create_session),
+        )
+        .route(
+            "/api/sessions/{id}",
+            get(sessions::get_session)
+                .patch(sessions::update_session_status)
+                .delete(sessions::delete_session),
+        )
+        .route(
+            "/api/sessions/{sid}/history",
+            get(sessions::get_session_history),
         )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))

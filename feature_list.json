@@ -102,9 +102,9 @@
       "phase": "phase-1",
       "behavior": "SessionStore persists sessions and messages. Session state machine: connecting -> ready -> completed/cancelled/error. API: POST /api/workspaces/:wid/sessions (create with provider_id, optional specialist_id/model/parent_session_id), GET /api/workspaces/:wid/sessions (paginated), GET /api/sessions/:id, DELETE /api/sessions/:id. Messages stored as immutable JSON content blocks. GET /api/sessions/:sid/history with cursor-based pagination.",
       "verification": "cargo test -p weave-server -- test_session_lifecycle && cargo test -p weave-server -- test_session_state_transitions && cargo test -p weave-server -- test_message_pagination",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-007"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 103 tests (18 new: 11 store/sessions + 5 api/sessions + 2 shared); test_session_lifecycle (create/get/update-status/delete lifecycle); test_session_state_transitions (connecting->ready->completed, terminal rejection); test_message_pagination (cursor-based with id ordering, 5 messages across 3 pages)"
     },
     {
       "id": "feat-009",
