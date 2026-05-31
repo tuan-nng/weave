@@ -140,7 +140,7 @@
       "verification": "cargo test -p weave-server -- test_tool_profile_filtering && cargo test -p weave-server -- test_send_prompt_invalid_tool_profile",
       "state": "passing",
       "dependencies": ["feat-005"],
-      "evidence": "init.sh all 3 layers pass; 149 tests (14 new: 12 tools + 2 service integration); test_tool_profile_filtering (planning profile resolves to task/kanban/notes tools via CapturingAgent); test_send_prompt_invalid_tool_profile (invalid profile name returns AppError::Validation); ToolRegistry with 5 profiles (full=dynamic, implementation, review, planning, reporting); ToolExecutor trait (name, description, input_schema, execute); TraceCollector stub; validate_profile_name for early fail-fast; empty vec converted to None; deterministic all_definitions sorted by name"
+      "evidence": "commit 680f35e; init.sh all 3 layers pass; 149 tests (14 new: 12 tools + 2 service integration); test_tool_profile_filtering (planning profile resolves to task/kanban/notes tools via CapturingAgent); test_send_prompt_invalid_tool_profile (invalid profile name returns AppError::Validation); ToolRegistry with 5 profiles (full=dynamic, implementation, review, planning, reporting); ToolExecutor trait (name, description, input_schema, execute); TraceCollector stub; validate_profile_name for early fail-fast; empty vec converted to None; deterministic all_definitions sorted by name"
     },
     {
       "id": "feat-013",
