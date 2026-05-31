@@ -75,18 +75,18 @@
       "phase": "phase-1",
       "behavior": "CodingAgent trait defined: provider_type(), display_name(), list_models(), send_message(MessageRequest) -> Stream<StreamEvent>, health_check(). StreamEvent enum: TextDelta, ToolUseStart, ToolUseDelta, ToolResult, Thinking, Done(StopReason), Error. StopReason enum: EndTurn, MaxTokens, ToolUse, Cancelled. Supporting types: MessageRequest, Message, Role, Content, ContentBlock, ToolDefinition, ModelInfo, ProviderHealth. All types are Send + Sync.",
       "verification": "cargo test -p weave-server -- test_stream_event_variants && cargo build -p weave-server (trait compiles)",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-001"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 29 tests (9 agent + 20 existing); cargo clippy clean; CodingAgent trait with 5 methods, StreamEvent (7 variants), StopReason (4 variants), MessageRequest, Message, Role, Content, ContentBlock, ToolDefinition, ModelInfo, ProviderHealth — all Send+Sync"
     },
     {
       "id": "feat-006",
       "phase": "phase-1",
       "behavior": "AnthropicAgent implements CodingAgent. Sends POST to {base_url}/v1/messages with stream:true. Parses Anthropic SSE events (message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop) into StreamEvent items. Handles errors: 401->AuthFailed, 429->RateLimited (with Retry-After), 404->ModelNotFound, 500/529->retryable. list_models() returns hardcoded Claude model list. health_check() sends minimal request to verify credentials.",
       "verification": "cargo test -p weave-server -- test_anthropic_sse_parsing && cargo test -p weave-server -- test_anthropic_error_mapping",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-005"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 58 tests (28 agent/anthropic + 9 agent + 9 store + 5 api + 6 existing + 1 streaming); test_anthropic_sse_parsing and test_anthropic_error_mapping pass; SSE parser with \\r\\n support; retry on 429/500/529 only; message format conversion verified"
     },
     {
       "id": "feat-007",
