@@ -57,9 +57,9 @@
       "phase": "phase-1",
       "behavior": "Shared error types: AppError enum (NotFound, Validation, Provider, Database, Internal) with thiserror. ProviderError enum (AuthFailed, RateLimited, ModelNotFound, Unreachable, StreamInterrupted). AppError implements IntoResponse mapping errors to HTTP status codes + consistent JSON envelope {\"error\": {\"code\": \"...\", \"message\": \"...\"}}.",
       "verification": "cargo test -p weave-server -- test_error_response_format && cargo test -p weave-server -- test_error_status_codes",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-001"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; cargo test -- test_error_response_format (all 9 variants: correct JSON envelope {error:{code,message}}, sanitized DB/Internal messages); cargo test -- test_error_status_codes (404/400/401/429/502/500 mapping); cargo test -- test_from_conversions (rusqlite::Error, ProviderError, anyhow::Error)"
     },
     {
       "id": "feat-004",

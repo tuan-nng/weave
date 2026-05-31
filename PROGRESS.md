@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-001 branch)
+- **Latest commit:** (pending — feat-003)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 2 tests pass (test_db_init, test_migrations_idempotent)
+- **Test status:** green — 5 tests pass (test_db_init, test_migrations_idempotent, test_error_response_format, test_error_status_codes, test_from_conversions)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -22,6 +22,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] Workspace `Cargo.toml` created (members: `crates/weave-server`)
 - [x] **feat-001**: Binary skeleton with CLI, tracing, health check, graceful shutdown
 - [x] **feat-002**: SQLite database with WAL mode and migrations (11 tables, user_version tracking)
+- [x] **feat-003**: Shared error types (AppError, ProviderError) with thiserror, IntoResponse, JSON envelope
 
 ## In Progress
 
@@ -37,8 +38,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-003: Shared error types (AppError, ProviderError)
-2. Continue Phase 1 (Core Foundation): feat-004 through feat-010
+1. Start feat-004: Workspace CRUD (depends on feat-002 + feat-003 — both passing)
+2. Continue Phase 1 (Core Foundation): feat-005 through feat-010
 3. Verify each feature with its verification command before moving on
 
 ## Notes for Next Session
@@ -53,8 +54,13 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - `AppState { db: Arc<Db> }` is the shared state injected into Axum handlers via Extension
 - Migrations use `user_version` pragma for version tracking, `include_str!` for embedding
 - rusqlite 0.35 with `bundled` feature (0.40 requires nightly Rust for libsqlite3-sys)
-- feat-003 depends on feat-001 (passing) — can start immediately
-- feat-004 depends on feat-002 + feat-003 — needs both first
+- feat-003 created: `src/error.rs` — `AppError` enum (NotFound, Validation, Provider, Database, Internal), `ProviderError` enum (AuthFailed, RateLimited, ModelNotFound, Unreachable, StreamInterrupted)
+- `AppError` implements `IntoResponse` → maps to HTTP status codes + `{"error": {"code": "...", "message": "..."}}` JSON envelope
+- `Database` and `Internal` variants log real error via `tracing::error!` but return sanitized "Internal server error" to client
+- `#[from]` derives on ProviderError, rusqlite::Error, anyhow::Error for automatic conversion
+- `mod error;` added to main.rs alongside existing modules
+- feat-004 depends on feat-002 + feat-003 — both now passing, can start immediately
+- feat-005 depends on feat-001 — can start in parallel with feat-004
 
 ## Out-of-Scope Items Noticed
 

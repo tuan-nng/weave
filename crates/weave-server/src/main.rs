@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod db;
+mod error;
 
 use clap::Parser;
 use config::Config;
