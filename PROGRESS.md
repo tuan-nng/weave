@@ -9,17 +9,18 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** 10f010a (docs: add comprehensive system design document)
+- **Latest commit:** (pending — feat-001 branch)
 - **Active feature:** none
-- **Build status:** not yet buildable — no source code exists, only workspace Cargo.toml and docs
-- **Test status:** no tests exist
-- **Lint status:** n/a
+- **Build status:** green — `cargo build -p weave-server` succeeds
+- **Test status:** green — 0 tests (no tests yet, expected)
+- **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
 
 - [x] System design documentation (`docs/SYSTEM_DESIGN.md`, `docs/ARCHITECTURE.md`)
 - [x] Implementation plan (`docs/PLAN.md`)
 - [x] Workspace `Cargo.toml` created (members: `crates/weave-server`)
+- [x] **feat-001**: Binary skeleton with CLI, tracing, health check, graceful shutdown
 
 ## In Progress
 
@@ -31,24 +32,24 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Known Issues
 
-- `crates/weave-server/` directory does not exist yet — the workspace member is declared but the crate hasn't been created
-- `web/` directory does not exist yet
+- `web/` directory does not exist yet (expected — Phase 3)
 
 ## Next Steps
 
-1. Start feat-001: binary skeleton with CLI, tracing, health check endpoint
-2. Continue Phase 1 (Core Foundation): feat-002 through feat-010
+1. Start feat-002: SQLite database with WAL mode and migrations
+2. Continue Phase 1 (Core Foundation): feat-003 through feat-010
 3. Verify each feature with its verification command before moving on
 
 ## Notes for Next Session
 
-- Feature list has 35 features across 5 phases. Each feature is ~1 day of work.
-- Phase ordering: Core Foundation → Agent Tools → Frontend → Kanban → Extended
-- Read `docs/SYSTEM_DESIGN.md` for implementation details (2,084 lines, comprehensive).
-- feat-001 is the entry point — creates the crate skeleton, CLI args, tracing, health check.
-- `feature_list.json` now includes a `phases` array at the top level for grouping.
-- The `CodingAgent` trait and `StreamEvent` enum are defined in `docs/SYSTEM_DESIGN.md` §7.
+- feat-001 created: `crates/weave-server/Cargo.toml`, `src/main.rs`, `src/config.rs`, `src/api/mod.rs`, `src/api/health.rs`
+- Binary accepts `--host`, `--port`, `--db-path`, `--allow-remote` via clap
+- Tracing uses `RUST_LOG` env filter, defaults to `info`
+- Health endpoint: `GET /api/health` returns `{status, version, uptime_seconds}`
+- Graceful shutdown on SIGTERM/SIGINT via `tokio::signal`
+- feat-002 depends on feat-001 (now passing) — can start immediately
+- feat-003 also depends only on feat-001 — can run in parallel with feat-002
 
 ## Out-of-Scope Items Noticed
 
-(none yet — project is pre-implementation)
+(none yet)

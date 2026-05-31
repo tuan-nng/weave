@@ -39,9 +39,9 @@
       "phase": "phase-1",
       "behavior": "Binary compiles and starts. CLI accepts --host, --port, --db-path, --allow-remote flags via clap. Tracing subscriber initializes with RUST_LOG env filter. Server binds and listens. GET /api/health returns {\"status\": \"ok\", \"version\": \"...\", \"uptime_seconds\": N}. Graceful shutdown on SIGTERM/SIGINT.",
       "verification": "cargo build -p weave-server && cargo run -p weave-server -- --port 19876 &; sleep 2; curl -sf http://localhost:19876/api/health | jq -e '.status == \"ok\"'; kill %1",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; curl http://localhost:19876/api/health returns {status: ok, version: 0.1.0, uptime_seconds: N}"
     },
     {
       "id": "feat-002",
