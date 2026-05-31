@@ -7,6 +7,7 @@ use crate::agent::registry::ProviderRegistry;
 use crate::agent::{self, MessageRequest};
 use crate::db::Db;
 use crate::error::AppError;
+use crate::sse::{self, SseWireEvent};
 use crate::store::providers::ProviderStore;
 use crate::store::sessions::{MessageStore, SessionStore};
 
@@ -38,6 +39,7 @@ impl SessionService {
         db: &Arc<Db>,
         registry: &Arc<ProviderRegistry>,
         active: &Arc<ActiveSessions>,
+        sse_manager: &Arc<sse::SseManager>,
         session_id: &str,
         prompt: &str,
     ) -> Result<String, AppError> {
@@ -70,6 +72,7 @@ impl SessionService {
         let task_db = Arc::clone(db);
         let task_registry = Arc::clone(registry);
         let task_active = Arc::clone(active);
+        let task_sse = Arc::clone(sse_manager);
         let task_session = session;
 
         tokio::spawn(async move {
@@ -77,6 +80,7 @@ impl SessionService {
                 task_db,
                 task_registry,
                 task_active,
+                task_sse,
                 task_session,
                 cancel_token,
             )
@@ -166,6 +170,7 @@ async fn run_prompt_task(
     db: Arc<Db>,
     registry: Arc<ProviderRegistry>,
     active: Arc<ActiveSessions>,
+    sse_manager: Arc<sse::SseManager>,
     session: crate::store::sessions::Session,
     cancel_token: CancellationToken,
 ) {
@@ -236,29 +241,47 @@ async fn run_prompt_task(
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!(session_id, "session cancelled by user");
+                sse_manager.broadcast(
+                    session_id,
+                    SseWireEvent::Done { stop_reason: agent::StopReason::Cancelled },
+                );
                 let _ = SessionStore::update_status(&db, session_id, "cancelled");
                 return;
             }
             item = StreamExt::next(&mut stream) => {
                 match item {
-                    Some(Ok(event)) => match event {
-                        agent::StreamEvent::TextDelta { text } => {
-                            accumulated.push_str(&text);
+                    Some(Ok(event)) => {
+                        // Broadcast every agent event to SSE subscribers
+                        let is_terminal = matches!(
+                            event,
+                            agent::StreamEvent::Done { .. } | agent::StreamEvent::Error { .. }
+                        );
+                        sse_manager.broadcast(session_id, sse::stream_event_to_wire(event.clone()));
+                        match event {
+                            agent::StreamEvent::TextDelta { text } => {
+                                accumulated.push_str(&text);
+                            }
+                            agent::StreamEvent::Done { .. } => {
+                                break;
+                            }
+                            agent::StreamEvent::Error { message } => {
+                                error!(session_id, error = %message, "agent stream error");
+                                had_error = true;
+                                break;
+                            }
+                            _ => {}
                         }
-                        agent::StreamEvent::Done { .. } => {
+                        if is_terminal {
                             break;
                         }
-                        agent::StreamEvent::Error { message } => {
-                            error!(session_id, error = %message, "agent stream error");
-                            had_error = true;
-                            break;
-                        }
-                        // Ignore tool/thinking events (not active in feat-009)
-                        _ => {}
                     },
                     Some(Err(e)) => {
                         error!(session_id, error = %e, "agent stream provider error");
                         had_error = true;
+                        sse_manager.broadcast(
+                            session_id,
+                            SseWireEvent::Error { message: e.to_string() },
+                        );
                         break;
                     }
                     None => {
@@ -273,6 +296,12 @@ async fn run_prompt_task(
     // Check cancellation after loop (race between Done and Cancel)
     if cancel_token.is_cancelled() {
         info!(session_id, "session cancelled by user (after stream end)");
+        sse_manager.broadcast(
+            session_id,
+            SseWireEvent::Done {
+                stop_reason: agent::StopReason::Cancelled,
+            },
+        );
         let _ = SessionStore::update_status(&db, session_id, "cancelled");
         return;
     }
@@ -339,12 +368,18 @@ mod tests {
         Arc::new(Db::open(std::path::Path::new(":memory:")).unwrap())
     }
 
-    fn test_state() -> (Arc<Db>, Arc<ProviderRegistry>, Arc<ActiveSessions>) {
+    fn test_state() -> (
+        Arc<Db>,
+        Arc<ProviderRegistry>,
+        Arc<ActiveSessions>,
+        Arc<crate::sse::SseManager>,
+    ) {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let active = Arc::new(ActiveSessions::new());
-        (db, registry, active)
+        let sse = Arc::new(crate::sse::SseManager::new());
+        (db, registry, active, sse)
     }
 
     #[test]
@@ -487,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_empty_prompt() {
-        let (db, registry, active) = test_state();
+        let (db, registry, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -500,24 +535,26 @@ mod tests {
         )
         .unwrap();
 
-        let result = SessionService::send_prompt(&db, &registry, &active, &session.id, "").await;
+        let result =
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "").await;
 
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[tokio::test]
     async fn test_send_prompt_session_not_found() {
-        let (db, registry, active) = test_state();
+        let (db, registry, active, sse) = test_state();
 
         let result =
-            SessionService::send_prompt(&db, &registry, &active, "nonexistent", "hello").await;
+            SessionService::send_prompt(&db, &registry, &active, &sse, "nonexistent", "hello")
+                .await;
 
         assert!(matches!(result, Err(AppError::NotFound { .. })));
     }
 
     #[tokio::test]
     async fn test_send_prompt_terminal_session() {
-        let (db, registry, active) = test_state();
+        let (db, registry, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -534,14 +571,14 @@ mod tests {
         crate::store::sessions::SessionStore::update_status(&db, &session.id, "completed").unwrap();
 
         let result =
-            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
 
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[tokio::test]
     async fn test_cancel_session_not_active() {
-        let (_, _, active) = test_state();
+        let (_, _, active, _) = test_state();
 
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(matches!(result, Err(AppError::Validation(_))));
@@ -549,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_conflict_on_double_send() {
-        let (db, registry, active) = test_state();
+        let (db, registry, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -567,14 +604,14 @@ mod tests {
         active.try_insert(session.id.clone(), token);
 
         let result =
-            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
 
         assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
     #[tokio::test]
     async fn test_send_prompt_flow() {
-        let (db, registry, active) = test_state();
+        let (db, registry, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -589,7 +626,7 @@ mod tests {
 
         // Send prompt — should succeed and return a message ID
         let result =
-            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
 
         let message_id = result.unwrap();
         assert!(!message_id.is_empty());
@@ -607,7 +644,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_session() {
         // Verifies the cancel API rejects non-active sessions
-        let (_, _, active) = test_state();
+        let (_, _, active, _) = test_state();
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(result.is_err());
     }
@@ -678,6 +715,7 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
 
         // Create workspace, provider, and register the mock agent
         let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
@@ -702,9 +740,10 @@ mod tests {
         .unwrap();
 
         // Send prompt — the mock agent will stream slowly
-        let message_id = SessionService::send_prompt(&db, &registry, &active, &session.id, "hello")
-            .await
-            .unwrap();
+        let message_id =
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello")
+                .await
+                .unwrap();
         assert!(!message_id.is_empty());
         assert!(active.contains(&session.id));
 
@@ -725,5 +764,160 @@ mod tests {
         // Session status should be cancelled
         let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
         assert_eq!(session.status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_sse_broadcast_on_prompt() {
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        /// A mock agent that streams text deltas and a done event.
+        struct MockStreamAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for MockStreamAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "Hello".into(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: " World".into(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Done {
+                            stop_reason: agent::StopReason::EndTurn,
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(MockStreamAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Subscribe to SSE stream before sending prompt
+        let mut rx = sse.subscribe(&session.id);
+
+        // Send prompt
+        let message_id =
+            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello")
+                .await
+                .unwrap();
+        assert!(!message_id.is_empty());
+
+        // Collect SSE events until we see the Done event
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(event)) => {
+                    let is_done = matches!(&event, crate::sse::SseWireEvent::Done { .. });
+                    events.push(event);
+                    if is_done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Verify: should have 2 TextDelta + 1 Done
+        assert!(
+            events.len() >= 3,
+            "expected at least 3 events, got {}",
+            events.len()
+        );
+
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::sse::SseWireEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_deltas, vec!["Hello", " World"]);
+
+        let has_done = events.iter().any(|e| {
+            matches!(
+                e,
+                crate::sse::SseWireEvent::Done {
+                    stop_reason: agent::StopReason::EndTurn
+                }
+            )
+        });
+        assert!(has_done, "expected Done event with EndTurn");
+
+        // Wait for task to finish
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Session should be completed
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "completed");
     }
 }

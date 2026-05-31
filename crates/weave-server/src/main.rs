@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod error;
 mod service;
+mod sse;
 mod store;
 
 use clap::Parser;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub db: Arc<db::Db>,
     pub registry: Arc<agent::registry::ProviderRegistry>,
     pub active_sessions: Arc<service::ActiveSessions>,
+    pub sse_manager: Arc<sse::SseManager>,
 }
 
 #[tokio::main]
@@ -62,10 +64,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 5. Build the API router
     let active_sessions = Arc::new(service::ActiveSessions::new());
+    let sse_manager = Arc::new(sse::SseManager::new());
     let state = AppState {
         db,
         registry,
         active_sessions,
+        sse_manager,
     };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);

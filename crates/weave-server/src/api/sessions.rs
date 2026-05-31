@@ -1,10 +1,14 @@
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
+use futures_util::stream;
 use serde::Deserialize;
+use std::convert::Infallible;
 
 use crate::api::responses::DataResponse;
 use crate::error::AppError;
+use crate::sse::SseWireEvent;
 use crate::store::sessions::{MessagePage, MessageStore, SessionPage, SessionStore};
 use crate::AppState;
 
@@ -148,6 +152,7 @@ pub async fn send_prompt(
         &state.db,
         &state.registry,
         &state.active_sessions,
+        &state.sse_manager,
         &session_id,
         &body.prompt,
     )
@@ -159,6 +164,240 @@ pub async fn send_prompt(
             data: serde_json::json!({ "message_id": message_id }),
         }),
     ))
+}
+
+/// GET /api/sessions/{sid}/stream
+///
+/// Returns an SSE stream for the session. Supports `Last-Event-ID` header
+/// for reconnection replay. Events are: connected, text_delta,
+/// tool_use_start, tool_use_delta, tool_result, thinking, done, error, gap.
+/// Heartbeat comments are sent every 15s via `keep_alive`.
+pub async fn session_stream(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    // Verify session exists — send error event and close if not found.
+    // We can't return AppError here because Sse requires a Stream, not a Result.
+    let session_exists =
+        crate::store::sessions::SessionStore::get_by_id(&state.db, &session_id).is_ok();
+
+    let last_event_id: Option<u64> = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let sse_manager = state.sse_manager.clone();
+    let sid = session_id.clone();
+
+    // Strategy: subscribe first (so we don't miss events), then read buffer.
+    // Events that arrive between subscribe and buffer read will be in both
+    // the buffer and the receiver. We deduplicate by tracking the max buffered
+    // ID and skipping receiver events with ID <= max_buffered_id in Live state.
+    let sse_stream = stream::unfold(
+        (
+            sse_manager,
+            sid,
+            last_event_id,
+            SseState::Initial,
+            session_exists,
+        ),
+        |(mgr, sid, last_id, state, session_exists)| async move {
+            match state {
+                SseState::Initial => {
+                    // If session doesn't exist, send error event and close
+                    if !session_exists {
+                        let error_event = make_sse_event(
+                            None,
+                            "error",
+                            &serde_json::to_string(&SseWireEvent::Error {
+                                message: "session not found".into(),
+                            })
+                            .unwrap_or_default(),
+                        );
+                        return Some((Ok(error_event), (mgr, sid, last_id, SseState::Done, false)));
+                    }
+
+                    // Subscribe first to avoid missing events
+                    let rx = mgr.subscribe(&sid);
+
+                    // Send connected event (no ID — protocol event, not part of replay)
+                    let connected = make_sse_event(
+                        None,
+                        "connected",
+                        &crate::sse::sse_data(&SseWireEvent::Connected {
+                            session_id: sid.clone(),
+                        }),
+                    );
+
+                    // Read buffered events for replay
+                    let buffered: Vec<_> = if let Some(after_id) = last_id {
+                        mgr.get_after(&sid, after_id)
+                    } else {
+                        mgr.get_after(&sid, 0)
+                    };
+                    let max_id = buffered.last().map(|e| e.id).unwrap_or(0);
+
+                    // Check for gap (reconnection with missing events)
+                    if let Some(after_id) = last_id {
+                        let expected_next = after_id + 1;
+                        let first_buffered = buffered.first().map(|e| e.id).unwrap_or(0);
+                        if !buffered.is_empty() && first_buffered > expected_next {
+                            let gap = make_sse_event(
+                                None,
+                                "gap",
+                                &serde_json::to_string(&SseWireEvent::Gap {
+                                    missed: first_buffered - expected_next,
+                                })
+                                .unwrap_or_default(),
+                            );
+                            return Some((
+                                Ok(connected),
+                                (
+                                    mgr,
+                                    sid,
+                                    last_id,
+                                    SseState::Gap(gap, buffered, 0, rx, max_id),
+                                    true,
+                                ),
+                            ));
+                        }
+                    }
+
+                    if !buffered.is_empty() {
+                        Some((
+                            Ok(connected),
+                            (
+                                mgr,
+                                sid,
+                                last_id,
+                                SseState::Buffered(buffered, 0, rx, max_id),
+                                true,
+                            ),
+                        ))
+                    } else {
+                        Some((
+                            Ok(connected),
+                            (mgr, sid, last_id, SseState::Live(rx, max_id), true),
+                        ))
+                    }
+                }
+                SseState::Gap(gap_event, buffered, idx, rx, max_id) => Some((
+                    Ok(gap_event),
+                    (
+                        mgr,
+                        sid,
+                        last_id,
+                        SseState::Buffered(buffered, idx, rx, max_id),
+                        true,
+                    ),
+                )),
+                SseState::Buffered(buffered, idx, rx, max_id) => {
+                    if idx < buffered.len() {
+                        let entry = &buffered[idx];
+                        let event = make_sse_event(Some(entry.id), &entry.event_type, &entry.data);
+                        Some((
+                            Ok(event),
+                            (
+                                mgr,
+                                sid,
+                                last_id,
+                                SseState::Buffered(buffered, idx + 1, rx, max_id),
+                                true,
+                            ),
+                        ))
+                    } else {
+                        // Buffered events done — transition to live with dedup threshold
+                        Some((
+                            Ok(make_sse_event(None, "buffered_complete", "{}")),
+                            (mgr, sid, last_id, SseState::Live(rx, max_id), true),
+                        ))
+                    }
+                }
+                SseState::Live(mut rx, max_buffered_id) => {
+                    // Loop to skip events already sent from buffer (deduplication)
+                    loop {
+                        match rx.recv().await {
+                            Ok(wire_event) => {
+                                // Get the event ID — it was the previous broadcast,
+                                // so its ID is current_id - 1
+                                let current_id = mgr.get_current_id(&sid);
+                                let event_id = current_id.saturating_sub(1);
+
+                                // Deduplicate: skip events already replayed from buffer
+                                if event_id <= max_buffered_id {
+                                    continue;
+                                }
+
+                                let event_type = wire_event.event_type().to_string();
+                                let data = crate::sse::sse_data(&wire_event);
+                                let event = make_sse_event(Some(event_id), &event_type, &data);
+                                break Some((
+                                    Ok(event),
+                                    (mgr, sid, last_id, SseState::Live(rx, max_buffered_id), true),
+                                ));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                let gap = make_sse_event(
+                                    None,
+                                    "gap",
+                                    &serde_json::to_string(&SseWireEvent::Gap { missed: n })
+                                        .unwrap_or_default(),
+                                );
+                                break Some((
+                                    Ok(gap),
+                                    (mgr, sid, last_id, SseState::Live(rx, max_buffered_id), true),
+                                ));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+                        }
+                    }
+                }
+                SseState::Done => None,
+            }
+        },
+    );
+
+    Sse::new(sse_stream).keep_alive(KeepAlive::default())
+}
+
+/// SSE stream state machine for event replay and live streaming.
+///
+/// The `max_id` field (present on `Gap`, `Buffered`, and `Live`) tracks the
+/// highest buffered event ID. When transitioning to `Live`, events from the
+/// broadcast receiver with ID <= max_id are skipped (they were already replayed
+/// from the buffer).
+enum SseState {
+    /// Initial state — subscribe, send connected, determine replay path
+    Initial,
+    /// Sending a gap event before buffered replay
+    Gap(
+        Event,
+        Vec<crate::sse::BufferedEvent>,
+        usize,
+        tokio::sync::broadcast::Receiver<SseWireEvent>,
+        u64,
+    ),
+    /// Replaying buffered events
+    Buffered(
+        Vec<crate::sse::BufferedEvent>,
+        usize,
+        tokio::sync::broadcast::Receiver<SseWireEvent>,
+        u64,
+    ),
+    /// Streaming live events (with deduplication threshold)
+    Live(tokio::sync::broadcast::Receiver<SseWireEvent>, u64),
+    /// Terminal state — stream ended
+    Done,
+}
+
+/// Helper to construct an SSE `Event` with optional ID, event type, and data.
+fn make_sse_event(id: Option<u64>, event_type: &str, data: &str) -> Event {
+    let mut event = Event::default().event(event_type).data(data);
+    if let Some(id) = id {
+        event = event.id(id.to_string());
+    }
+    event
 }
 
 /// POST /api/sessions/{sid}/cancel
@@ -195,10 +434,12 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let state = AppState {
             db: db.clone(),
             registry,
             active_sessions,
+            sse_manager,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 
@@ -226,6 +467,10 @@ mod tests {
             .route(
                 "/api/sessions/{sid}/cancel",
                 axum::routing::post(cancel_session),
+            )
+            .route(
+                "/api/sessions/{sid}/stream",
+                axum::routing::get(session_stream),
             )
             .layer(axum::Extension(state))
             .layer(axum::Extension(start_time));

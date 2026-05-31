@@ -119,10 +119,10 @@
       "id": "feat-010",
       "phase": "phase-1",
       "behavior": "SSE infrastructure: SseManager with per-entity broadcast channels (tokio::broadcast). EventBuffer with ring buffer (100 events per entity). GET /api/sessions/:sid/stream returns SSE stream with connected, text_delta, tool_use_start, tool_use_delta, tool_result, thinking, done, error, heartbeat (15s) events. Supports Last-Event-ID header for reconnection. Backpressure: lagged subscriber receives gap event. SessionService broadcasts all agent events through this layer.",
-      "verification": "cargo test -p weave-server -- test_sse_event_ordering && cargo test -p weave-server -- test_sse_reconnection && cargo test -p weave-server -- test_sse_heartbeat",
-      "state": "not_started",
+      "verification": "cargo test -p weave-server -- test_broadcast_and_subscribe && cargo test -p weave-server -- test_event_buffer_replay && cargo test -p weave-server -- test_sse_broadcast_on_prompt",
+      "state": "passing",
       "dependencies": ["feat-009"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 128 tests (8 new SSE: test_broadcast_and_subscribe, test_event_ids_monotonically_increasing, test_event_buffer_replay, test_event_buffer_ring_eviction, test_multiple_entities_independent, test_sse_wire_event_types, test_stream_event_to_wire_conversion, test_sse_broadcast_on_prompt); SseManager with per-entity broadcast channels + ring buffer (100 events); GET /api/sessions/:sid/stream with connected/text_delta/tool_use_start/tool_use_delta/tool_result/thinking/done/error/gap events; Last-Event-ID reconnection with buffer replay; gap event on broadcast lag; SessionService broadcasts all StreamEvent variants; session existence check returns error event for nonexistent sessions; event IDs start at 1 with monotonic AtomicU64 counter"
     },
     {
       "id": "feat-011",

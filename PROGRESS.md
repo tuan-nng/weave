@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-009)
+- **Latest commit:** (pending — feat-010)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 120 tests pass (17 new for feat-009 + 103 existing)
+- **Test status:** green — 128 tests pass (8 new for feat-010 + 120 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -29,6 +29,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-007**: ProviderStore + ProviderRegistry (CRUD, agent lifecycle, API with api_key stripping)
 - [x] **feat-008**: SessionStore + MessageStore (session state machine, message pagination, session API)
 - [x] **feat-009**: SessionService (prompt lifecycle, async streaming, cancellation, message history)
+- [x] **feat-010**: SSE infrastructure (SseManager, EventBuffer, SSE endpoint, reconnection, backpressure)
 
 ## In Progress
 
@@ -44,28 +45,27 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-010: SSE infrastructure (depends on feat-009 — now passing)
-2. Continue Phase 1 (Core Foundation): feat-010 is the last Phase 1 feature
+1. Start feat-011: SpecialistLoader (depends on feat-009 — passing)
+2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Notes for Next Session
 
-- feat-009 created: `src/service/mod.rs`, `src/service/sessions.rs`
-- `ActiveSessions` is a `Mutex<HashMap<String, CancellationToken>>` wrapper with atomic `try_insert` (TOCTOU-safe)
-- `SessionService` is a unit struct with `send_prompt` (async) and `cancel_session` (sync)
-- `send_prompt` returns user message ID immediately, spawns async task for streaming
-- Cancel uses `tokio::sync::CancellationToken` with `tokio::select!` for instant cancellation
-- `SessionGuard` drop pattern ensures `active_sessions.remove()` runs even on panic
-- Content stored as raw text (no JSON encoding) — consistent between user and assistant messages
-- `build_message_history` converts store messages to agent format as `Content::Text`
-- `resolve_model` chain: session.model → provider config default_model → hardcoded fallback
-- `abort_with_error` helper deduplicates error-handling blocks in the spawned task
-- `load_all_messages` has MAX_HISTORY_MESSAGES=1000 cap
-- API routes: `POST /api/sessions/:sid/prompt`, `POST /api/sessions/:sid/cancel`
-- `send_prompt` returns 201 CREATED (consistent with other POST endpoints)
-- `TERMINAL` const in `store/sessions.rs` made `pub(crate)` for service access
-- `tokio-stream` added as dev-dependency for mock agent test
-- `tokio-util` added as dependency for `CancellationToken`
-- feat-010 (SSE infrastructure) depends on feat-009 — now passing, can start immediately
+- feat-010 created: `src/sse/mod.rs`
+- `SseManager` holds per-entity `broadcast::channel(256)` + `EventBuffer` (ring buffer, 100 events) + `AtomicU64` counter
+- Event IDs start at 1 (not 0) — `get_after(0)` returns all buffered events
+- `SseWireEvent` enum wraps `StreamEvent` variants + `Connected`/`Gap` SSE-protocol events
+- `stream_event_to_wire()` converts agent events to wire format
+- `session_stream` handler uses `stream::unfold` with `SseState` state machine (Initial → Gap/Buffered/Live → Done)
+- Deduplication: subscribe first, read buffer, track `max_buffered_id`, skip receiver events with ID ≤ max_buffered_id
+- `make_sse_event(id, event_type, data)` sets `.id()` on every event for `Last-Event-ID` support
+- Session existence check: nonexistent sessions get an error event + stream close (not 404 — SSE can't return HTTP errors)
+- `SessionService::send_prompt` now accepts `&Arc<sse::SseManager>` and broadcasts every `StreamEvent` via `sse::stream_event_to_wire()`
+- Cancellation broadcasts `Done { stop_reason: Cancelled }` before updating session status
+- Heartbeat: `Sse::new(stream).keep_alive(KeepAlive::default())` sends SSE comment lines every 15s
+- `AppState` now has `sse_manager: Arc<sse::SseManager>` field
+- `ActiveSessions` + `SseManager` are separate types — `ActiveSessions` tracks cancellation tokens, `SseManager` handles broadcast/buffer
+- TOCTOU race in `broadcast()` fixed: single write lock for channel creation
+- Phase 1 (Core Foundation) is now complete — all 10 features passing
 
 ## Out-of-Scope Items Noticed
 
