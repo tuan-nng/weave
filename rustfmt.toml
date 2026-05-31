@@ -1,0 +1,25 @@
+# Weave — Rust formatting configuration
+# Docs: https://rust-lang.github.io/rustfmt/
+# Only stable options are used here
+
+# Edition (matches Cargo.toml)
+edition = "2021"
+
+# Maximum line width
+max_width = 100
+
+# Imports
+reorder_imports = true
+
+# Modules
+reorder_modules = true
+
+# Structs
+struct_lit_width = 18
+
+# Fn
+fn_params_layout = "Tall"
+
+# Heuristics
+use_field_init_shorthand = true
+use_try_shorthand = true

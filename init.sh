@@ -31,32 +31,20 @@ step() { echo ""; echo "=== $* ==="; }
 
 # ---------- Dependency setup ----------
 step "Installing dependencies"
-cargo fetch || fail 1 "Rust dependency fetch failed. Check Cargo.toml and network connectivity."
-
-if [ -d "web" ] && [ -f "web/package.json" ]; then
-  (cd web && npm ci) || fail 1 "Frontend dependency install failed. Check web/package-lock.json is committed."
-fi
+just setup || fail 1 "Dependency setup failed. Check Cargo.toml, network connectivity, and web/package.json."
 
 # ---------- Layer 1: Static ----------
 step "Layer 1 — Static checks (lint, format)"
-cargo clippy -p weave-server -- -D warnings 2>&1 || fail 1 "Clippy warnings found. Run 'cargo clippy -p weave-server' to see details. Fix all warnings before proceeding."
-cargo fmt --check || fail 1 "Rust formatting issues. Run 'cargo fmt' to auto-fix."
-
-if [ -d "web" ] && [ -f "web/package.json" ]; then
-  (cd web && npm run lint) || fail 1 "Frontend lint failed. Run 'cd web && npm run lint' to see details."
-fi
+just lint || fail 1 "Lint failed. Run 'just lint' to see details. Fix all warnings before proceeding."
+just fmt || fail 1 "Formatting issues. Run 'just fmt-fix' to auto-fix."
 
 # ---------- Layer 2: Behavior ----------
 step "Layer 2 — Behavior (unit + integration tests)"
-cargo test -p weave-server 2>&1 || fail 2 "Rust tests failed. Run 'cargo test -p weave-server' to see specifics. Do NOT proceed to Layer 3 until green."
-
-if [ -d "web" ] && [ -f "web/package.json" ]; then
-  (cd web && npm test) || fail 2 "Frontend tests failed. Run 'cd web && npm test' to see specifics."
-fi
+just test || fail 2 "Tests failed. Run 'just test' to see specifics. Do NOT proceed to Layer 3 until green."
 
 # ---------- Layer 3: System ----------
 step "Layer 3 — System (build + smoke test)"
-cargo build -p weave-server 2>&1 || fail 3 "Binary build failed. Compilation error — fix and retry."
+just build-debug || fail 3 "Binary build failed. Compilation error — fix and retry."
 
 # Smoke test: start server, check health endpoint, stop
 if [ -f "target/debug/weave-server" ]; then

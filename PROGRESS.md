@@ -48,6 +48,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 1. Start feat-011: SpecialistLoader (depends on feat-009 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
+## Session Notes
+
+### 2026-05-31 — Linter/formatter config added
+- Added `rustfmt.toml` — stable options only (edition 2021, max_width 100, import reordering)
+- Added `clippy.toml` — complexity thresholds (cognitive 25, lines 150, args 8), test allowances
+- Added `.cargo/config.toml` — placeholder for future lint additions
+- All 128 tests pass, clippy clean, fmt clean, smoke test passes
+
 ## Notes for Next Session
 
 - feat-010 created: `src/sse/mod.rs`

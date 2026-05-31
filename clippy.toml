@@ -1,0 +1,32 @@
+# Weave — Clippy configuration
+# Docs: https://doc.rust-lang.org/clippy/configuration.html
+
+# Cognitive complexity threshold for functions
+cognitive-complexity-threshold = 25
+
+# Maximum number of function lines
+too-many-lines-threshold = 150
+
+# Type complexity threshold
+type-complexity-threshold = 250
+
+# Maximum number of function arguments
+too-many-arguments-threshold = 8
+
+# Single-character binding names that are allowed
+allowed-idents-below-min-chars = ["i", "j", "x", "y"]
+
+# Minimum supported Rust version
+msrv = "1.75"
+
+# Allow panic in tests
+allow-panic-in-tests = true
+
+# Allow unwrap in tests
+allow-unwrap-in-tests = true
+
+# Allow expect in tests
+allow-expect-in-tests = true
+
+# Suppress lints for specific macros
+allowed-wildcard-imports = []

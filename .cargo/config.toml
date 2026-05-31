@@ -1,0 +1,8 @@
+# Weave — Cargo configuration
+# Docs: https://doc.rust-lang.org/cargo/reference/config.html
+
+# Clippy configuration
+[target.'cfg(all())']
+rustflags = [
+    # Additional lints beyond defaults can be added here as the codebase matures
+]
