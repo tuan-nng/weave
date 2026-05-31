@@ -53,6 +53,14 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             "/api/sessions/{sid}/history",
             get(sessions::get_session_history),
         )
+        .route(
+            "/api/sessions/{sid}/prompt",
+            axum::routing::post(sessions::send_prompt),
+        )
+        .route(
+            "/api/sessions/{sid}/cancel",
+            axum::routing::post(sessions::cancel_session),
+        )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))
 }

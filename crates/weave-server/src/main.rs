@@ -3,6 +3,7 @@ mod api;
 mod config;
 mod db;
 mod error;
+mod service;
 mod store;
 
 use clap::Parser;
@@ -17,6 +18,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 pub struct AppState {
     pub db: Arc<db::Db>,
     pub registry: Arc<agent::registry::ProviderRegistry>,
+    pub active_sessions: Arc<service::ActiveSessions>,
 }
 
 #[tokio::main]
@@ -59,7 +61,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5. Build the API router
-    let state = AppState { db, registry };
+    let active_sessions = Arc::new(service::ActiveSessions::new());
+    let state = AppState {
+        db,
+        registry,
+        active_sessions,
+    };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);
 

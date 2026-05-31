@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-008)
+- **Latest commit:** (pending — feat-009)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 103 tests pass (18 new for feat-008 + 85 existing)
+- **Test status:** green — 120 tests pass (17 new for feat-009 + 103 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -28,6 +28,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-006**: AnthropicAgent (SSE streaming, error mapping, retry logic, message conversion)
 - [x] **feat-007**: ProviderStore + ProviderRegistry (CRUD, agent lifecycle, API with api_key stripping)
 - [x] **feat-008**: SessionStore + MessageStore (session state machine, message pagination, session API)
+- [x] **feat-009**: SessionService (prompt lifecycle, async streaming, cancellation, message history)
 
 ## In Progress
 
@@ -43,23 +44,28 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-009: SessionService (depends on feat-008 — now passing)
-2. Continue Phase 1 (Core Foundation): feat-010
+1. Start feat-010: SSE infrastructure (depends on feat-009 — now passing)
+2. Continue Phase 1 (Core Foundation): feat-010 is the last Phase 1 feature
 
 ## Notes for Next Session
 
-- feat-008 created: `src/store/sessions.rs`, `src/api/sessions.rs`
-- `SessionStore` is a unit struct with CRUD + state machine enforcement
-- State machine: `connecting` -> `ready` -> `completed`/`cancelled`/`error`; terminal states are final
-- State machine enforcement is atomic via SQL `WHERE status NOT IN (...)` — no TOCTOU race
-- `VALID_STATUSES` constant validates target status against known values
-- `MessageStore` is immutable (create + list only, no update/delete)
-- Message pagination uses `id` cursor (consistent with session pagination), not `created_at`
-- FK violation for `provider_id` caught via `map_fk_violation` (extended code 787)
-- `seed_deps` test helper is `pub(crate)` in `store::sessions::tests` for reuse by API tests
-- `ListParams::effective_limit()` deduplicates pagination limit logic
-- API routes: `POST /api/workspaces/{wid}/sessions`, `GET /api/workspaces/{wid}/sessions`, `GET /api/sessions/{id}`, `PATCH /api/sessions/{id}`, `DELETE /api/sessions/{id}`, `GET /api/sessions/{sid}/history`
-- feat-009 (SessionService) depends on feat-008 — now passing, can start immediately
+- feat-009 created: `src/service/mod.rs`, `src/service/sessions.rs`
+- `ActiveSessions` is a `Mutex<HashMap<String, CancellationToken>>` wrapper with atomic `try_insert` (TOCTOU-safe)
+- `SessionService` is a unit struct with `send_prompt` (async) and `cancel_session` (sync)
+- `send_prompt` returns user message ID immediately, spawns async task for streaming
+- Cancel uses `tokio::sync::CancellationToken` with `tokio::select!` for instant cancellation
+- `SessionGuard` drop pattern ensures `active_sessions.remove()` runs even on panic
+- Content stored as raw text (no JSON encoding) — consistent between user and assistant messages
+- `build_message_history` converts store messages to agent format as `Content::Text`
+- `resolve_model` chain: session.model → provider config default_model → hardcoded fallback
+- `abort_with_error` helper deduplicates error-handling blocks in the spawned task
+- `load_all_messages` has MAX_HISTORY_MESSAGES=1000 cap
+- API routes: `POST /api/sessions/:sid/prompt`, `POST /api/sessions/:sid/cancel`
+- `send_prompt` returns 201 CREATED (consistent with other POST endpoints)
+- `TERMINAL` const in `store/sessions.rs` made `pub(crate)` for service access
+- `tokio-stream` added as dev-dependency for mock agent test
+- `tokio-util` added as dependency for `CancellationToken`
+- feat-010 (SSE infrastructure) depends on feat-009 — now passing, can start immediately
 
 ## Out-of-Scope Items Noticed
 

@@ -111,9 +111,9 @@
       "phase": "phase-1",
       "behavior": "SessionService orchestrates session lifecycle. send_prompt: validates session status, saves user message, loads specialist system prompt (if set), builds message history, resolves tool set (initially empty), calls agent.send_message, spawns async task that streams events -> broadcasts to SSE channel -> accumulates response -> saves assistant message -> updates session status. POST /api/sessions/:sid/prompt returns message_id immediately. POST /api/sessions/:sid/cancel aborts the agent stream.",
       "verification": "cargo test -p weave-server -- test_send_prompt_flow && cargo test -p weave-server -- test_cancel_session",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-008"],
-      "evidence": ""
+      "evidence": "commit bc4ecea; init.sh all 3 layers pass; 120 tests (17 new: 10 service/sessions + 5 api/sessions + 2 shared); test_send_prompt_flow (user message saved with raw content, message_id returned); test_cancel_session (API rejects non-active); test_cancel_session_with_mock_agent (full cancel flow: send prompt, cancel, session status becomes cancelled, removed from active set)"
     },
     {
       "id": "feat-010",

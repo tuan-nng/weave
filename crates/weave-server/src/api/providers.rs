@@ -142,7 +142,12 @@ mod tests {
         let db = std::sync::Arc::new(Db::open(Path::new(":memory:")).unwrap());
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
-        let state = AppState { db, registry };
+        let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let state = AppState {
+            db,
+            registry,
+            active_sessions,
+        };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 
         Router::new()
@@ -454,9 +459,11 @@ mod tests {
         let db = std::sync::Arc::new(Db::open(Path::new(":memory:")).unwrap());
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
+        let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
         let state = AppState {
             db: db.clone(),
             registry,
+            active_sessions,
         };
 
         // Insert provider into this DB

@@ -62,9 +62,8 @@ pub struct MessagePage {
 const VALID_STATUSES: &[&str] = &["connecting", "ready", "completed", "cancelled", "error"];
 
 /// Terminal states — no transitions out.
-/// Used in SQL WHERE clause and for documentation.
-#[allow(dead_code)]
-const TERMINAL: &[&str] = &["completed", "cancelled", "error"];
+/// Used in SQL WHERE clause and by SessionService for validation.
+pub(crate) const TERMINAL: &[&str] = &["completed", "cancelled", "error"];
 
 // ---------------------------------------------------------------------------
 // SessionStore
@@ -274,7 +273,6 @@ pub struct MessageStore;
 
 impl MessageStore {
     /// Insert a new message. Returns the created row.
-    #[allow(dead_code)] // Will be used by SessionService (feat-009)
     pub fn create(
         db: &Db,
         session_id: &str,

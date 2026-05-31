@@ -40,6 +40,11 @@ pub struct UpdateStatusRequest {
     pub status: String,
 }
 
+#[derive(Deserialize)]
+pub struct PromptRequest {
+    pub prompt: String,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -130,6 +135,46 @@ pub async fn get_session_history(
     Ok(Json(DataResponse { data: page }))
 }
 
+/// POST /api/sessions/{sid}/prompt
+///
+/// Returns `{"data": {"message_id": "..."}}` immediately. Spawns an async
+/// task that streams the agent response and saves the assistant message.
+pub async fn send_prompt(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<PromptRequest>,
+) -> Result<(StatusCode, Json<DataResponse<serde_json::Value>>), AppError> {
+    let message_id = crate::service::sessions::SessionService::send_prompt(
+        &state.db,
+        &state.registry,
+        &state.active_sessions,
+        &session_id,
+        &body.prompt,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(DataResponse {
+            data: serde_json::json!({ "message_id": message_id }),
+        }),
+    ))
+}
+
+/// POST /api/sessions/{sid}/cancel
+///
+/// Cancels an active streaming task for the session.
+pub async fn cancel_session(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<DataResponse<serde_json::Value>>, AppError> {
+    crate::service::sessions::SessionService::cancel_session(&state.active_sessions, &session_id)?;
+
+    Ok(Json(DataResponse {
+        data: serde_json::json!({ "status": "cancelled" }),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -149,9 +194,11 @@ mod tests {
         let db = std::sync::Arc::new(Db::open(Path::new(":memory:")).unwrap());
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
+        let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
         let state = AppState {
             db: db.clone(),
             registry,
+            active_sessions,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 
@@ -171,6 +218,14 @@ mod tests {
             .route(
                 "/api/sessions/{sid}/history",
                 axum::routing::get(get_session_history),
+            )
+            .route(
+                "/api/sessions/{sid}/prompt",
+                axum::routing::post(send_prompt),
+            )
+            .route(
+                "/api/sessions/{sid}/cancel",
+                axum::routing::post(cancel_session),
             )
             .layer(axum::Extension(state))
             .layer(axum::Extension(start_time));
@@ -409,5 +464,108 @@ mod tests {
         let json = extract_json(&body);
         let items = json["data"]["data"].as_array().unwrap();
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_empty_body() {
+        let (app, ws_id, provider_id) = test_app();
+
+        // Create a session first
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/workspaces/{}/sessions", ws_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"{}"}}"#,
+                        provider_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let session_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Send empty prompt — should fail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/prompt", session_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_session_not_found() {
+        let (app, _, _) = test_app();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/nonexistent/prompt")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_session_not_active() {
+        let (app, ws_id, provider_id) = test_app();
+
+        // Create a session
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/workspaces/{}/sessions", ws_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"provider_id":"{}"}}"#,
+                        provider_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let session_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Cancel without active prompt — should fail
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{}/cancel", session_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

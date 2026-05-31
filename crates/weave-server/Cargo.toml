@@ -38,6 +38,9 @@ async-trait = "0.1"
 # Stream trait
 futures-core = "0.3"
 
+# Cancellation tokens for async tasks
+tokio-util = "0.7"
+
 # HTTP client (for provider communication)
 reqwest = { version = "0.12", features = ["json", "stream"] }
 bytes = "1"
@@ -48,3 +51,4 @@ rusqlite = { version = "0.35", features = ["bundled"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }

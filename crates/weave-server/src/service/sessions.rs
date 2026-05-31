@@ -1,0 +1,729 @@
+use std::sync::Arc;
+
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
+
+use crate::agent::registry::ProviderRegistry;
+use crate::agent::{self, MessageRequest};
+use crate::db::Db;
+use crate::error::AppError;
+use crate::store::providers::ProviderStore;
+use crate::store::sessions::{MessageStore, SessionStore};
+
+use super::ActiveSessions;
+
+/// Default max tokens for agent responses.
+const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// Hardcoded fallback model when neither session nor provider specifies one.
+const FALLBACK_MODEL: &str = "claude-sonnet-4-20250514";
+
+/// Maximum number of messages loaded into conversation history.
+const MAX_HISTORY_MESSAGES: usize = 1000;
+
+/// Stateless service that orchestrates session prompt lifecycle.
+///
+/// Validates session state, persists messages, spawns streaming tasks,
+/// and supports cancellation. Mirrors the store pattern (unit struct,
+/// static methods) but operates at a higher abstraction level.
+pub struct SessionService;
+
+impl SessionService {
+    /// Send a prompt to a session.
+    ///
+    /// Returns the user message ID immediately. Spawns an async task that
+    /// streams the agent response, accumulates text, and saves the assistant
+    /// message when complete.
+    pub async fn send_prompt(
+        db: &Arc<Db>,
+        registry: &Arc<ProviderRegistry>,
+        active: &Arc<ActiveSessions>,
+        session_id: &str,
+        prompt: &str,
+    ) -> Result<String, AppError> {
+        // Validate prompt is non-empty
+        if prompt.trim().is_empty() {
+            return Err(AppError::Validation("prompt cannot be empty".into()));
+        }
+
+        // Validate session exists and is in a non-terminal state
+        let session = SessionStore::get_by_id(db, session_id)?;
+        if crate::store::sessions::TERMINAL.contains(&session.status.as_str()) {
+            return Err(AppError::Validation(format!(
+                "cannot send prompt to session in '{}' status",
+                session.status
+            )));
+        }
+
+        // Atomically check-and-insert to prevent TOCTOU race
+        let cancel_token = CancellationToken::new();
+        if !active.try_insert(session_id.to_string(), cancel_token.clone()) {
+            return Err(AppError::Conflict(
+                "session already has an active prompt".into(),
+            ));
+        }
+
+        // Save user message (raw text, no JSON encoding)
+        let user_msg = MessageStore::create(db, session_id, "user", prompt, None)?;
+
+        // Spawn the streaming task
+        let task_db = Arc::clone(db);
+        let task_registry = Arc::clone(registry);
+        let task_active = Arc::clone(active);
+        let task_session = session;
+
+        tokio::spawn(async move {
+            run_prompt_task(
+                task_db,
+                task_registry,
+                task_active,
+                task_session,
+                cancel_token,
+            )
+            .await;
+        });
+
+        Ok(user_msg.id)
+    }
+
+    /// Cancel an active session's streaming task.
+    pub fn cancel_session(active: &Arc<ActiveSessions>, session_id: &str) -> Result<(), AppError> {
+        match active.get(session_id) {
+            Some(token) => {
+                token.cancel();
+                Ok(())
+            }
+            None => Err(AppError::Validation(
+                "session is not actively streaming".into(),
+            )),
+        }
+    }
+
+    /// Convert stored messages into the agent's `Message` format.
+    ///
+    /// For feat-009, content is always treated as `Content::Text` since
+    /// tool execution (structured blocks) is not yet active.
+    fn build_message_history(messages: &[crate::store::sessions::Message]) -> Vec<agent::Message> {
+        messages
+            .iter()
+            .map(|m| {
+                let role = match m.role.as_str() {
+                    "user" => agent::Role::User,
+                    "assistant" => agent::Role::Assistant,
+                    // Treat unknown roles as user (shouldn't happen in practice)
+                    _ => agent::Role::User,
+                };
+                agent::Message {
+                    role,
+                    content: agent::Content::Text(m.content.clone()),
+                }
+            })
+            .collect()
+    }
+
+    /// Resolve the model to use for an agent request.
+    ///
+    /// Priority: session.model → provider default_model → hardcoded fallback.
+    fn resolve_model(session: &crate::store::sessions::Session, db: &Db) -> String {
+        // 1. Session-level override
+        if let Some(ref model) = session.model {
+            if !model.is_empty() {
+                return model.clone();
+            }
+        }
+
+        // 2. Provider default_model from config_json
+        match ProviderStore::get_by_id(db, &session.provider_id) {
+            Ok(provider) => {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&provider.config_json)
+                {
+                    if let Some(model) = config.get("default_model").and_then(|v| v.as_str()) {
+                        return model.to_string();
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to load provider for model resolution, using fallback"
+                );
+            }
+        }
+
+        // 3. Hardcoded fallback
+        FALLBACK_MODEL.to_string()
+    }
+}
+
+/// Log an error, transition the session to error status.
+fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, msg: &str) {
+    error!(session_id, error = %e, msg);
+    let _ = SessionStore::update_status(db, session_id, "error");
+}
+
+/// The spawned task that streams the agent response and persists the result.
+async fn run_prompt_task(
+    db: Arc<Db>,
+    registry: Arc<ProviderRegistry>,
+    active: Arc<ActiveSessions>,
+    session: crate::store::sessions::Session,
+    cancel_token: CancellationToken,
+) {
+    let session_id = &session.id;
+
+    // Ensure we always clean up the active session entry
+    let _guard = SessionGuard {
+        active: Arc::clone(&active),
+        session_id: session_id.to_string(),
+    };
+
+    // Transition connecting -> ready if needed
+    if session.status == "connecting" {
+        if let Err(e) = SessionStore::update_status(&db, session_id, "ready") {
+            abort_with_error(&db, session_id, e, "failed to transition session to ready");
+            return;
+        }
+    }
+
+    // Load message history
+    let messages = match load_all_messages(&db, session_id) {
+        Ok(msgs) => msgs,
+        Err(e) => {
+            abort_with_error(&db, session_id, e, "failed to load message history");
+            return;
+        }
+    };
+    let history = SessionService::build_message_history(&messages);
+
+    // Resolve model
+    let model = SessionService::resolve_model(&session, &db);
+
+    // Get the agent from the registry
+    let agent = match registry.get_agent(&session.provider_id) {
+        Ok(a) => a,
+        Err(e) => {
+            abort_with_error(&db, session_id, e, "failed to get agent from registry");
+            return;
+        }
+    };
+
+    // Call the agent
+    let stream = match agent
+        .send_message(MessageRequest {
+            model,
+            messages: history,
+            system: None,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            tools: None,
+        })
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            abort_with_error(&db, session_id, e, "agent send_message failed");
+            return;
+        }
+    };
+
+    // Stream and accumulate with cancellation support
+    use futures_util::StreamExt;
+
+    let mut accumulated = String::new();
+    let mut stream = stream;
+    let mut had_error = false;
+
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                info!(session_id, "session cancelled by user");
+                let _ = SessionStore::update_status(&db, session_id, "cancelled");
+                return;
+            }
+            item = StreamExt::next(&mut stream) => {
+                match item {
+                    Some(Ok(event)) => match event {
+                        agent::StreamEvent::TextDelta { text } => {
+                            accumulated.push_str(&text);
+                        }
+                        agent::StreamEvent::Done { .. } => {
+                            break;
+                        }
+                        agent::StreamEvent::Error { message } => {
+                            error!(session_id, error = %message, "agent stream error");
+                            had_error = true;
+                            break;
+                        }
+                        // Ignore tool/thinking events (not active in feat-009)
+                        _ => {}
+                    },
+                    Some(Err(e)) => {
+                        error!(session_id, error = %e, "agent stream provider error");
+                        had_error = true;
+                        break;
+                    }
+                    None => {
+                        // Stream ended without a Done event
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check cancellation after loop (race between Done and Cancel)
+    if cancel_token.is_cancelled() {
+        info!(session_id, "session cancelled by user (after stream end)");
+        let _ = SessionStore::update_status(&db, session_id, "cancelled");
+        return;
+    }
+
+    // Save assistant message if we have content
+    if !accumulated.is_empty() {
+        if let Err(e) = MessageStore::create(&db, session_id, "assistant", &accumulated, None) {
+            abort_with_error(&db, session_id, e, "failed to save assistant message");
+            return;
+        }
+    }
+
+    // Update final session status
+    let final_status = if had_error { "error" } else { "completed" };
+    if let Err(e) = SessionStore::update_status(&db, session_id, final_status) {
+        error!(session_id, error = %e, "failed to update session to {}", final_status);
+    }
+}
+
+/// Load all messages for a session (paginated, up to MAX_HISTORY_MESSAGES).
+fn load_all_messages(
+    db: &Db,
+    session_id: &str,
+) -> Result<Vec<crate::store::sessions::Message>, AppError> {
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let page = MessageStore::list_by_session(db, session_id, cursor.as_deref(), 100)?;
+        let has_more = page.cursor.is_some();
+        cursor = page.cursor;
+        all.extend(page.data);
+        if !has_more || all.len() >= MAX_HISTORY_MESSAGES {
+            break;
+        }
+    }
+
+    all.truncate(MAX_HISTORY_MESSAGES);
+    Ok(all)
+}
+
+/// Drop guard that ensures `active_sessions.remove()` is called even on panic.
+struct SessionGuard {
+    active: Arc<ActiveSessions>,
+    session_id: String,
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.active.remove(&self.session_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::sessions::tests::seed_deps;
+
+    fn test_db() -> Arc<Db> {
+        Arc::new(Db::open(std::path::Path::new(":memory:")).unwrap())
+    }
+
+    fn test_state() -> (Arc<Db>, Arc<ProviderRegistry>, Arc<ActiveSessions>) {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        (db, registry, active)
+    }
+
+    #[test]
+    fn test_build_message_history_user_only() {
+        let messages = vec![crate::store::sessions::Message {
+            id: "1".into(),
+            session_id: "s1".into(),
+            role: "user".into(),
+            content: "hello".into(),
+            metadata: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }];
+
+        let history = SessionService::build_message_history(&messages);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, agent::Role::User);
+        match &history[0].content {
+            agent::Content::Text(t) => assert_eq!(t, "hello"),
+            _ => panic!("expected Content::Text"),
+        }
+    }
+
+    #[test]
+    fn test_build_message_history_mixed_roles() {
+        let messages = vec![
+            crate::store::sessions::Message {
+                id: "1".into(),
+                session_id: "s1".into(),
+                role: "user".into(),
+                content: "hi".into(),
+                metadata: None,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+            crate::store::sessions::Message {
+                id: "2".into(),
+                session_id: "s1".into(),
+                role: "assistant".into(),
+                content: "hello!".into(),
+                metadata: None,
+                created_at: "2026-01-01T00:00:01Z".into(),
+            },
+        ];
+
+        let history = SessionService::build_message_history(&messages);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, agent::Role::User);
+        assert_eq!(history[1].role, agent::Role::Assistant);
+    }
+
+    #[test]
+    fn test_resolve_model_session_override() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            Some("claude-opus-4-20250514"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let model = SessionService::resolve_model(&session, &db);
+        assert_eq!(model, "claude-opus-4-20250514");
+    }
+
+    #[test]
+    fn test_resolve_model_provider_default() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // seed_deps creates provider with default_model in config_json
+        let model = SessionService::resolve_model(&session, &db);
+        assert_eq!(model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_resolve_model_hardcoded_fallback() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+
+        // Create a provider with no default_model in config
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "anthropic",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k"}"#,
+        )
+        .unwrap();
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let model = SessionService::resolve_model(&session, &db);
+        assert_eq!(model, FALLBACK_MODEL);
+    }
+
+    #[test]
+    fn test_active_sessions_try_insert() {
+        let active = ActiveSessions::new();
+        let token = CancellationToken::new();
+
+        // First insert succeeds
+        assert!(active.try_insert("s1".to_string(), token.clone()));
+        assert!(active.contains("s1"));
+
+        // Duplicate insert fails (TOCTOU-safe)
+        assert!(!active.try_insert("s1".to_string(), CancellationToken::new()));
+
+        // Remove and re-insert works
+        active.remove("s1");
+        assert!(!active.contains("s1"));
+        assert!(active.try_insert("s1".to_string(), token));
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_empty_prompt() {
+        let (db, registry, active) = test_state();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = SessionService::send_prompt(&db, &registry, &active, &session.id, "").await;
+
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_session_not_found() {
+        let (db, registry, active) = test_state();
+
+        let result =
+            SessionService::send_prompt(&db, &registry, &active, "nonexistent", "hello").await;
+
+        assert!(matches!(result, Err(AppError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_terminal_session() {
+        let (db, registry, active) = test_state();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Transition to terminal state
+        crate::store::sessions::SessionStore::update_status(&db, &session.id, "completed").unwrap();
+
+        let result =
+            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_session_not_active() {
+        let (_, _, active) = test_state();
+
+        let result = SessionService::cancel_session(&active, "nonexistent");
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_conflict_on_double_send() {
+        let (db, registry, active) = test_state();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Simulate an active session
+        let token = CancellationToken::new();
+        active.try_insert(session.id.clone(), token);
+
+        let result =
+            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_flow() {
+        let (db, registry, active) = test_state();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Send prompt — should succeed and return a message ID
+        let result =
+            SessionService::send_prompt(&db, &registry, &active, &session.id, "hello").await;
+
+        let message_id = result.unwrap();
+        assert!(!message_id.is_empty());
+
+        // User message should be saved with raw content (no JSON encoding)
+        let messages =
+            crate::store::sessions::MessageStore::list_by_session(&db, &session.id, None, 10)
+                .unwrap();
+        assert_eq!(messages.data.len(), 1);
+        assert_eq!(messages.data[0].role, "user");
+        assert_eq!(messages.data[0].content, "hello");
+        assert_eq!(messages.data[0].id, message_id);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_session() {
+        // Verifies the cancel API rejects non-active sessions
+        let (_, _, active) = test_state();
+        let result = SessionService::cancel_session(&active, "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_session_with_mock_agent() {
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        /// A mock agent that streams events with delays, allowing cancel to fire.
+        struct SlowAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for SlowAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    // Send a text delta, then wait long enough for cancel to fire
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "partial".into(),
+                        }))
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Done {
+                            stop_reason: agent::StopReason::EndTurn,
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+
+        // Create workspace, provider, and register the mock agent
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(SlowAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Send prompt — the mock agent will stream slowly
+        let message_id = SessionService::send_prompt(&db, &registry, &active, &session.id, "hello")
+            .await
+            .unwrap();
+        assert!(!message_id.is_empty());
+        assert!(active.contains(&session.id));
+
+        // Cancel — should succeed
+        let result = SessionService::cancel_session(&active, &session.id);
+        assert!(result.is_ok());
+
+        // Wait for the spawned task to complete (poll up to 2 seconds)
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !active.contains(&session.id),
+            "session should be removed from active set after cancel"
+        );
+
+        // Session status should be cancelled
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "cancelled");
+    }
+}
