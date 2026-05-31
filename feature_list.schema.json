@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Weave Feature List",
+  "description": "Machine-verifiable schema for feature_list.json",
+  "type": "object",
+  "required": ["wip_limit", "features"],
+  "properties": {
+    "wip_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum number of features allowed in active state simultaneously"
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "behavior", "verification", "state", "dependencies", "evidence"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^feat-[0-9]{3}$",
+            "description": "Unique feature identifier"
+          },
+          "behavior": {
+            "type": "string",
+            "minLength": 10,
+            "description": "What the feature does, stated as observable behavior"
+          },
+          "verification": {
+            "type": "string",
+            "minLength": 5,
+            "description": "Command or test that proves the feature works"
+          },
+          "state": {
+            "type": "string",
+            "enum": ["not_started", "active", "passing", "blocked"],
+            "description": "Current state in the feature lifecycle"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^feat-[0-9]{3}$"
+            },
+            "description": "Feature IDs that must be in 'passing' state before this can start"
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Commit hash + test output excerpt when state is 'passing'. Empty otherwise."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
