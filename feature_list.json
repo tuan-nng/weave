@@ -104,7 +104,7 @@
       "verification": "cargo test -p weave-server -- test_session_lifecycle && cargo test -p weave-server -- test_session_state_transitions && cargo test -p weave-server -- test_message_pagination",
       "state": "passing",
       "dependencies": ["feat-007"],
-      "evidence": "init.sh all 3 layers pass; 103 tests (18 new: 11 store/sessions + 5 api/sessions + 2 shared); test_session_lifecycle (create/get/update-status/delete lifecycle); test_session_state_transitions (connecting->ready->completed, terminal rejection); test_message_pagination (cursor-based with id ordering, 5 messages across 3 pages)"
+      "evidence": "commit 5617811; init.sh all 3 layers pass; 103 tests (18 new: 11 store/sessions + 5 api/sessions + 2 shared); test_session_lifecycle (create/get/update-status/delete lifecycle); test_session_state_transitions (connecting->ready->completed, terminal rejection); test_message_pagination (cursor-based with id ordering, 5 messages across 3 pages)"
     },
     {
       "id": "feat-009",
