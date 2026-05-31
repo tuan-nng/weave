@@ -1,11 +1,19 @@
 mod api;
 mod config;
+mod db;
 
 use clap::Parser;
 use config::Config;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+/// Shared application state injected into Axum handlers.
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Arc<db::Db>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,7 +34,10 @@ async fn main() -> anyhow::Result<()> {
         "Starting weave-server"
     );
 
-    // 3. Validate remote binding
+    // 3. Open database and run migrations
+    let db = Arc::new(db::Db::open(&config.db_path)?);
+
+    // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {
         anyhow::bail!(
             "Binding to non-localhost address '{}' requires --allow-remote flag. \
@@ -35,16 +46,17 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // 4. Build the API router
+    // 5. Build the API router
+    let state = AppState { db };
     let start_time = api::health::ServerStartTime(Instant::now());
-    let app = api::router(start_time);
+    let app = api::router(state, start_time);
 
-    // 5. Bind and listen
+    // 6. Bind and listen
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(addr = %addr, "Server listening");
 
-    // 6. Graceful shutdown on SIGTERM/SIGINT
+    // 7. Graceful shutdown on SIGTERM/SIGINT
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
     server.await?;

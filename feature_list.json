@@ -48,9 +48,9 @@
       "phase": "phase-1",
       "behavior": "SQLite opens with WAL mode, foreign keys ON, 5s busy timeout. Versioned migrations run on startup via include_str! embedded SQL files. Schema creates all 11 tables: workspaces, sessions, messages, providers, codebases, worktrees, boards, columns, tasks, traces, file_changes. Indexes on foreign keys and status columns.",
       "verification": "cargo test -p weave-server -- test_db_init && cargo test -p weave-server -- test_migrations_idempotent",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-001"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; cargo test -- test_db_init (WAL mode, FK ON, busy_timeout 5000, 11 tables); cargo test -- test_migrations_idempotent (user_version=2 after double run)"
     },
     {
       "id": "feat-003",

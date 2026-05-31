@@ -34,3 +34,6 @@ anyhow = "1"
 
 # Async trait support
 async-trait = "0.1"
+
+# Database
+rusqlite = { version = "0.35", features = ["bundled"] }
