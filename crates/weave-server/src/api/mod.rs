@@ -1,4 +1,5 @@
 pub mod health;
+pub mod providers;
 pub mod responses;
 pub mod workspaces;
 
@@ -22,6 +23,19 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             get(workspaces::get_workspace)
                 .patch(workspaces::update_workspace)
                 .delete(workspaces::delete_workspace),
+        )
+        // Provider routes
+        .route(
+            "/api/providers",
+            get(providers::list_providers).post(providers::create_provider),
+        )
+        .route(
+            "/api/providers/{id}",
+            axum::routing::delete(providers::delete_provider),
+        )
+        .route(
+            "/api/providers/{id}/models",
+            get(providers::list_provider_models),
         )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))

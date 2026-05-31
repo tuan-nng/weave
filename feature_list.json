@@ -93,9 +93,9 @@
       "phase": "phase-1",
       "behavior": "ProviderStore persists providers to SQLite. ProviderRegistry holds HashMap<String, Arc<dyn CodingAgent>>, loads from DB on startup. Runtime CRUD: add_provider (validates config, creates agent, inserts DB), remove_provider (fails if active sessions reference it), get_agent by ID. API: GET /api/providers (strips api_key from response), POST /api/providers, DELETE /api/providers/:id, GET /api/providers/:id/models.",
       "verification": "cargo test -p weave-server -- test_provider_crud && cargo test -p weave-server -- test_provider_api_key_stripped",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-004", "feat-006"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 85 tests (27 new: 8 store/providers + 9 agent/registry + 7 api/providers + 3 error); test_provider_crud (POST/GET/DELETE lifecycle); test_provider_api_key_stripped (api_key absent from response); test_provider_delete_conflict (409 on delete with sessions); test_create_validation (empty name, long name, empty config fields, unsupported type); test_list_models (empty vec from AnthropicAgent)"
     },
     {
       "id": "feat-008",

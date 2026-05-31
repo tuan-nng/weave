@@ -16,6 +16,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<db::Db>,
+    pub registry: Arc<agent::registry::ProviderRegistry>,
 }
 
 #[tokio::main]
@@ -43,6 +44,11 @@ async fn main() -> anyhow::Result<()> {
     // 3.5 Seed default workspace (idempotent)
     store::workspaces::WorkspaceStore::ensure_default(&db)?;
 
+    // 3.6 Load providers from DB into registry
+    let registry = Arc::new(agent::registry::ProviderRegistry::new());
+    let loaded = registry.load_from_db(&db)?;
+    info!(loaded, "Providers loaded into registry");
+
     // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {
         anyhow::bail!(
@@ -53,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5. Build the API router
-    let state = AppState { db };
+    let state = AppState { db, registry };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);
 

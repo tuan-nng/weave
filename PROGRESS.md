@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-006)
+- **Latest commit:** (pending — feat-007)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 58 tests pass (28 anthropic + 9 agent + 9 store + 5 api + 6 existing + 1 streaming)
+- **Test status:** green — 85 tests pass (27 new for feat-007 + 58 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -26,6 +26,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-004**: Workspace CRUD (WorkspaceStore, REST API, default workspace seed, cursor pagination)
 - [x] **feat-005**: CodingAgent trait (provider abstraction, StreamEvent, StopReason, message types, all Send+Sync)
 - [x] **feat-006**: AnthropicAgent (SSE streaming, error mapping, retry logic, message conversion)
+- [x] **feat-007**: ProviderStore + ProviderRegistry (CRUD, agent lifecycle, API with api_key stripping)
 
 ## In Progress
 
@@ -41,21 +42,23 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-007: ProviderStore (depends on feat-004 + feat-006 — both passing)
-2. Continue Phase 1 (Core Foundation): feat-008 through feat-010
+1. Start feat-008: SessionStore (depends on feat-007 — now passing)
+2. Continue Phase 1 (Core Foundation): feat-009 through feat-010
 
 ## Notes for Next Session
 
-- feat-006 created: `src/agent/anthropic/{mod.rs, types.rs, streaming.rs}` — AnthropicAgent implementing CodingAgent
-- `AnthropicAgent` struct holds `reqwest::Client`, `base_url`, `api_key`, `default_model`
-- SSE parser in `streaming.rs` is a manual state machine (no external SSE crate), handles `\r\n` line endings
-- `EventConverter` tracks tool_use IDs by content block index for delta routing
-- Retry logic checks status codes directly (`429 | 500 | 529`), not error types — avoids retrying 400/401/404
-- `ReceiverStream` wrapper in mod.rs implements `Stream` via `mpsc::Receiver::poll_recv` (avoids tokio-stream dep)
-- Dependencies added: `reqwest = { version = "0.12", features = ["json", "stream"] }`, `bytes = "1"`, `futures-util = "0.3"`
-- `list_models()` returns empty vec — DB-driven in feat-007
-- `health_check()` sends minimal request with `max_tokens: 1` to verify credentials
-- feat-007 (ProviderStore) depends on feat-004 + feat-006 — both now passing, can start immediately
+- feat-007 created: `src/store/providers.rs`, `src/agent/registry.rs`, `src/api/providers.rs`
+- `ProviderStore` is a unit struct (same pattern as WorkspaceStore) with CRUD + `has_sessions` check
+- `Provider` struct uses `#[serde(skip_serializing)]` on `config_json` to strip api_key from API responses
+- `ProviderRegistry` holds `Mutex<HashMap<String, Arc<dyn CodingAgent>>>` — std::sync::Mutex, not tokio
+- Registry `create_agent` is `pub(crate)` so API can use it to validate config before DB insert
+- `AppError::Conflict(String)` added for 409 responses (provider delete with sessions)
+- `AppState` now has two fields: `db: Arc<Db>` and `registry: Arc<ProviderRegistry>`
+- Startup loads providers from DB into registry; failures logged as warnings, don't abort
+- API routes: `GET /api/providers`, `POST /api/providers`, `DELETE /api/providers/{id}`, `GET /api/providers/{id}/models`
+- Only "anthropic" provider type supported for v1; type validated in handler
+- `list_models()` returns empty vec from AnthropicAgent — will be populated when more providers are added
+- feat-008 (SessionStore) depends on feat-007 — now passing, can start immediately
 
 ## Out-of-Scope Items Noticed
 

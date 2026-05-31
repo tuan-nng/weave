@@ -20,6 +20,9 @@ pub enum AppError {
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
@@ -65,6 +68,7 @@ impl IntoResponse for AppError {
                 self.to_string(),
             ),
             AppError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", self.to_string()),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict", self.to_string()),
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
                 (

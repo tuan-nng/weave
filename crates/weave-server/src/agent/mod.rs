@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ProviderError;
 
 pub mod anthropic;
+pub mod registry;
 
 // ---------------------------------------------------------------------------
 // CodingAgent trait
