@@ -7,6 +7,7 @@ mod service;
 mod specialist;
 mod sse;
 mod store;
+mod tools;
 
 use clap::Parser;
 use config::Config;
@@ -23,6 +24,7 @@ pub struct AppState {
     pub active_sessions: Arc<service::ActiveSessions>,
     pub sse_manager: Arc<sse::SseManager>,
     pub specialists: Arc<specialist::SpecialistRegistry>,
+    pub tools: Arc<tools::ToolRegistry>,
 }
 
 #[tokio::main]
@@ -66,6 +68,9 @@ async fn main() -> anyhow::Result<()> {
         "Specialists loaded"
     );
 
+    // 3.8 Initialize tool registry (empty — tools register in feat-013+)
+    let tools = Arc::new(tools::ToolRegistry::new());
+
     // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {
         anyhow::bail!(
@@ -84,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         active_sessions,
         sse_manager,
         specialists,
+        tools,
     };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);

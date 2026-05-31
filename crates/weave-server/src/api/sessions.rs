@@ -154,6 +154,7 @@ pub async fn send_prompt(
         &state.specialists,
         &state.active_sessions,
         &state.sse_manager,
+        &state.tools,
         &session_id,
         &body.prompt,
     )
@@ -437,12 +438,14 @@ mod tests {
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
+        let tools = std::sync::Arc::new(crate::tools::ToolRegistry::new());
         let state = AppState {
             db: db.clone(),
             registry,
             active_sessions,
             sse_manager,
             specialists,
+            tools,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 

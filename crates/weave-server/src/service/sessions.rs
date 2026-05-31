@@ -11,6 +11,7 @@ use crate::specialist::{Specialist, SpecialistRegistry};
 use crate::sse::{self, SseWireEvent};
 use crate::store::providers::ProviderStore;
 use crate::store::sessions::{MessageStore, SessionStore};
+use crate::tools::ToolRegistry;
 
 use super::ActiveSessions;
 
@@ -42,6 +43,7 @@ impl SessionService {
         specialists: &Arc<SpecialistRegistry>,
         active: &Arc<ActiveSessions>,
         sse_manager: &Arc<sse::SseManager>,
+        tools: &Arc<ToolRegistry>,
         session_id: &str,
         prompt: &str,
     ) -> Result<String, AppError> {
@@ -57,6 +59,15 @@ impl SessionService {
                 "cannot send prompt to session in '{}' status",
                 session.status
             )));
+        }
+
+        // Validate tool profile early (fail-fast before spawning task)
+        if let Some(ref specialist_id) = session.specialist_id {
+            if let Some(specialist) = specialists.get_by_name(specialist_id) {
+                if let Some(ref profile) = specialist.tool_profile {
+                    tools.validate_profile_name(profile)?;
+                }
+            }
         }
 
         // Atomically check-and-insert to prevent TOCTOU race
@@ -76,6 +87,7 @@ impl SessionService {
         let task_specialists = Arc::clone(specialists);
         let task_active = Arc::clone(active);
         let task_sse = Arc::clone(sse_manager);
+        let task_tools = Arc::clone(tools);
         let task_session = session;
 
         tokio::spawn(async move {
@@ -85,6 +97,7 @@ impl SessionService {
                 task_specialists,
                 task_active,
                 task_sse,
+                task_tools,
                 task_session,
                 cancel_token,
             )
@@ -189,6 +202,7 @@ async fn run_prompt_task(
     specialists: Arc<SpecialistRegistry>,
     active: Arc<ActiveSessions>,
     sse_manager: Arc<sse::SseManager>,
+    tools: Arc<ToolRegistry>,
     session: crate::store::sessions::Session,
     cancel_token: CancellationToken,
 ) {
@@ -238,6 +252,24 @@ async fn run_prompt_task(
     // Resolve model — priority: session → specialist → provider → fallback
     let model = SessionService::resolve_model(&session, specialist, &db);
 
+    // Resolve tools from specialist's tool profile
+    let tool_defs = if let Some(s) = specialist {
+        if let Some(ref profile) = s.tool_profile {
+            match tools.resolve_profile(profile) {
+                Ok(defs) if defs.is_empty() => None,
+                Ok(defs) => Some(defs),
+                Err(e) => {
+                    abort_with_error(&db, session_id, e, "invalid tool profile");
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // System prompt from specialist
     let system_prompt = specialist.map(|s| s.system_prompt.clone());
 
@@ -257,7 +289,7 @@ async fn run_prompt_task(
             messages: history,
             system: system_prompt,
             max_tokens: DEFAULT_MAX_TOKENS,
-            tools: None,
+            tools: tool_defs,
         })
         .await
     {
@@ -401,9 +433,66 @@ impl Drop for SessionGuard {
 mod tests {
     use super::*;
     use crate::store::sessions::tests::seed_deps;
+    use crate::tools::test_support::MockTool;
+    use crate::tools::ToolRegistry;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
 
     fn test_db() -> Arc<Db> {
         Arc::new(Db::open(std::path::Path::new(":memory:")).unwrap())
+    }
+
+    /// A mock agent that captures the MessageRequest it receives.
+    struct CapturingAgent {
+        captured: Arc<Mutex<Option<MessageRequest>>>,
+    }
+
+    #[async_trait]
+    impl crate::agent::CodingAgent for CapturingAgent {
+        fn provider_type(&self) -> &str {
+            "mock"
+        }
+        fn display_name(&self) -> &str {
+            "Mock"
+        }
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+            Ok(vec![])
+        }
+        async fn send_message(
+            &self,
+            request: MessageRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures_core::Stream<
+                            Item = Result<agent::StreamEvent, crate::error::ProviderError>,
+                        > + Send,
+                >,
+            >,
+            crate::error::ProviderError,
+        > {
+            *self.captured.lock().unwrap() = Some(request);
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(Ok(agent::StreamEvent::Done {
+                        stop_reason: agent::StopReason::EndTurn,
+                    }))
+                    .await;
+            });
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+        async fn health_check(
+            &self,
+        ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+            Ok(crate::agent::ProviderHealth {
+                healthy: true,
+                latency_ms: 0,
+                error: None,
+            })
+        }
     }
 
     fn test_state() -> (
@@ -412,6 +501,7 @@ mod tests {
         Arc<SpecialistRegistry>,
         Arc<ActiveSessions>,
         Arc<crate::sse::SseManager>,
+        Arc<ToolRegistry>,
     ) {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
@@ -419,7 +509,8 @@ mod tests {
         let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
-        (db, registry, specialists, active, sse)
+        let tools = Arc::new(ToolRegistry::new());
+        (db, registry, specialists, active, sse, tools)
     }
 
     #[test]
@@ -562,7 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_empty_prompt() {
-        let (db, registry, specialists, active, sse) = test_state();
+        let (db, registry, specialists, active, sse, tools) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -581,6 +672,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "",
         )
@@ -591,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_session_not_found() {
-        let (db, registry, specialists, active, sse) = test_state();
+        let (db, registry, specialists, active, sse, tools) = test_state();
 
         let result = SessionService::send_prompt(
             &db,
@@ -599,6 +691,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             "nonexistent",
             "hello",
         )
@@ -609,7 +702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_terminal_session() {
-        let (db, registry, specialists, active, sse) = test_state();
+        let (db, registry, specialists, active, sse, tools) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -631,6 +724,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "hello",
         )
@@ -641,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_session_not_active() {
-        let (_, _, _, active, _) = test_state();
+        let (_, _, _, active, _, _) = test_state();
 
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(matches!(result, Err(AppError::Validation(_))));
@@ -649,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_conflict_on_double_send() {
-        let (db, registry, specialists, active, sse) = test_state();
+        let (db, registry, specialists, active, sse, tools) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -672,6 +766,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "hello",
         )
@@ -682,7 +777,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_flow() {
-        let (db, registry, specialists, active, sse) = test_state();
+        let (db, registry, specialists, active, sse, tools) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -702,6 +797,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "hello",
         )
@@ -723,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_session() {
         // Verifies the cancel API rejects non-active sessions
-        let (_, _, _, active, _) = test_state();
+        let (_, _, _, active, _, _) = test_state();
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(result.is_err());
     }
@@ -796,6 +892,7 @@ mod tests {
         let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
 
         // Create workspace, provider, and register the mock agent
         let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
@@ -826,6 +923,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "hello",
         )
@@ -924,6 +1022,7 @@ mod tests {
         let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
 
         let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
         let provider = crate::store::providers::ProviderStore::create(
@@ -956,6 +1055,7 @@ mod tests {
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "hello",
         )
@@ -1018,69 +1118,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_specialist_system_prompt_injection() {
-        use async_trait::async_trait;
-        use futures_core::Stream;
-        use std::pin::Pin;
-        use std::sync::Mutex;
-
-        /// A mock agent that captures the MessageRequest it receives.
-        struct CapturingAgent {
-            captured: Arc<Mutex<Option<MessageRequest>>>,
-        }
-
-        #[async_trait]
-        impl crate::agent::CodingAgent for CapturingAgent {
-            fn provider_type(&self) -> &str {
-                "mock"
-            }
-            fn display_name(&self) -> &str {
-                "Mock"
-            }
-            async fn list_models(
-                &self,
-            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
-                Ok(vec![])
-            }
-            async fn send_message(
-                &self,
-                request: MessageRequest,
-            ) -> Result<
-                Pin<
-                    Box<
-                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
-                            + Send,
-                    >,
-                >,
-                crate::error::ProviderError,
-            > {
-                *self.captured.lock().unwrap() = Some(request);
-                let (tx, rx) = tokio::sync::mpsc::channel(16);
-                tokio::spawn(async move {
-                    let _ = tx
-                        .send(Ok(agent::StreamEvent::Done {
-                            stop_reason: agent::StopReason::EndTurn,
-                        }))
-                        .await;
-                });
-                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-            }
-            async fn health_check(
-                &self,
-            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
-                Ok(crate::agent::ProviderHealth {
-                    healthy: true,
-                    latency_ms: 0,
-                    error: None,
-                })
-            }
-        }
-
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let captured = Arc::new(Mutex::new(None));
         let registry = Arc::new(ProviderRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
 
         // Build a specialist registry with one specialist
         let mut specialist_reg = SpecialistRegistry::new();
@@ -1133,6 +1177,7 @@ You are a senior Rust engineer."#,
             &specialists,
             &active,
             &sse,
+            &tools,
             &session.id,
             "write a function",
         )
@@ -1161,6 +1206,166 @@ You are a senior Rust engineer."#,
 
         // Model should be overridden by specialist (claude-opus-4-20250514)
         assert_eq!(request.model, "claude-opus-4-20250514");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_tool_profile_filtering() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let registry = Arc::new(ProviderRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+
+        // Build a tool registry with tools matching the "planning" profile
+        let mut tool_registry = ToolRegistry::new();
+        tool_registry.register(Arc::new(MockTool::new("task")));
+        tool_registry.register(Arc::new(MockTool::new("kanban")));
+        tool_registry.register(Arc::new(MockTool::new("notes")));
+        let tools = Arc::new(tool_registry);
+
+        // Build a specialist registry with a specialist using "planning" profile
+        let mut specialist_reg = SpecialistRegistry::new();
+        let dir = std::env::temp_dir().join("weave-specialist-test-tool-filtering");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("planner.md"),
+            r#"---
+name: planner
+description: Plans tasks
+tool_profile: planning
+---
+You are a planning specialist."#,
+        )
+        .unwrap();
+        specialist_reg.load_from_dir(&dir);
+        let specialists = Arc::new(specialist_reg);
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(
+            &provider.id,
+            Arc::new(CapturingAgent {
+                captured: Arc::clone(&captured),
+            }),
+        );
+
+        // Create session WITH specialist_id set to "planner"
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            Some("planner"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let message_id = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "plan my work",
+        )
+        .await
+        .unwrap();
+        assert!(!message_id.is_empty());
+
+        // Wait for the spawned task to complete
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Verify the captured request has the planning profile tools
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("request was not captured");
+
+        let tool_defs = request.tools.expect("expected tools to be set");
+        let mut tool_names: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
+        tool_names.sort();
+        assert_eq!(tool_names, vec!["kanban", "notes", "task"]);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_send_prompt_invalid_tool_profile() {
+        // Create a specialist with an invalid tool_profile
+        let (db, registry, _, active, sse, _) = test_state();
+        let tools = {
+            let mut tr = ToolRegistry::new();
+            tr.register(Arc::new(MockTool::new("task")));
+            Arc::new(tr)
+        };
+
+        let mut specialist_reg = SpecialistRegistry::new();
+        let dir = std::env::temp_dir().join("weave-specialist-test-invalid-profile");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.md"),
+            r#"---
+name: broken
+description: Broken specialist
+tool_profile: nonexistent_profile
+---
+You are broken."#,
+        )
+        .unwrap();
+        specialist_reg.load_from_dir(&dir);
+        let specialists = Arc::new(specialist_reg);
+
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            Some("broken"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "hello",
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::Validation(_))));
+        match result.unwrap_err() {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("nonexistent_profile"));
+            }
+            other => panic!("expected Validation, got: {:?}", other),
+        }
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
