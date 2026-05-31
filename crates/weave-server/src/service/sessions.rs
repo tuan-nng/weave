@@ -7,6 +7,7 @@ use crate::agent::registry::ProviderRegistry;
 use crate::agent::{self, MessageRequest};
 use crate::db::Db;
 use crate::error::AppError;
+use crate::specialist::{Specialist, SpecialistRegistry};
 use crate::sse::{self, SseWireEvent};
 use crate::store::providers::ProviderStore;
 use crate::store::sessions::{MessageStore, SessionStore};
@@ -38,6 +39,7 @@ impl SessionService {
     pub async fn send_prompt(
         db: &Arc<Db>,
         registry: &Arc<ProviderRegistry>,
+        specialists: &Arc<SpecialistRegistry>,
         active: &Arc<ActiveSessions>,
         sse_manager: &Arc<sse::SseManager>,
         session_id: &str,
@@ -71,6 +73,7 @@ impl SessionService {
         // Spawn the streaming task
         let task_db = Arc::clone(db);
         let task_registry = Arc::clone(registry);
+        let task_specialists = Arc::clone(specialists);
         let task_active = Arc::clone(active);
         let task_sse = Arc::clone(sse_manager);
         let task_session = session;
@@ -79,6 +82,7 @@ impl SessionService {
             run_prompt_task(
                 task_db,
                 task_registry,
+                task_specialists,
                 task_active,
                 task_sse,
                 task_session,
@@ -127,8 +131,12 @@ impl SessionService {
 
     /// Resolve the model to use for an agent request.
     ///
-    /// Priority: session.model → provider default_model → hardcoded fallback.
-    fn resolve_model(session: &crate::store::sessions::Session, db: &Db) -> String {
+    /// Priority: session.model → specialist.model → provider default_model → hardcoded fallback.
+    fn resolve_model(
+        session: &crate::store::sessions::Session,
+        specialist: Option<&Specialist>,
+        db: &Db,
+    ) -> String {
         // 1. Session-level override
         if let Some(ref model) = session.model {
             if !model.is_empty() {
@@ -136,7 +144,16 @@ impl SessionService {
             }
         }
 
-        // 2. Provider default_model from config_json
+        // 2. Specialist-level override
+        if let Some(s) = specialist {
+            if let Some(ref model) = s.model {
+                if !model.is_empty() {
+                    return model.clone();
+                }
+            }
+        }
+
+        // 3. Provider default_model from config_json
         match ProviderStore::get_by_id(db, &session.provider_id) {
             Ok(provider) => {
                 if let Ok(config) = serde_json::from_str::<serde_json::Value>(&provider.config_json)
@@ -154,7 +171,7 @@ impl SessionService {
             }
         }
 
-        // 3. Hardcoded fallback
+        // 4. Hardcoded fallback
         FALLBACK_MODEL.to_string()
     }
 }
@@ -169,6 +186,7 @@ fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, m
 async fn run_prompt_task(
     db: Arc<Db>,
     registry: Arc<ProviderRegistry>,
+    specialists: Arc<SpecialistRegistry>,
     active: Arc<ActiveSessions>,
     sse_manager: Arc<sse::SseManager>,
     session: crate::store::sessions::Session,
@@ -200,8 +218,28 @@ async fn run_prompt_task(
     };
     let history = SessionService::build_message_history(&messages);
 
-    // Resolve model
-    let model = SessionService::resolve_model(&session, &db);
+    // Resolve specialist (used for both model override and system prompt)
+    let specialist =
+        session
+            .specialist_id
+            .as_deref()
+            .and_then(|id| match specialists.get_by_name(id) {
+                Some(s) => Some(s),
+                None => {
+                    warn!(
+                        session_id = session_id,
+                        specialist_id = id,
+                        "specialist not found in registry, proceeding without system prompt"
+                    );
+                    None
+                }
+            });
+
+    // Resolve model — priority: session → specialist → provider → fallback
+    let model = SessionService::resolve_model(&session, specialist, &db);
+
+    // System prompt from specialist
+    let system_prompt = specialist.map(|s| s.system_prompt.clone());
 
     // Get the agent from the registry
     let agent = match registry.get_agent(&session.provider_id) {
@@ -217,7 +255,7 @@ async fn run_prompt_task(
         .send_message(MessageRequest {
             model,
             messages: history,
-            system: None,
+            system: system_prompt,
             max_tokens: DEFAULT_MAX_TOKENS,
             tools: None,
         })
@@ -371,15 +409,17 @@ mod tests {
     fn test_state() -> (
         Arc<Db>,
         Arc<ProviderRegistry>,
+        Arc<SpecialistRegistry>,
         Arc<ActiveSessions>,
         Arc<crate::sse::SseManager>,
     ) {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
-        (db, registry, active, sse)
+        (db, registry, specialists, active, sse)
     }
 
     #[test]
@@ -446,7 +486,7 @@ mod tests {
         )
         .unwrap();
 
-        let model = SessionService::resolve_model(&session, &db);
+        let model = SessionService::resolve_model(&session, None, &db);
         assert_eq!(model, "claude-opus-4-20250514");
     }
 
@@ -468,7 +508,7 @@ mod tests {
         .unwrap();
 
         // seed_deps creates provider with default_model in config_json
-        let model = SessionService::resolve_model(&session, &db);
+        let model = SessionService::resolve_model(&session, None, &db);
         assert_eq!(model, "claude-sonnet-4-20250514");
     }
 
@@ -498,7 +538,7 @@ mod tests {
         )
         .unwrap();
 
-        let model = SessionService::resolve_model(&session, &db);
+        let model = SessionService::resolve_model(&session, None, &db);
         assert_eq!(model, FALLBACK_MODEL);
     }
 
@@ -522,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_empty_prompt() {
-        let (db, registry, active, sse) = test_state();
+        let (db, registry, specialists, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -535,26 +575,41 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "").await;
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "",
+        )
+        .await;
 
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[tokio::test]
     async fn test_send_prompt_session_not_found() {
-        let (db, registry, active, sse) = test_state();
+        let (db, registry, specialists, active, sse) = test_state();
 
-        let result =
-            SessionService::send_prompt(&db, &registry, &active, &sse, "nonexistent", "hello")
-                .await;
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            "nonexistent",
+            "hello",
+        )
+        .await;
 
         assert!(matches!(result, Err(AppError::NotFound { .. })));
     }
 
     #[tokio::test]
     async fn test_send_prompt_terminal_session() {
-        let (db, registry, active, sse) = test_state();
+        let (db, registry, specialists, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -570,15 +625,23 @@ mod tests {
         // Transition to terminal state
         crate::store::sessions::SessionStore::update_status(&db, &session.id, "completed").unwrap();
 
-        let result =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "hello",
+        )
+        .await;
 
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[tokio::test]
     async fn test_cancel_session_not_active() {
-        let (_, _, active, _) = test_state();
+        let (_, _, _, active, _) = test_state();
 
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(matches!(result, Err(AppError::Validation(_))));
@@ -586,7 +649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_prompt_conflict_on_double_send() {
-        let (db, registry, active, sse) = test_state();
+        let (db, registry, specialists, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -603,15 +666,23 @@ mod tests {
         let token = CancellationToken::new();
         active.try_insert(session.id.clone(), token);
 
-        let result =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "hello",
+        )
+        .await;
 
         assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
     #[tokio::test]
     async fn test_send_prompt_flow() {
-        let (db, registry, active, sse) = test_state();
+        let (db, registry, specialists, active, sse) = test_state();
         let (ws_id, provider_id) = seed_deps(&db);
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -625,8 +696,16 @@ mod tests {
         .unwrap();
 
         // Send prompt — should succeed and return a message ID
-        let result =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello").await;
+        let result = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "hello",
+        )
+        .await;
 
         let message_id = result.unwrap();
         assert!(!message_id.is_empty());
@@ -644,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_cancel_session() {
         // Verifies the cancel API rejects non-active sessions
-        let (_, _, active, _) = test_state();
+        let (_, _, _, active, _) = test_state();
         let result = SessionService::cancel_session(&active, "nonexistent");
         assert!(result.is_err());
     }
@@ -714,6 +793,7 @@ mod tests {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
 
@@ -740,10 +820,17 @@ mod tests {
         .unwrap();
 
         // Send prompt — the mock agent will stream slowly
-        let message_id =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello")
-                .await
-                .unwrap();
+        let message_id = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "hello",
+        )
+        .await
+        .unwrap();
         assert!(!message_id.is_empty());
         assert!(active.contains(&session.id));
 
@@ -834,6 +921,7 @@ mod tests {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
 
@@ -862,10 +950,17 @@ mod tests {
         let mut rx = sse.subscribe(&session.id);
 
         // Send prompt
-        let message_id =
-            SessionService::send_prompt(&db, &registry, &active, &sse, &session.id, "hello")
-                .await
-                .unwrap();
+        let message_id = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "hello",
+        )
+        .await
+        .unwrap();
         assert!(!message_id.is_empty());
 
         // Collect SSE events until we see the Done event
@@ -919,5 +1014,155 @@ mod tests {
         // Session should be completed
         let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
         assert_eq!(session.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn test_specialist_system_prompt_injection() {
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::sync::Mutex;
+
+        /// A mock agent that captures the MessageRequest it receives.
+        struct CapturingAgent {
+            captured: Arc<Mutex<Option<MessageRequest>>>,
+        }
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for CapturingAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                *self.captured.lock().unwrap() = Some(request);
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Done {
+                            stop_reason: agent::StopReason::EndTurn,
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let captured = Arc::new(Mutex::new(None));
+        let registry = Arc::new(ProviderRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+
+        // Build a specialist registry with one specialist
+        let mut specialist_reg = SpecialistRegistry::new();
+        let dir = std::env::temp_dir().join("weave-specialist-test-injection");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("coder.md"),
+            r#"---
+name: coder
+description: Writes code
+model: claude-opus-4-20250514
+---
+You are a senior Rust engineer."#,
+        )
+        .unwrap();
+        specialist_reg.load_from_dir(&dir);
+        let specialists = Arc::new(specialist_reg);
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(
+            &provider.id,
+            Arc::new(CapturingAgent {
+                captured: Arc::clone(&captured),
+            }),
+        );
+
+        // Create session WITH specialist_id set
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            Some("coder"), // specialist_id
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let message_id = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &session.id,
+            "write a function",
+        )
+        .await
+        .unwrap();
+        assert!(!message_id.is_empty());
+
+        // Wait for the spawned task to complete
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Verify the captured request
+        let request = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("request was not captured");
+
+        // System prompt should be set from specialist
+        assert_eq!(
+            request.system,
+            Some("You are a senior Rust engineer.".to_string())
+        );
+
+        // Model should be overridden by specialist (claude-opus-4-20250514)
+        assert_eq!(request.model, "claude-opus-4-20250514");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

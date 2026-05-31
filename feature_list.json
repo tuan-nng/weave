@@ -129,9 +129,9 @@
       "phase": "phase-2",
       "behavior": "SpecialistLoader scans resources/specialists/*.md, parses YAML frontmatter (name, description, model, tool_profile, tags), extracts markdown body as system prompt. Loads into HashMap<String, Specialist> at startup. Logs count of loaded specialists and skipped files. Injects system prompt into session's first message when specialist_id is set. Handles: malformed YAML (skip + warn), missing required fields (skip + warn), invalid UTF-8 (skip + warn).",
       "verification": "cargo test -p weave-server -- test_specialist_loading && cargo test -p weave-server -- test_specialist_frontmatter_parse && cargo test -p weave-server -- test_specialist_malformed_yaml",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-009"],
-      "evidence": ""
+      "evidence": "commit 25ea940; init.sh all 3 layers pass; 135 tests (7 new: test_specialist_frontmatter_parse, test_specialist_frontmatter_minimal, test_specialist_frontmatter_with_dashes_in_yaml, test_specialist_malformed_yaml, test_specialist_loading, test_specialist_loading_missing_dir, test_specialist_system_prompt_injection); SpecialistRegistry with load_from_dir, get_by_name; YAML frontmatter parsing via serde_yaml::Value; system prompt + model override injection in run_prompt_task; warning log for missing specialist_id"
     },
     {
       "id": "feat-012",

@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-05-31
-- **Latest commit:** (pending — feat-010)
+- **Latest commit:** 25ea940
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 128 tests pass (8 new for feat-010 + 120 existing)
+- **Test status:** green — 135 tests pass (7 new for feat-011 + 128 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -30,6 +30,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-008**: SessionStore + MessageStore (session state machine, message pagination, session API)
 - [x] **feat-009**: SessionService (prompt lifecycle, async streaming, cancellation, message history)
 - [x] **feat-010**: SSE infrastructure (SseManager, EventBuffer, SSE endpoint, reconnection, backpressure)
+- [x] **feat-011**: SpecialistLoader (YAML frontmatter parsing, SpecialistRegistry, system prompt + model override injection)
 
 ## In Progress
 
@@ -45,7 +46,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-011: SpecialistLoader (depends on feat-009 — passing)
+1. Start feat-012: ToolRegistry (depends on feat-005 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Session Notes
@@ -58,22 +59,18 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Notes for Next Session
 
-- feat-010 created: `src/sse/mod.rs`
-- `SseManager` holds per-entity `broadcast::channel(256)` + `EventBuffer` (ring buffer, 100 events) + `AtomicU64` counter
-- Event IDs start at 1 (not 0) — `get_after(0)` returns all buffered events
-- `SseWireEvent` enum wraps `StreamEvent` variants + `Connected`/`Gap` SSE-protocol events
-- `stream_event_to_wire()` converts agent events to wire format
-- `session_stream` handler uses `stream::unfold` with `SseState` state machine (Initial → Gap/Buffered/Live → Done)
-- Deduplication: subscribe first, read buffer, track `max_buffered_id`, skip receiver events with ID ≤ max_buffered_id
-- `make_sse_event(id, event_type, data)` sets `.id()` on every event for `Last-Event-ID` support
-- Session existence check: nonexistent sessions get an error event + stream close (not 404 — SSE can't return HTTP errors)
-- `SessionService::send_prompt` now accepts `&Arc<sse::SseManager>` and broadcasts every `StreamEvent` via `sse::stream_event_to_wire()`
-- Cancellation broadcasts `Done { stop_reason: Cancelled }` before updating session status
-- Heartbeat: `Sse::new(stream).keep_alive(KeepAlive::default())` sends SSE comment lines every 15s
-- `AppState` now has `sse_manager: Arc<sse::SseManager>` field
-- `ActiveSessions` + `SseManager` are separate types — `ActiveSessions` tracks cancellation tokens, `SseManager` handles broadcast/buffer
-- TOCTOU race in `broadcast()` fixed: single write lock for channel creation
-- Phase 1 (Core Foundation) is now complete — all 10 features passing
+- feat-011 created: `src/specialist/mod.rs`
+- `SpecialistRegistry` wraps `HashMap<String, Specialist>` with `load_from_dir`, `get_by_name`, `count`, `all`
+- Frontmatter parsing uses `serde_yaml::Value` (no duplicate struct) — extracts `name`, `description`, `model`, `tool_profile`, `tags`
+- Closing `---` delimiter must start at line boundary (`\n---`) to avoid false matches inside YAML values
+- `resources/specialists/` directory created (empty) — loading from missing dir returns `(0, 0)` without error
+- `AppState` now has `specialists: Arc<SpecialistRegistry>` field
+- `SessionService::send_prompt` and `run_prompt_task` accept `&Arc<SpecialistRegistry>` / `Arc<SpecialistRegistry>`
+- Model resolution priority: session.model → specialist.model → provider.default_model → hardcoded fallback
+- System prompt injection: `session.specialist_id` → `specialists.get_by_name()` → `s.system_prompt` → `MessageRequest.system`
+- Warning logged when `specialist_id` references a nonexistent specialist (graceful degradation, no error)
+- `tool_profile` field parsed but not yet consumed — will be used by ToolRegistry (feat-012)
+- Phase 2 (Agent Tools & Observability) started — feat-011 is the first feature in this phase
 
 ## Out-of-Scope Items Noticed
 

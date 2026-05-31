@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod error;
 mod service;
+mod specialist;
 mod sse;
 mod store;
 
@@ -21,6 +22,7 @@ pub struct AppState {
     pub registry: Arc<agent::registry::ProviderRegistry>,
     pub active_sessions: Arc<service::ActiveSessions>,
     pub sse_manager: Arc<sse::SseManager>,
+    pub specialists: Arc<specialist::SpecialistRegistry>,
 }
 
 #[tokio::main]
@@ -53,6 +55,17 @@ async fn main() -> anyhow::Result<()> {
     let loaded = registry.load_from_db(&db)?;
     info!(loaded, "Providers loaded into registry");
 
+    // 3.7 Load specialists from resources/specialists/
+    let mut specialist_registry = specialist::SpecialistRegistry::new();
+    let (specialist_loaded, specialist_skipped) =
+        specialist_registry.load_from_dir(std::path::Path::new("resources/specialists"));
+    let specialists = Arc::new(specialist_registry);
+    info!(
+        loaded = specialist_loaded,
+        skipped = specialist_skipped,
+        "Specialists loaded"
+    );
+
     // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {
         anyhow::bail!(
@@ -70,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         registry,
         active_sessions,
         sse_manager,
+        specialists,
     };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);

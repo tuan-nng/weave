@@ -136,11 +136,13 @@ mod tests {
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
+        let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
         let state = AppState {
             db,
             registry,
             active_sessions,
             sse_manager,
+            specialists,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 
