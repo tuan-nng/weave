@@ -66,9 +66,9 @@
       "phase": "phase-1",
       "behavior": "WorkspaceStore with CRUD operations. Default workspace \"default\" created on first startup. API: GET /api/workspaces (paginated), POST /api/workspaces (name validation 1-100 chars), GET /api/workspaces/:id, PATCH /api/workspaces/:id, DELETE /api/workspaces/:id (cascade deletes). All responses use consistent JSON envelope.",
       "verification": "cargo test -p weave-server -- test_workspace_crud && cargo test -p weave-server -- test_workspace_default_seed",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-002", "feat-003"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; cargo test -- test_workspace_crud (create/get/list/patch/delete lifecycle); cargo test -- test_workspace_default_seed (default created, cannot rename/delete); 20 tests total (9 store + 5 api + 6 existing)"
     },
     {
       "id": "feat-005",

@@ -15,6 +15,10 @@ pub struct Db {
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001", include_str!("migrations/001_init.sql")),
     ("002", include_str!("migrations/002_kanban.sql")),
+    (
+        "003",
+        include_str!("migrations/003_workspace_unique_name.sql"),
+    ),
 ];
 
 impl Db {
@@ -164,6 +168,6 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 2, "user_version should be 2 after both migrations");
+        assert_eq!(v1, 3, "user_version should be 3 after all migrations");
     }
 }

@@ -37,3 +37,6 @@ async-trait = "0.1"
 
 # Database
 rusqlite = { version = "0.35", features = ["bundled"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

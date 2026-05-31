@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod db;
 mod error;
+mod store;
 
 use clap::Parser;
 use config::Config;
@@ -37,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Open database and run migrations
     let db = Arc::new(db::Db::open(&config.db_path)?);
+
+    // 3.5 Seed default workspace (idempotent)
+    store::workspaces::WorkspaceStore::ensure_default(&db)?;
 
     // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {
