@@ -71,12 +71,14 @@
 - [ ] Send prompt: save user message, call provider, stream response
 - [ ] Save assistant message chunks to DB as they arrive
 - [ ] Cancel: abort the HTTP request to the provider
+- [ ] Resume: create new session that continues from a previous session's message history (accept `parent_session_id`)
 
 ### 3.2 SSE Streaming
 - [ ] `GET /api/sessions/:sid/stream` — SSE endpoint
 - [ ] Buffer events in memory until client connects
 - [ ] Heartbeat every 15 seconds
 - [ ] Cleanup on client disconnect
+- [ ] Support `Last-Event-ID` header for reconnection — replay buffered events
 
 ### 3.2b Trace Collection (Session Observability)
 - [ ] Auto-record trace events during agent execution:
@@ -84,6 +86,7 @@
   - File changes (path, action: read/write/create/delete)
   - Decisions (extracted from thinking/reasoning blocks)
   - Errors (message, recovery status)
+  - Reviews (criteria checked, verdict, optional evidence)
 - [ ] `TraceStore` — persist trace events to SQLite
 - [ ] Journey summary endpoint — ordered list of decisions + key actions
 - [ ] File change summary — deduplicated list of files touched in session
@@ -104,6 +107,15 @@
 - [ ] Load markdown + YAML frontmatter from `resources/specialists/`
 - [ ] Inject system prompt into first message
 - [ ] Support custom specialists via filesystem
+- [ ] Document specialist YAML frontmatter schema:
+  ```yaml
+  ---
+  name: Dev Crafter
+  model: sonnet
+  description: Implements changes within task scope
+  ---
+  You are a dev crafter. Stay within task scope...
+  ```
 
 ---
 
@@ -153,12 +165,14 @@
 - [ ] `KanbanStore` — CRUD for boards, columns, tasks
 - [ ] Board ↔ Workspace relationship
 - [ ] Column ordering (position)
+- [ ] Column ↔ Specialist binding (`specialist_id` column, nullable)
 - [ ] Task ordering within columns
 
 ### 5.2 Kanban Service
 - [ ] Create board with default columns (e.g. "To Do", "In Progress", "Done")
 - [ ] Move task between columns
-- [ ] Column transition triggers (optional: start agent session)
+- [ ] Lane-specialist binding: each column can optionally bind a specialist
+- [ ] Column transition triggers: when card moves to a column with a bound specialist and auto-trigger enabled, create a session with that specialist's system prompt
 
 ### 5.3 Kanban API Routes
 - [ ] `GET /api/workspaces/:wid/boards` — list
@@ -172,10 +186,18 @@
 - [ ] `DELETE /api/tasks/:tid` — delete task
 - [ ] `GET /api/boards/:bid/stream` — SSE for kanban events
 
-### 5.4 Kanban Frontend
+### 5.4 Kanban Lane Specialists
+- [ ] `backlog-refiner.md` — turns rough cards into canonical stories with acceptance criteria
+- [ ] `todo-orchestrator.md` — validates stories, adds execution plans, key files, risk notes
+- [ ] `dev-crafter.md` — implements changes, runs verification, commits work
+- [ ] `review-guard.md` — independently verifies acceptance criteria, rejects/approves
+- [ ] `done-reporter.md` — writes completion summaries
+
+### 5.5 Kanban Frontend
 - [ ] Board view with drag-and-drop columns
 - [ ] Card component with title, status badge
 - [ ] Move card between columns
+- [ ] Column specialist indicator (shows bound specialist, auto-trigger toggle)
 - [ ] Real-time updates via SSE
 
 ---
@@ -185,6 +207,8 @@
 ### 6.1 Codebases
 - [ ] Register git repos as codebases
 - [ ] Associate sessions with codebases (cwd)
+- [ ] Git status integration: current branch, dirty files, last 5 commits
+- [ ] Codebase view in frontend showing repo context
 
 ### 6.2 Traces
 - [ ] Record tool calls, file changes, timing
@@ -242,6 +266,11 @@ crates/weave-server/src/domain/specialist.rs
 resources/specialists/routa.md
 resources/specialists/crafter.md
 resources/specialists/gate.md
+resources/specialists/backlog-refiner.md
+resources/specialists/todo-orchestrator.md
+resources/specialists/dev-crafter.md
+resources/specialists/review-guard.md
+resources/specialists/done-reporter.md
 ```
 
 ### Step 4: Frontend

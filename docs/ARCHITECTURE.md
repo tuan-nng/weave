@@ -92,7 +92,7 @@ Top-level coordination boundary. All resources are workspace-scoped. A `"default
 
 ### Session
 
-A live or historical agent execution thread. Contains messages (user prompts, assistant responses, tool calls) and can be resumed, forked, or cancelled.
+A live or historical agent execution thread. Contains messages (user prompts, assistant responses, tool calls) and can be resumed (via `parent_session_id`), or cancelled.
 
 **Lifecycle**: `connecting` → `ready` → (user prompts + agent responses) → `completed` | `cancelled` | `error`
 
@@ -124,6 +124,7 @@ enum TraceEventType {
     FileChange { path: String, action: FileAction },
     Error { message: String, recovered: bool },
     Milestone { label: String },
+    Review { criteria: String, verdict: String, evidence: Option<String> },
 }
 ```
 
@@ -139,9 +140,29 @@ A configured `CodingAgent` instance. Each provider has:
 
 Agent role definitions externalized as **Markdown files with YAML frontmatter**. Define system prompts, model preferences, and behavior instructions. Loaded from filesystem (`resources/specialists/`).
 
+**Frontmatter schema:**
+```yaml
+---
+name: Dev Crafter
+model: sonnet
+description: Implements changes within task scope
+---
+You are a dev crafter. Stay within task scope...
+```
+
+**Bundled specialists:**
+- `routa.md` — Coordinator (plans, delegates, verifies)
+- `crafter.md` — Implementor (writes code within scope)
+- `gate.md` — Verifier (evidence-driven verification)
+- `backlog-refiner.md` — Turns rough cards into stories with acceptance criteria
+- `todo-orchestrator.md` — Validates stories, adds execution plans
+- `dev-crafter.md` — Implements changes, runs verification, commits
+- `review-guard.md` — Verifies acceptance criteria, rejects/approves
+- `done-reporter.md` — Writes completion summaries
+
 ### Kanban Board
 
-A board with ordered columns. Tasks are cards that move between columns. Column transitions can trigger agent sessions for automated work.
+A board with ordered columns. Tasks are cards that move between columns. Each column can optionally bind a **specialist** — when a card moves to a column with a bound specialist and `auto_trigger` enabled, an agent session is created using that specialist's system prompt. This turns the kanban into a coordination bus, not just a task board.
 
 ## Provider Abstraction
 
@@ -216,13 +237,13 @@ enum StreamEvent {
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/workspaces/:wid/sessions` | List sessions in workspace |
-| POST | `/api/workspaces/:wid/sessions` | Create session (starts agent) |
+| POST | `/api/workspaces/:wid/sessions` | Create session (starts agent). Accepts optional `parent_session_id` to resume from a previous session's history. |
 | GET | `/api/sessions/:sid` | Get session |
 | DELETE | `/api/sessions/:sid` | Delete session |
 | POST | `/api/sessions/:sid/prompt` | Send message to agent |
 | POST | `/api/sessions/:sid/cancel` | Cancel running generation |
 | GET | `/api/sessions/:sid/history` | Get full message history |
-| GET | `/api/sessions/:sid/stream` | SSE stream for real-time updates |
+| GET | `/api/sessions/:sid/stream` | SSE stream for real-time updates. Supports `Last-Event-ID` header for reconnection replay. |
 
 ### Providers
 | Method | Path | Purpose |
@@ -240,7 +261,7 @@ enum StreamEvent {
 | GET | `/api/boards/:bid` | Get board with columns + cards |
 | PATCH | `/api/boards/:bid` | Update board |
 | POST | `/api/boards/:bid/columns` | Add column |
-| PATCH | `/api/columns/:cid` | Update column |
+| PATCH | `/api/columns/:cid` | Update column (name, position, specialist binding, auto-trigger) |
 | POST | `/api/boards/:bid/cards` | Add card |
 | PATCH | `/api/tasks/:tid` | Update task (move, rename, etc.) |
 | DELETE | `/api/tasks/:tid` | Delete task |
@@ -269,14 +290,14 @@ Single SQLite database with WAL mode:
 ```sql
 -- Core tables
 workspaces (id, name, status, created_at, updated_at)
-sessions (id, workspace_id, provider_id, specialist_id, status, model, cwd, created_at, updated_at)
+sessions (id, workspace_id, provider_id, specialist_id, parent_session_id, status, model, cwd, created_at, updated_at)
 messages (id, session_id, role, content, metadata, created_at)
 providers (id, type, name, config_json, created_at)
 codebases (id, workspace_id, path, branch, label, created_at)
 
 -- Kanban tables
 boards (id, workspace_id, name, created_at)
-columns (id, board_id, name, position, created_at)
+columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
 tasks (id, board_id, column_id, title, description, position, status, session_id, created_at, updated_at)
 
 -- Traces (session observability)
@@ -389,7 +410,12 @@ weave/
 │   └── specialists/              # Bundled specialist definitions
 │       ├── routa.md
 │       ├── crafter.md
-│       └── gate.md
+│       ├── gate.md
+│       ├── backlog-refiner.md
+│       ├── todo-orchestrator.md
+│       ├── dev-crafter.md
+│       ├── review-guard.md
+│       └── done-reporter.md
 ├── docs/
 │   ├── ARCHITECTURE.md           # This file
 │   └── PLAN.md                   # Implementation plan
