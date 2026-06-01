@@ -1,10 +1,14 @@
 use crate::db::Db;
 use crate::error::AppError;
 use chrono::Utc;
+use rusqlite::Connection;
 use rusqlite::ErrorCode;
 use serde::Serialize;
 use tracing::info;
 use uuid::Uuid;
+
+/// Maximum depth for parent session chain resolution.
+pub(crate) const MAX_RESUME_DEPTH: usize = 5;
 
 // ---------------------------------------------------------------------------
 // Session types
@@ -66,6 +70,29 @@ const VALID_STATUSES: &[&str] = &["connecting", "ready", "completed", "cancelled
 pub(crate) const TERMINAL: &[&str] = &["completed", "cancelled", "error"];
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a foreign key violation into a clear `AppError::Validation`.
+///
+/// Catches SQLITE_CONSTRAINT_FOREIGNKEY (extended code 787) for
+/// provider_id and parent_session_id references.
+fn map_fk_violation(e: rusqlite::Error) -> AppError {
+    if let rusqlite::Error::SqliteFailure(ref err, _) = e {
+        if err.code == ErrorCode::ConstraintViolation {
+            // SQLITE_CONSTRAINT_FOREIGNKEY = 787
+            if err.extended_code == 787 {
+                return AppError::Validation(
+                    "referenced resource not found (workspace_id, provider_id, or parent_session_id)"
+                        .into(),
+                );
+            }
+        }
+    }
+    e.into()
+}
+
+// ---------------------------------------------------------------------------
 // SessionStore
 // ---------------------------------------------------------------------------
 
@@ -79,6 +106,9 @@ impl SessionStore {
     ///
     /// Validates foreign keys: provider_id must reference an existing provider.
     /// parent_session_id (if set) must reference an existing session.
+    ///
+    /// Prefer `SessionService::create_session` for production code (supports resume).
+    #[allow(dead_code)] // Used in tests; production code uses SessionService::create_session
     pub fn create(
         db: &Db,
         workspace_id: &str,
@@ -111,7 +141,7 @@ impl SessionStore {
                 ],
                 Self::map_row,
             )
-            .map_err(Self::map_fk_violation)
+            .map_err(map_fk_violation)
     }
 
     /// Fetch a session by primary key.
@@ -243,22 +273,41 @@ impl SessionStore {
         })
     }
 
-    /// Convert a foreign key violation into a clear `AppError::Validation`.
+    /// Insert a new session within an existing transaction.
     ///
-    /// Catches SQLITE_CONSTRAINT_FOREIGNKEY (extended code 787) for
-    /// provider_id and parent_session_id references.
-    fn map_fk_violation(e: rusqlite::Error) -> AppError {
-        if let rusqlite::Error::SqliteFailure(ref err, _) = e {
-            if err.code == ErrorCode::ConstraintViolation {
-                // SQLITE_CONSTRAINT_FOREIGNKEY = 787
-                if err.extended_code == 787 {
-                    return AppError::Validation(
-                        "referenced resource not found (provider_id or parent_session_id)".into(),
-                    );
-                }
-            }
-        }
-        e.into()
+    /// Same as `create` but takes `&Connection` for use inside `Db::with_transaction`.
+    pub fn create_tx(
+        conn: &Connection,
+        workspace_id: &str,
+        provider_id: &str,
+        specialist_id: Option<&str>,
+        model: Option<&str>,
+        cwd: Option<&str>,
+        parent_session_id: Option<&str>,
+    ) -> Result<Session, AppError> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.query_row(
+            "INSERT INTO sessions
+                 (id, workspace_id, provider_id, specialist_id,
+                  parent_session_id, status, model, cwd, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'connecting', ?6, ?7, ?8, ?8)
+             RETURNING id, workspace_id, provider_id, specialist_id,
+                       parent_session_id, status, model, cwd, created_at, updated_at",
+            rusqlite::params![
+                id,
+                workspace_id,
+                provider_id,
+                specialist_id,
+                parent_session_id,
+                model,
+                cwd,
+                now,
+            ],
+            Self::map_row,
+        )
+        .map_err(map_fk_violation)
     }
 }
 
@@ -341,6 +390,62 @@ impl MessageStore {
             metadata: row.get(4)?,
             created_at: row.get(5)?,
         })
+    }
+
+    /// Bulk-copy messages into a target session within an existing transaction.
+    ///
+    /// Each message gets a new UUID but preserves the original `role`, `content`,
+    /// `metadata`, and `created_at`. Returns the number of messages copied.
+    pub fn copy_messages(
+        conn: &Connection,
+        target_session_id: &str,
+        messages: &[Message],
+    ) -> Result<u64, AppError> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+
+        let mut stmt = conn.prepare(
+            "INSERT INTO messages (id, session_id, role, content, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+
+        let mut count = 0u64;
+        for msg in messages {
+            let new_id = Uuid::new_v4().to_string();
+            stmt.execute(rusqlite::params![
+                new_id,
+                target_session_id,
+                msg.role,
+                msg.content,
+                msg.metadata,
+                msg.created_at,
+            ])?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    /// Load all messages for a session (paginated, up to `max`).
+    ///
+    /// Reuses cursor-based pagination internally.
+    pub fn load_all(db: &Db, session_id: &str, max: usize) -> Result<Vec<Message>, AppError> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let page = Self::list_by_session(db, session_id, cursor.as_deref(), 100)?;
+            let has_more = page.cursor.is_some();
+            cursor = page.cursor;
+            all.extend(page.data);
+            if !has_more || all.len() >= max {
+                break;
+            }
+        }
+
+        all.truncate(max);
+        Ok(all)
     }
 }
 

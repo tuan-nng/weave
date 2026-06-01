@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::specialist::{Specialist, SpecialistRegistry};
 use crate::sse::{self, SseWireEvent};
 use crate::store::providers::ProviderStore;
-use crate::store::sessions::{MessageStore, SessionStore};
+use crate::store::sessions::{MessageStore, SessionStore, MAX_RESUME_DEPTH, TERMINAL};
 use crate::store::traces::{TraceEvent, TraceEventKind};
 use crate::tools::ToolRegistry;
 use crate::trace;
@@ -35,6 +35,64 @@ const MAX_HISTORY_MESSAGES: usize = 1000;
 pub struct SessionService;
 
 impl SessionService {
+    /// Create a session, optionally resuming from a parent session.
+    ///
+    /// When `parent_session_id` is set, validates the parent chain (up to
+    /// `MAX_RESUME_DEPTH`), then atomically creates the new session and copies
+    /// all messages from the direct parent into it within a single transaction.
+    ///
+    /// Only the direct parent's messages are copied — if the parent was itself
+    /// resumed, it already contains its ancestors' messages.
+    pub fn create_session(
+        db: &Db,
+        workspace_id: &str,
+        provider_id: &str,
+        specialist_id: Option<&str>,
+        model: Option<&str>,
+        cwd: Option<&str>,
+        parent_session_id: Option<&str>,
+    ) -> Result<crate::store::sessions::Session, AppError> {
+        // Validate workspace exists
+        crate::store::workspaces::WorkspaceStore::get_by_id(db, workspace_id)?;
+
+        // Validate parent chain and load direct parent's messages
+        let parent_messages = if let Some(pid) = parent_session_id {
+            // Ensure parent has finished — resuming an active session would
+            // copy an incomplete message history.
+            let parent = SessionStore::get_by_id(db, pid)?;
+            if !TERMINAL.contains(&parent.status.as_str()) {
+                return Err(AppError::Validation(format!(
+                    "cannot resume from session in '{}' status — parent must be completed, \
+                     cancelled, or error",
+                    parent.status
+                )));
+            }
+            validate_parent_chain(db, pid, workspace_id)?;
+            MessageStore::load_all(db, pid, MAX_HISTORY_MESSAGES)?
+        } else {
+            Vec::new()
+        };
+
+        // Atomically create session + copy messages
+        db.with_transaction(|conn| {
+            let session = SessionStore::create_tx(
+                conn,
+                workspace_id,
+                provider_id,
+                specialist_id,
+                model,
+                cwd,
+                parent_session_id,
+            )?;
+
+            if !parent_messages.is_empty() {
+                MessageStore::copy_messages(conn, &session.id, &parent_messages)?;
+            }
+
+            Ok(session)
+        })
+    }
+
     /// Send a prompt to a session.
     ///
     /// Returns the user message ID immediately. Spawns an async task that
@@ -192,6 +250,55 @@ impl SessionService {
     }
 }
 
+/// Validate the parent session chain from `start_parent_id`.
+///
+/// Walks the chain up to `MAX_RESUME_DEPTH` hops, validating that each session
+/// exists, belongs to `workspace_id`, and the chain has no cycles.
+fn validate_parent_chain(
+    db: &Db,
+    start_parent_id: &str,
+    workspace_id: &str,
+) -> Result<(), AppError> {
+    let mut current_id = start_parent_id.to_string();
+    let mut seen = HashSet::new();
+    seen.insert(start_parent_id.to_string());
+    let mut depth = 0usize;
+
+    loop {
+        let session = SessionStore::get_by_id(db, &current_id)?;
+
+        // Validate workspace ownership
+        if session.workspace_id != workspace_id {
+            return Err(AppError::Validation(
+                "parent session belongs to a different workspace".into(),
+            ));
+        }
+
+        // Walk to parent if present
+        if let Some(ref parent_id) = session.parent_session_id {
+            depth += 1;
+            if depth >= MAX_RESUME_DEPTH {
+                return Err(AppError::Validation(format!(
+                    "session resume chain exceeds maximum depth of {}",
+                    MAX_RESUME_DEPTH
+                )));
+            }
+            if seen.contains(parent_id) {
+                return Err(AppError::Validation(
+                    "cycle detected in parent_session_id chain".into(),
+                ));
+            }
+            seen.insert(parent_id.clone());
+            current_id = parent_id.clone();
+        } else {
+            // Reached root of chain — valid
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Log an error, transition the session to error status.
 fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, msg: &str) {
     error!(session_id, error = %e, msg);
@@ -226,7 +333,7 @@ async fn run_prompt_task(
     }
 
     // Load message history
-    let messages = match load_all_messages(&db, session_id) {
+    let messages = match MessageStore::load_all(&db, session_id, MAX_HISTORY_MESSAGES) {
         Ok(msgs) => msgs,
         Err(e) => {
             abort_with_error(&db, session_id, e, "failed to load message history");
@@ -474,28 +581,6 @@ fn drain_pending_tools(
             timestamp: chrono::Utc::now().to_rfc3339(),
         });
     }
-}
-
-/// Load all messages for a session (paginated, up to MAX_HISTORY_MESSAGES).
-fn load_all_messages(
-    db: &Db,
-    session_id: &str,
-) -> Result<Vec<crate::store::sessions::Message>, AppError> {
-    let mut all = Vec::new();
-    let mut cursor: Option<String> = None;
-
-    loop {
-        let page = MessageStore::list_by_session(db, session_id, cursor.as_deref(), 100)?;
-        let has_more = page.cursor.is_some();
-        cursor = page.cursor;
-        all.extend(page.data);
-        if !has_more || all.len() >= MAX_HISTORY_MESSAGES {
-            break;
-        }
-    }
-
-    all.truncate(MAX_HISTORY_MESSAGES);
-    Ok(all)
 }
 
 /// Drop guard that ensures `active_sessions.remove()` is called even on panic.
@@ -1465,5 +1550,311 @@ You are broken."#,
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Session resume tests (feat-018) ---
+
+    /// Helper: create a session via the service layer.
+    fn create_session_via_service(
+        db: &Db,
+        ws_id: &str,
+        provider_id: &str,
+        parent_session_id: Option<&str>,
+    ) -> crate::store::sessions::Session {
+        SessionService::create_session(db, ws_id, provider_id, None, None, None, parent_session_id)
+            .unwrap()
+    }
+
+    /// Helper: transition a session to "completed" so it can be used as a resume parent.
+    fn complete_session(db: &Db, session_id: &str) {
+        SessionStore::update_status(db, session_id, "completed").unwrap();
+    }
+
+    #[test]
+    fn test_session_resume() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create parent with 3 messages, then complete it
+        let parent = create_session_via_service(&db, &ws_id, &provider_id, None);
+        MessageStore::create(&db, &parent.id, "user", "hello", None).unwrap();
+        MessageStore::create(&db, &parent.id, "assistant", "hi there", None).unwrap();
+        MessageStore::create(&db, &parent.id, "user", "how are you?", None).unwrap();
+        complete_session(&db, &parent.id);
+
+        // Create child resuming from parent
+        let child = create_session_via_service(&db, &ws_id, &provider_id, Some(&parent.id));
+
+        // Verify child has parent reference
+        assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+
+        // Verify messages were copied (count and content, not order — UUIDs are random)
+        let msgs = MessageStore::load_all(&db, &child.id, 1000).unwrap();
+        assert_eq!(msgs.len(), 3, "child should have 3 copied messages");
+
+        let contents: Vec<&str> = msgs.iter().map(|m| m.content.as_str()).collect();
+        assert!(contents.contains(&"hello"), "should contain 'hello'");
+        assert!(contents.contains(&"hi there"), "should contain 'hi there'");
+        assert!(
+            contents.contains(&"how are you?"),
+            "should contain 'how are you?'"
+        );
+
+        // Verify roles are preserved
+        let roles: Vec<&str> = msgs.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles.iter().filter(|r| **r == "user").count(), 2);
+        assert_eq!(roles.iter().filter(|r| **r == "assistant").count(), 1);
+
+        // Verify all messages belong to child session
+        for msg in &msgs {
+            assert_eq!(msg.session_id, child.id);
+        }
+
+        // Verify parent messages are unchanged
+        let parent_msgs = MessageStore::load_all(&db, &parent.id, 1000).unwrap();
+        assert_eq!(parent_msgs.len(), 3, "parent should still have 3 messages");
+    }
+
+    #[test]
+    fn test_session_resume_chain() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create grandparent with 2 messages, then complete it
+        let grandparent = create_session_via_service(&db, &ws_id, &provider_id, None);
+        MessageStore::create(&db, &grandparent.id, "user", "first", None).unwrap();
+        MessageStore::create(&db, &grandparent.id, "assistant", "second", None).unwrap();
+        complete_session(&db, &grandparent.id);
+
+        // Create parent resuming from grandparent — gets grandparent's 2 messages copied
+        let parent = create_session_via_service(&db, &ws_id, &provider_id, Some(&grandparent.id));
+        // Add 3 more messages to parent
+        MessageStore::create(&db, &parent.id, "user", "third", None).unwrap();
+        MessageStore::create(&db, &parent.id, "assistant", "fourth", None).unwrap();
+        MessageStore::create(&db, &parent.id, "user", "fifth", None).unwrap();
+
+        // Parent should have 5 messages (2 copied + 3 new)
+        let parent_msgs = MessageStore::load_all(&db, &parent.id, 1000).unwrap();
+        assert_eq!(parent_msgs.len(), 5, "parent should have 5 messages");
+        complete_session(&db, &parent.id);
+
+        // Create child resuming from parent — gets parent's 5 messages copied
+        let child = create_session_via_service(&db, &ws_id, &provider_id, Some(&parent.id));
+
+        // Child should have all 5 messages from parent (which include grandparent's)
+        let msgs = MessageStore::load_all(&db, &child.id, 1000).unwrap();
+        assert_eq!(
+            msgs.len(),
+            5,
+            "child should have 5 messages (parent's full history)"
+        );
+
+        // Verify all expected content is present
+        let contents: Vec<&str> = msgs.iter().map(|m| m.content.as_str()).collect();
+        for expected in &["first", "second", "third", "fourth", "fifth"] {
+            assert!(contents.contains(expected), "should contain '{}'", expected);
+        }
+    }
+
+    #[test]
+    fn test_session_resume_no_parent() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create session without parent — should work normally
+        let session = create_session_via_service(&db, &ws_id, &provider_id, None);
+        assert!(session.parent_session_id.is_none());
+
+        let msgs = MessageStore::load_all(&db, &session.id, 1000).unwrap();
+        assert_eq!(msgs.len(), 0, "non-resumed session should have no messages");
+    }
+
+    #[test]
+    fn test_session_resume_parent_not_found() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some("nonexistent-session-id"),
+        );
+
+        match result {
+            Err(AppError::NotFound { resource, .. }) => {
+                assert_eq!(resource, "session");
+            }
+            other => panic!("expected NotFound, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_session_resume_wrong_workspace() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create parent in default workspace
+        let parent = create_session_via_service(&db, &ws_id, &provider_id, None);
+        complete_session(&db, &parent.id);
+
+        // Create a second workspace
+        let ws2 = crate::store::workspaces::WorkspaceStore::create(&db, "other-ws").unwrap();
+
+        // Try to resume from parent in different workspace
+        let result = SessionService::create_session(
+            &db,
+            &ws2.id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&parent.id),
+        );
+
+        match result {
+            Err(AppError::Validation(msg)) => {
+                assert!(
+                    msg.contains("different workspace"),
+                    "unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Validation, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_session_resume_depth_limit() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create a chain of MAX_RESUME_DEPTH + 1 sessions (6 sessions, 5 hops)
+        let mut sessions = Vec::new();
+        let s1 = create_session_via_service(&db, &ws_id, &provider_id, None);
+        sessions.push(s1);
+
+        for i in 1..=MAX_RESUME_DEPTH {
+            let parent = &sessions[i - 1];
+            complete_session(&db, &parent.id);
+            let s = create_session_via_service(&db, &ws_id, &provider_id, Some(&parent.id));
+            sessions.push(s);
+        }
+
+        // The 6th session (MAX_RESUME_DEPTH=5, chain of 6 = 5 hops) should succeed
+        assert_eq!(sessions.len(), MAX_RESUME_DEPTH + 1);
+
+        // Creating one more (6 hops) should fail
+        let deepest = &sessions[sessions.len() - 1];
+        complete_session(&db, &deepest.id);
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&deepest.id),
+        );
+
+        match result {
+            Err(AppError::Validation(msg)) => {
+                assert!(
+                    msg.contains("depth") || msg.contains("exceeds"),
+                    "unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Validation for depth limit, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_session_resume_cycle() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create A -> B chain
+        let a = create_session_via_service(&db, &ws_id, &provider_id, None);
+        complete_session(&db, &a.id);
+        let b = create_session_via_service(&db, &ws_id, &provider_id, Some(&a.id));
+
+        // Manually create a cycle: set A's parent to B
+        db.conn()
+            .execute(
+                "UPDATE sessions SET parent_session_id = ?1 WHERE id = ?2",
+                rusqlite::params![b.id, a.id],
+            )
+            .unwrap();
+
+        // Try to resume from B — should detect cycle (B -> A -> B)
+        complete_session(&db, &b.id);
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&b.id),
+        );
+
+        match result {
+            Err(AppError::Validation(msg)) => {
+                assert!(msg.contains("cycle"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected Validation for cycle, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_session_resume_empty_parent() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create parent with no messages
+        let parent = create_session_via_service(&db, &ws_id, &provider_id, None);
+        complete_session(&db, &parent.id);
+
+        // Resume from empty parent
+        let child = create_session_via_service(&db, &ws_id, &provider_id, Some(&parent.id));
+
+        let msgs = MessageStore::load_all(&db, &child.id, 1000).unwrap();
+        assert_eq!(
+            msgs.len(),
+            0,
+            "child of empty parent should have no messages"
+        );
+    }
+
+    #[test]
+    fn test_session_resume_active_parent_rejected() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create parent but leave it in "connecting" status (not terminal)
+        let parent = create_session_via_service(&db, &ws_id, &provider_id, None);
+        MessageStore::create(&db, &parent.id, "user", "hello", None).unwrap();
+
+        // Try to resume from active parent — should fail
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&parent.id),
+        );
+
+        match result {
+            Err(AppError::Validation(msg)) => {
+                assert!(msg.contains("connecting"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected Validation for active parent, got: {:?}", other),
+        }
     }
 }

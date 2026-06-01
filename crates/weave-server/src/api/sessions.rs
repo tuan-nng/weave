@@ -8,6 +8,7 @@ use std::convert::Infallible;
 
 use crate::api::responses::DataResponse;
 use crate::error::AppError;
+use crate::service::sessions::SessionService;
 use crate::sse::SseWireEvent;
 use crate::store::sessions::{MessagePage, MessageStore, SessionPage, SessionStore};
 use crate::AppState;
@@ -65,10 +66,7 @@ pub async fn create_session(
     ),
     AppError,
 > {
-    // Validate workspace exists
-    crate::store::workspaces::WorkspaceStore::get_by_id(&state.db, &workspace_id)?;
-
-    let session = SessionStore::create(
+    let session = SessionService::create_session(
         &state.db,
         &workspace_id,
         &body.provider_id,

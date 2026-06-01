@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use tracing::info;
 
+use crate::error::AppError;
+
 /// Database connection wrapper with interior mutability.
 ///
 /// Encapsulates a single SQLite connection behind a mutex.
@@ -53,6 +55,26 @@ impl Db {
     /// Use this for all queries: `db.conn().execute(...)`.
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("database lock poisoned")
+    }
+
+    /// Execute a closure within a database transaction.
+    ///
+    /// Acquires the connection lock, begins a transaction, and passes
+    /// `&Connection` to the closure. Commits on `Ok`, auto-rollbacks on `Err`.
+    pub fn with_transaction<T, F>(&self, f: F) -> Result<T, AppError>
+    where
+        F: FnOnce(&Connection) -> Result<T, AppError>,
+    {
+        let mut conn = self.conn.lock().expect("database lock poisoned");
+        let tx = conn.transaction()?;
+        match f(&tx) {
+            Ok(val) => {
+                tx.commit()?;
+                Ok(val)
+            }
+            Err(e) => Err(e),
+            // tx drops here on Err, auto-rollback via RAII
+        }
     }
 
     /// Run all pending migrations in order.
