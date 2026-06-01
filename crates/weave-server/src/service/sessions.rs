@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -11,7 +12,9 @@ use crate::specialist::{Specialist, SpecialistRegistry};
 use crate::sse::{self, SseWireEvent};
 use crate::store::providers::ProviderStore;
 use crate::store::sessions::{MessageStore, SessionStore};
+use crate::store::traces::{TraceEvent, TraceEventKind};
 use crate::tools::ToolRegistry;
+use crate::trace;
 
 use super::ActiveSessions;
 
@@ -303,6 +306,13 @@ async fn run_prompt_task(
     // Stream and accumulate with cancellation support
     use futures_util::StreamExt;
 
+    // Spawn trace collector flush task
+    let (trace_collector, flush_handle) = trace::spawn_flush_task(db.clone());
+
+    // Track pending tool calls for duration computation
+    let mut pending_tools: HashMap<String, (String, serde_json::Value, std::time::Instant)> =
+        HashMap::new();
+
     let mut accumulated = String::new();
     let mut stream = stream;
     let mut had_error = false;
@@ -311,6 +321,10 @@ async fn run_prompt_task(
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!(session_id, "session cancelled by user");
+                // Drain orphaned pending tool calls
+                drain_pending_tools(&trace_collector, session_id, &mut pending_tools);
+                drop(trace_collector);
+                let _ = flush_handle.await;
                 sse_manager.broadcast(
                     session_id,
                     SseWireEvent::Done { stop_reason: agent::StopReason::Cancelled },
@@ -331,11 +345,51 @@ async fn run_prompt_task(
                             agent::StreamEvent::TextDelta { text } => {
                                 accumulated.push_str(&text);
                             }
+                            agent::StreamEvent::ToolUseStart { id, name, input } => {
+                                pending_tools.insert(id, (name, input, std::time::Instant::now()));
+                            }
+                            agent::StreamEvent::ToolResult { id, result } => {
+                                if let Some((name, input, start)) = pending_tools.remove(&id) {
+                                    let duration_ms = start.elapsed().as_millis() as u64;
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    // Extract file changes from tool input
+                                    for fc in trace::extract_file_changes(
+                                        session_id, &name, &input, &ts,
+                                    ) {
+                                        trace_collector.emit(fc);
+                                    }
+                                    // Emit tool call trace event
+                                    trace_collector.emit(TraceEvent {
+                                        session_id: session_id.to_string(),
+                                        kind: TraceEventKind::ToolCall {
+                                            tool_name: name,
+                                            input_json: input.to_string(),
+                                            output_json: result,
+                                            duration_ms,
+                                        },
+                                        timestamp: ts,
+                                    });
+                                }
+                            }
+                            agent::StreamEvent::Thinking { text } => {
+                                trace_collector.emit(TraceEvent {
+                                    session_id: session_id.to_string(),
+                                    kind: TraceEventKind::Decision { text },
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                });
+                            }
                             agent::StreamEvent::Done { .. } => {
                                 break;
                             }
                             agent::StreamEvent::Error { message } => {
                                 error!(session_id, error = %message, "agent stream error");
+                                trace_collector.emit(TraceEvent {
+                                    session_id: session_id.to_string(),
+                                    kind: TraceEventKind::Error {
+                                        message: message.clone(),
+                                    },
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                });
                                 had_error = true;
                                 break;
                             }
@@ -363,6 +417,13 @@ async fn run_prompt_task(
         }
     }
 
+    // Drain orphaned pending tool calls (ToolUseStart without ToolResult)
+    drain_pending_tools(&trace_collector, session_id, &mut pending_tools);
+
+    // Flush remaining trace events
+    drop(trace_collector);
+    let _ = flush_handle.await;
+
     // Check cancellation after loop (race between Done and Cancel)
     if cancel_token.is_cancelled() {
         info!(session_id, "session cancelled by user (after stream end)");
@@ -388,6 +449,30 @@ async fn run_prompt_task(
     let final_status = if had_error { "error" } else { "completed" };
     if let Err(e) = SessionStore::update_status(&db, session_id, final_status) {
         error!(session_id, error = %e, "failed to update session to {}", final_status);
+    }
+}
+
+/// Drain orphaned pending tool calls (ToolUseStart without matching ToolResult).
+///
+/// Emits a trace event for each incomplete tool call so that the trace
+/// contains a record of tools that were invoked but never completed.
+fn drain_pending_tools(
+    trace_collector: &trace::TraceCollector,
+    session_id: &str,
+    pending: &mut HashMap<String, (String, serde_json::Value, std::time::Instant)>,
+) {
+    for (_id, (name, input, start)) in pending.drain() {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        trace_collector.emit(TraceEvent {
+            session_id: session_id.to_string(),
+            kind: TraceEventKind::ToolCall {
+                tool_name: name,
+                input_json: input.to_string(),
+                output_json: r#"{"error":"incomplete"}"#.to_string(),
+                duration_ms,
+            },
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        });
     }
 }
 

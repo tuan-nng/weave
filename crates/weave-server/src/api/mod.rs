@@ -2,6 +2,7 @@ pub mod health;
 pub mod providers;
 pub mod responses;
 pub mod sessions;
+pub mod traces;
 pub mod workspaces;
 
 use axum::routing::get;
@@ -62,6 +63,19 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             axum::routing::post(sessions::cancel_session),
         )
         .route("/api/sessions/{sid}/stream", get(sessions::session_stream))
+        // Trace routes
+        .route(
+            "/api/sessions/{sid}/trace",
+            get(traces::get_session_trace),
+        )
+        .route(
+            "/api/sessions/{sid}/trace/journey",
+            get(traces::get_session_journey),
+        )
+        .route(
+            "/api/sessions/{sid}/trace/files",
+            get(traces::get_session_file_changes),
+        )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))
 }

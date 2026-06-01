@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** e884448 (feat-016)
+- **Latest commit:** (feat-017, uncommitted)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 297 tests pass (38 new for feat-016 + 259 existing)
+- **Test status:** green — 314 tests pass (17 new for feat-017 + 297 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -35,6 +35,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-013**: Filesystem tools (fs_read, fs_write, fs_edit, fs_search, fs_list — PathValidator, symlink-aware containment, control-plane protection)
 - [x] **feat-014**: Shell tool (shell_exec — sh -c wrapper, tokio::process::Command, timeout, 100KB output truncation, tracing::info! trace event)
 - [x] **feat-015**: Git tools (git_status, git_diff, git_log, git_commit — tools/git/ directory, async run_git, validate_commit_identity, 50KB diff truncation, profile updates)
+- [x] **feat-016**: Task context tools (get_task, list_tasks, update_task_status, update_task_fields — tools/task/ directory, TaskStore, workspace-scoped queries, migration 004)
+- [x] **feat-017**: TraceCollector (trace/ module with channel-based collector, background flush task, file change extraction; store/traces.rs with TraceStore; api/traces.rs with 3 endpoints; streaming loop integration with pending tool tracking)
 
 ## In Progress
 
@@ -50,7 +52,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-016: Task context tools (depends on feat-012 — passing)
+1. Start feat-018: Session resume (depends on feat-008 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Session Notes
@@ -142,15 +144,26 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - 297 tests pass (38 new: 22 store/tasks + 16 tools/task)
 - All review findings addressed: workspace scoping via JOIN, RETURNING_COLS for UPDATE queries, list limit
 
+### 2026-06-01 — feat-017: TraceCollector
+- Created `src/trace/` directory with `mod.rs` — TraceCollector (mpsc::UnboundedSender), extract_file_changes(), spawn_flush_task()
+- Created `src/store/traces.rs` — TraceStore with insert_batch, list_by_session, list_journey, list_file_changes
+- Created `src/api/traces.rs` — 3 GET endpoints: /trace, /trace/journey, /trace/files
+- Replaced TraceCollector stub in `tools/mod.rs` with re-export from `trace::TraceCollector`
+- Streaming loop in `service/sessions.rs` now tracks pending_tool_calls (HashMap<id, (name, input, Instant)>)
+- Trace events emitted for: ToolUseStart+ToolResult (tool_call), Thinking (decision), Error (error), file changes extracted from fs_write/fs_edit inputs
+- Background flush task: unbounded channel, 200ms interval, batch size 50, transactional inserts
+- drain_pending_tools() helper emits incomplete tool calls on cancel/stream-end
+- `traces` and `file_changes` tables already existed in migration 002 — no new migration needed
+- 314 tests pass (17 new: 6 store/traces + 7 trace module + 3 API + 1 UTF-8 truncation)
+- All 5 review findings addressed: UTF-8 boundary safety, orphaned tool calls, output_json encoding, cancellation flush, dead code removal
+
 ## Notes for Next Session
 
-- feat-016 created: `src/tools/task/` directory (5 files), `src/store/tasks.rs`
-- `ToolContext` now has `workspace_id` field — all future tools should use it for workspace scoping
-- Task tools are the first to hold `Arc<Db>` — pattern for future DB-accessing tools
-- Tool registration in `main.rs`: 14 tools now (5 fs + 1 shell + 4 git + 4 task)
-- `implementation` profile has 15 tools listed, 14 now registered (artifacts still pending)
-- `review` profile has 10 tools listed (3 git tools, no git_commit, 3 task tools)
-- Next feature: feat-017 (TraceCollector) — depends on feat-009, feat-012
+- feat-017 created: `src/trace/` directory, `src/store/traces.rs`, `src/api/traces.rs`
+- TraceCollector is now channel-based (replaces unit struct stub) — `TraceCollector::new(tx)` takes an UnboundedSender
+- `make_context` in tools/mod.rs test_support updated to construct with channel
+- Tool registration unchanged: still 14 tools (5 fs + 1 shell + 4 git + 4 task)
+- Next feature: feat-018 (Session resume) — depends on feat-008 (passing)
 
 ## Out-of-Scope Items Noticed
 

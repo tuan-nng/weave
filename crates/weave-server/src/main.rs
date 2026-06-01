@@ -8,6 +8,7 @@ mod specialist;
 mod sse;
 mod store;
 mod tools;
+mod trace;
 
 use clap::Parser;
 use config::Config;

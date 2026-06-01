@@ -17,17 +17,11 @@ use crate::error::AppError;
 // Types
 // ---------------------------------------------------------------------------
 
-/// Stub trace collector for future observability (feat-017).
+/// Trace collector re-exported from the trace module.
 ///
-/// Will be replaced with a real implementation that records tool calls,
-/// file changes, and decisions during agent execution.
-pub struct TraceCollector;
-
-impl TraceCollector {
-    pub fn new() -> Self {
-        Self
-    }
-}
+/// Holds the sender half of an mpsc channel. The session streaming loop
+/// calls `emit()` to send trace events to the background flush task.
+pub use crate::trace::TraceCollector;
 
 /// Context passed to tool execution.
 ///
@@ -317,12 +311,13 @@ pub(crate) mod test_support {
 
     /// Create a `ToolContext` for testing with the given root path.
     pub(crate) fn make_context(root: &std::path::Path) -> super::ToolContext {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         super::ToolContext {
             session_id: "test-session".to_string(),
             workspace_id: "test-workspace".to_string(),
             cwd: root.to_path_buf(),
             codebase_root: root.to_path_buf(),
-            trace_collector: std::sync::Arc::new(super::TraceCollector::new()),
+            trace_collector: std::sync::Arc::new(super::TraceCollector::new(tx)),
         }
     }
 
