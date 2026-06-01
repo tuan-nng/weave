@@ -6,10 +6,29 @@ import {
   useRenameWorkspace,
   useWorkspaces,
 } from "../../hooks/use-workspaces";
+import { useProviders } from "../../hooks/use-providers";
 import { ROUTES } from "../../lib/routes";
 import { Modal } from "../../components/modal";
 import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
+
+const WORKSPACE_COLORS = [
+  { from: "from-brand-blue-50", to: "to-brand-blue-100", border: "border-brand-blue-200/60", icon: "text-brand-blue-500" },
+  { from: "from-brand-orchid-50", to: "to-brand-orchid-100", border: "border-brand-orchid-200/60", icon: "text-brand-orchid-500" },
+  { from: "from-brand-emerald-50", to: "to-brand-emerald-100", border: "border-brand-emerald-200/60", icon: "text-brand-emerald-500" },
+  { from: "from-brand-amber-50", to: "to-brand-amber-100", border: "border-brand-amber-200/60", icon: "text-brand-amber-500" },
+];
+
+function WorkspaceIcon({ colorIndex }: { colorIndex: number }) {
+  const c = WORKSPACE_COLORS[colorIndex % WORKSPACE_COLORS.length];
+  return (
+    <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${c.from} ${c.to} border ${c.border} flex items-center justify-center flex-shrink-0`}>
+      <svg className={`w-5 h-5 ${c.icon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+      </svg>
+    </div>
+  );
+}
 
 export default function HomePage() {
   const { data: workspacesResp, isLoading, error } = useWorkspaces();
@@ -17,6 +36,7 @@ export default function HomePage() {
   const createWs = useCreateWorkspace();
   const renameWs = useRenameWorkspace();
   const deleteWs = useDeleteWorkspace();
+  const { data: providers } = useProviders();
 
   const [newName, setNewName] = useState("");
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -79,112 +99,123 @@ export default function HomePage() {
   if (isLoading) return <Spinner />;
 
   if (error) {
-    return <div className="p-8 text-center text-red-600">Failed to load workspaces</div>;
+    return <div className="p-8 text-center text-brand-red-600">Failed to load workspaces</div>;
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-8 py-8">
+    <div className="max-w-5xl mx-auto px-8 py-8 lg:px-12 lg:py-10">
       {bannerError && <ErrorBanner message={bannerError} onDismiss={() => setBannerError(null)} />}
 
       {/* Header */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold text-neutral-900 tracking-tight">Workspaces</h1>
-        <p className="mt-1 text-sm text-neutral-500">Manage your agent coordination workspaces</p>
+      <div className="mb-8 animate-fade-in">
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">Workspaces</h1>
+        <p className="mt-1.5 text-sm text-slate-500">Manage your agent coordination workspaces</p>
       </div>
 
       {/* Create form */}
-      <div className="bg-white rounded-xl border border-neutral-200 p-5 mb-6">
-        <form onSubmit={handleCreate} className="flex gap-3">
-          <input
-            type="text"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Enter workspace name..."
-            className="flex-1 h-10 px-3.5 bg-neutral-50 border border-neutral-200 rounded-lg text-sm text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            required
-          />
-          <button
-            type="submit"
-            disabled={createWs.isPending}
-            className="h-10 px-4 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors disabled:opacity-50"
-          >
-            Create
-          </button>
-        </form>
+      <div className="mb-8 animate-fade-in-up" style={{ animationDelay: "50ms" }}>
+        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)] transition-shadow duration-200">
+          <form onSubmit={handleCreate} className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Enter workspace name..."
+                className="w-full h-10 pl-10 pr-4 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
+                required
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={createWs.isPending}
+              className="h-10 px-5 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md disabled:opacity-50"
+            >
+              Create
+            </button>
+          </form>
+        </div>
       </div>
 
       {/* Workspace list */}
       {workspaces && workspaces.length > 0 ? (
-        <div className="space-y-3">
-          {workspaces.map((ws) => (
+        <div className="space-y-3 animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+          {workspaces.map((ws, index) => (
             <div
               key={ws.id}
-              className="bg-white rounded-xl border border-neutral-200 p-4 flex items-center gap-4 group hover:border-neutral-300 transition-colors"
+              className="group block rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)] hover:border-brand-blue-200 hover:bg-white transition-all duration-200"
             >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-3">
-                  {ws.is_default && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-medium rounded-md">
-                      ★ Default
-                    </span>
-                  )}
-                  {renamingId === ws.id ? (
-                    <input
-                      type="text"
-                      value={renameValue}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onBlur={() => handleRename(ws.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleRename(ws.id);
-                        if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      autoFocus
-                      className="inline-edit text-sm font-medium"
-                      style={{ minWidth: 120 }}
-                    />
-                  ) : (
-                    <Link
-                      to={ROUTES.workspace(ws.id)}
-                      className="text-sm font-medium text-neutral-900 hover:text-blue-600 transition-colors"
-                    >
-                      {ws.name}
-                    </Link>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4 min-w-0">
+                  <WorkspaceIcon colorIndex={ws.is_default ? 0 : (index % (WORKSPACE_COLORS.length - 1)) + 1} />
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2.5">
+                      {renamingId === ws.id ? (
+                        <input
+                          type="text"
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onBlur={() => handleRename(ws.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleRename(ws.id);
+                            if (e.key === "Escape") setRenamingId(null);
+                          }}
+                          autoFocus
+                          className="text-sm font-semibold text-slate-900 bg-transparent border-b border-brand-blue-400 outline-none"
+                          style={{ minWidth: 120 }}
+                        />
+                      ) : (
+                        <Link
+                          to={ROUTES.workspace(ws.id)}
+                          className="text-sm font-semibold text-slate-900 hover:text-brand-blue-600 transition-colors truncate"
+                        >
+                          {ws.name}
+                        </Link>
+                      )}
+                      {ws.is_default && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-brand-blue-50 text-brand-blue-700 border border-brand-blue-200/60 uppercase">
+                          ★ Default
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400 mt-0.5 font-mono">
+                      Created {new Date(ws.created_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                  {!ws.is_default && (
+                    <>
+                      <button
+                        onClick={() => {
+                          setRenamingId(ws.id);
+                          setRenameValue(ws.name);
+                        }}
+                        className="h-8 px-3 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-all duration-150"
+                      >
+                        Rename
+                      </button>
+                      <button
+                        onClick={() => setDeleteTarget({ id: ws.id, name: ws.name })}
+                        className="h-8 px-3 text-xs font-medium text-brand-red-600 bg-brand-red-50 border border-brand-red-200/60 rounded-lg hover:bg-brand-red-100 transition-all duration-150"
+                      >
+                        Delete
+                      </button>
+                    </>
                   )}
                 </div>
-                <p className="mt-1 text-xs text-neutral-500 font-mono">
-                  Created {new Date(ws.created_at).toLocaleDateString()}
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                {!ws.is_default && (
-                  <>
-                    <button
-                      onClick={() => {
-                        setRenamingId(ws.id);
-                        setRenameValue(ws.name);
-                      }}
-                      className="h-8 px-3 text-xs font-medium text-neutral-600 bg-neutral-50 border border-neutral-200 rounded-md hover:bg-neutral-100 transition-colors"
-                    >
-                      Rename
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget({ id: ws.id, name: ws.name })}
-                      className="h-8 px-3 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-md hover:bg-red-100 transition-colors"
-                    >
-                      Delete
-                    </button>
-                  </>
-                )}
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-neutral-200 p-12 text-center">
-          <div className="w-12 h-12 bg-neutral-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+          <div className="w-12 h-12 bg-brand-slate-100 rounded-xl flex items-center justify-center mx-auto mb-4">
             <svg
-              className="w-6 h-6 text-neutral-400"
+              className="w-6 h-6 text-slate-400"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -197,17 +228,35 @@ export default function HomePage() {
               />
             </svg>
           </div>
-          <h3 className="text-sm font-medium text-neutral-900 mb-1">No workspaces</h3>
-          <p className="text-sm text-neutral-500">Create your first workspace to get started</p>
+          <h3 className="text-sm font-medium text-slate-900 mb-1">No workspaces</h3>
+          <p className="text-sm text-slate-500">Create your first workspace to get started</p>
+        </div>
+      )}
+
+      {/* Stats Row */}
+      {workspaces && workspaces.length > 0 && (
+        <div className="mt-10 grid grid-cols-3 gap-4 animate-fade-in-up" style={{ animationDelay: "150ms" }}>
+          <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Workspaces</p>
+            <p className="text-2xl font-display font-semibold text-slate-900">{workspaces.length}</p>
+          </div>
+          <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Providers</p>
+            <p className="text-2xl font-display font-semibold text-brand-blue-600">{providers?.length ?? 0}</p>
+          </div>
+          <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Status</p>
+            <p className="text-2xl font-display font-semibold text-brand-emerald-600">Ready</p>
+          </div>
         </div>
       )}
 
       {/* Delete confirmation modal */}
       <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <div className="flex items-start gap-4 mb-6">
-          <div className="w-10 h-10 bg-red-50 rounded-full flex items-center justify-center flex-shrink-0">
+          <div className="w-10 h-10 bg-brand-red-50 rounded-full flex items-center justify-center flex-shrink-0">
             <svg
-              className="w-5 h-5 text-red-500"
+              className="w-5 h-5 text-brand-red-500"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -221,8 +270,8 @@ export default function HomePage() {
             </svg>
           </div>
           <div>
-            <h3 className="text-base font-semibold text-neutral-900">Confirm deletion</h3>
-            <p className="mt-1 text-sm text-neutral-500">
+            <h3 className="text-base font-semibold text-slate-900">Confirm deletion</h3>
+            <p className="mt-1 text-sm text-slate-500">
               Are you sure you want to delete "{deleteTarget?.name}"? All sessions will be removed.
             </p>
           </div>
@@ -230,14 +279,14 @@ export default function HomePage() {
         <div className="flex justify-end gap-3">
           <button
             onClick={() => setDeleteTarget(null)}
-            className="h-10 px-4 text-sm font-medium text-neutral-700 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+            className="h-10 px-4 text-sm font-medium text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all duration-150"
           >
             Cancel
           </button>
           <button
             onClick={handleDelete}
             disabled={deleteWs.isPending}
-            className="h-10 px-4 text-sm font-medium text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors disabled:opacity-50"
+            className="h-10 px-4 text-sm font-medium text-white bg-brand-red-500 rounded-xl hover:bg-brand-red-600 transition-all duration-150 disabled:opacity-50"
           >
             Delete
           </button>

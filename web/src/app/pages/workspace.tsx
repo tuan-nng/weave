@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { useCreateSession, useWorkspaceSessions, useWorkspaces } from "../../hooks/use-workspaces";
 import { useProviders } from "../../hooks/use-providers";
 import { ROUTES } from "../../lib/routes";
@@ -11,6 +11,7 @@ import type { CreateSessionRequest } from "../../lib/types";
 
 export default function WorkspacePage() {
   const { id: workspaceId } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { data: workspacesResp } = useWorkspaces();
   const { data: sessionsResp, isLoading, error } = useWorkspaceSessions(workspaceId!);
   const { data: providers } = useProviders();
@@ -37,9 +38,10 @@ export default function WorkspacePage() {
     }
 
     createSession.mutate(form, {
-      onSuccess: () => {
+      onSuccess: (session) => {
         setShowNewSession(false);
         setForm({ provider_id: "", specialist_id: undefined, model: undefined });
+        navigate(ROUTES.session(session.id));
       },
       onError: (err) => {
         setBannerError(err instanceof Error ? err.message : "Failed to create session");
@@ -50,107 +52,136 @@ export default function WorkspacePage() {
   if (isLoading) return <Spinner />;
 
   if (error) {
-    return <div className="p-8 text-center text-red-600">Failed to load sessions</div>;
+    return <div className="p-8 text-center text-brand-red-600">Failed to load sessions</div>;
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-8 py-8">
+    <div className="max-w-6xl mx-auto px-8 py-8 lg:px-12 lg:py-10">
       {bannerError && <ErrorBanner message={bannerError} onDismiss={() => setBannerError(null)} />}
 
       {/* Back navigation */}
       <Link
         to={ROUTES.home}
-        className="flex items-center gap-2 text-sm text-neutral-500 hover:text-neutral-700 mb-6 transition-colors"
+        className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-brand-blue-600 transition-colors duration-150 mb-6 group"
       >
         <svg
-          className="w-4 h-4"
+          className="w-4 h-4 transition-transform duration-150 group-hover:-translate-x-0.5"
           fill="none"
           viewBox="0 0 24 24"
           stroke="currentColor"
           strokeWidth={2}
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18"
-          />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
         </svg>
         Back to Workspaces
       </Link>
 
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-semibold text-neutral-900 tracking-tight">
-            {workspace?.name ?? "Workspace"}
-          </h1>
-          <p className="mt-1 text-sm text-neutral-500">Manage sessions for this workspace</p>
+      <div className="flex items-center justify-between mb-8 animate-fade-in">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-blue-50 to-brand-blue-100 border border-brand-blue-200/60 flex items-center justify-center">
+            <svg className="w-5 h-5 text-brand-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+          </div>
+          <div>
+            <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">
+              {workspace?.name ?? "Workspace"}
+            </h1>
+            {workspaceId && (
+              <p className="text-xs text-slate-400 font-mono mt-0.5">{workspaceId}</p>
+            )}
+          </div>
         </div>
         <button
           onClick={() => setShowNewSession(true)}
-          className="h-10 px-4 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-colors flex items-center gap-2"
+          className="h-10 px-5 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md inline-flex items-center gap-2"
         >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
           New Session
         </button>
       </div>
 
+      {/* Quick Stats */}
+      {sessions && (
+        <div className="grid grid-cols-4 gap-3 mb-8 animate-fade-in-up" style={{ animationDelay: "50ms" }}>
+          <div className="rounded-xl border border-black/[0.06] bg-white/80 px-4 py-3">
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-0.5">Total</p>
+            <p className="text-xl font-display font-semibold text-slate-900">{sessions.length}</p>
+          </div>
+          <div className="rounded-xl border border-brand-blue-200/40 bg-brand-blue-50/50 px-4 py-3">
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-blue-400 mb-0.5">Active</p>
+            <p className="text-xl font-display font-semibold text-brand-blue-600">
+              {sessions.filter((s) => s.status === "connecting" || s.status === "ready").length}
+            </p>
+          </div>
+          <div className="rounded-xl border border-brand-emerald-200/40 bg-brand-emerald-50/50 px-4 py-3">
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-emerald-500 mb-0.5">Completed</p>
+            <p className="text-xl font-display font-semibold text-brand-emerald-600">
+              {sessions.filter((s) => s.status === "completed").length}
+            </p>
+          </div>
+          <div className="rounded-xl border border-brand-red-200/40 bg-brand-red-50/50 px-4 py-3">
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-red-400 mb-0.5">Errors</p>
+            <p className="text-xl font-display font-semibold text-brand-red-500">
+              {sessions.filter((s) => s.status === "error").length}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Session table */}
       {sessions && sessions.length > 0 ? (
-        <div className="bg-white rounded-xl border border-neutral-200 overflow-hidden">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-neutral-100">
-                <th className="text-left px-5 py-3 text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Status
-                </th>
-                <th className="text-left px-5 py-3 text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Specialist
-                </th>
-                <th className="text-left px-5 py-3 text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Model
-                </th>
-                <th className="text-left px-5 py-3 text-xs font-medium text-neutral-500 uppercase tracking-wider">
-                  Created
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((s) => (
-                <tr
-                  key={s.id}
-                  className="border-b border-neutral-100 last:border-0 cursor-pointer hover:bg-neutral-50 transition-colors"
-                >
-                  <td className="px-5 py-3.5">
-                    <StatusBadge status={s.status} />
-                  </td>
-                  <td className="px-5 py-3.5 text-sm text-neutral-700">
-                    {s.specialist_id ?? <span className="text-neutral-400">—</span>}
-                  </td>
-                  <td className="px-5 py-3.5 text-sm text-neutral-500 font-mono text-xs">
-                    {s.model ?? <span className="text-neutral-400">—</span>}
-                  </td>
-                  <td className="px-5 py-3.5 text-sm text-neutral-500 font-mono text-xs">
+        <div className="animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+          <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm overflow-hidden shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            {/* Table Header */}
+            <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
+              <div className="grid grid-cols-[140px_1fr_160px_140px_120px] gap-4 items-center">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Status</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Specialist</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Model</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Created</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 text-right">Actions</span>
+              </div>
+            </div>
+
+            {/* Session Rows */}
+            {sessions.map((s) => (
+              <Link
+                key={s.id}
+                to={ROUTES.session(s.id)}
+                className={`group block px-5 py-4 border-b border-slate-100/80 last:border-0 transition-colors duration-150 ${
+                  s.status === "error" ? "hover:bg-brand-red-50/20" : "hover:bg-brand-blue-50/30"
+                }`}
+              >
+                <div className="grid grid-cols-[140px_1fr_160px_140px_120px] gap-4 items-center">
+                  <StatusBadge status={s.status} />
+                  <span className="text-sm font-medium text-slate-900">
+                    {s.specialist_id ?? <span className="text-slate-400">—</span>}
+                  </span>
+                  <span className="text-sm text-slate-500 font-mono truncate">
+                    {s.model ?? <span className="text-slate-400">—</span>}
+                  </span>
+                  <span className="text-xs text-slate-400 font-mono">
                     {new Date(s.created_at).toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </span>
+                  <span className="text-right">
+                    <span className="text-xs font-medium text-brand-blue-600 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
+                      Open →
+                    </span>
+                  </span>
+                </div>
+              </Link>
+            ))}
+          </div>
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-neutral-200 p-12 text-center">
-          <div className="w-12 h-12 bg-neutral-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+          <div className="w-12 h-12 bg-brand-slate-100 rounded-xl flex items-center justify-center mx-auto mb-4">
             <svg
-              className="w-6 h-6 text-neutral-400"
+              className="w-6 h-6 text-slate-400"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -163,8 +194,8 @@ export default function WorkspacePage() {
               />
             </svg>
           </div>
-          <h3 className="text-sm font-medium text-neutral-900 mb-1">No sessions</h3>
-          <p className="text-sm text-neutral-500">
+          <h3 className="text-sm font-medium text-slate-900 mb-1">No sessions</h3>
+          <p className="text-sm text-slate-500">
             Create a new session to start coordinating agents
           </p>
         </div>
@@ -173,18 +204,12 @@ export default function WorkspacePage() {
       {/* New Session modal */}
       <Modal open={showNewSession} onClose={() => setShowNewSession(false)}>
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold text-neutral-900">New Session</h3>
+          <h3 className="text-lg font-semibold text-slate-900">New Session</h3>
           <button
             onClick={() => setShowNewSession(false)}
-            className="text-neutral-400 hover:text-neutral-600"
+            className="text-slate-400 hover:text-slate-600 transition-colors"
           >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -193,13 +218,13 @@ export default function WorkspacePage() {
         <form onSubmit={handleCreateSession} className="space-y-4">
           {/* Provider */}
           <div>
-            <label className="block text-sm font-medium text-neutral-700 mb-1.5">
-              Provider <span className="text-red-500">*</span>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+              Provider <span className="text-brand-red-500">*</span>
             </label>
             <select
               value={form.provider_id}
               onChange={(e) => setForm((f) => ({ ...f, provider_id: e.target.value }))}
-              className="w-full h-10 px-3.5 bg-white border border-neutral-200 rounded-lg text-sm text-neutral-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
               required
             >
               <option value="">Select provider...</option>
@@ -213,7 +238,7 @@ export default function WorkspacePage() {
 
           {/* Specialist */}
           <div>
-            <label className="block text-sm font-medium text-neutral-700 mb-1.5">Specialist</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Specialist</label>
             <input
               type="text"
               value={form.specialist_id ?? ""}
@@ -224,13 +249,13 @@ export default function WorkspacePage() {
                 }))
               }
               placeholder="Leave empty for none"
-              className="w-full h-10 px-3.5 bg-white border border-neutral-200 rounded-lg text-sm text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
             />
           </div>
 
           {/* Model */}
           <div>
-            <label className="block text-sm font-medium text-neutral-700 mb-1.5">Model</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Model</label>
             <input
               type="text"
               value={form.model ?? ""}
@@ -241,7 +266,7 @@ export default function WorkspacePage() {
                 }))
               }
               placeholder="Leave empty for provider default"
-              className="w-full h-10 px-3.5 bg-white border border-neutral-200 rounded-lg text-sm text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
             />
           </div>
 
@@ -250,14 +275,14 @@ export default function WorkspacePage() {
             <button
               type="button"
               onClick={() => setShowNewSession(false)}
-              className="h-10 px-4 text-sm font-medium text-neutral-700 bg-white border border-neutral-200 rounded-lg hover:bg-neutral-50 transition-colors"
+              className="h-10 px-4 text-sm font-medium text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all duration-150"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={createSession.isPending}
-              className="h-10 px-4 text-sm font-medium text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50"
+              className="h-10 px-4 text-sm font-medium text-white bg-brand-blue-500 rounded-xl hover:bg-brand-blue-600 transition-all duration-150 disabled:opacity-50"
             >
               Create Session
             </button>

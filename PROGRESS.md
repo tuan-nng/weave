@@ -9,8 +9,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** (pending commit)
-- **Active feature:** None (feat-020 completed)
+- **Latest commit:** (pending commit — UI redesign)
+- **Active feature:** UI redesign (not tracked in feature_list.json — visual polish pass)
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
 - **Test status:** green — 326 Rust tests + 21 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
@@ -174,6 +174,22 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - `HashMap` import expanded to include `HashSet`
 - 323 tests pass (9 new: resume, chain, no-parent, not-found, wrong-workspace, depth-limit, cycle, empty-parent, active-parent-rejected)
 - All 6 review findings addressed: terminal-state check, FK message, HashSet import, API test gap noted, standalone unit tests noted, `with_transaction` test noted
+
+### 2026-06-01 — UI redesign (Routa-inspired)
+- Redesigned all frontend pages using Open Design MCP mockups as reference
+- **index.css**: Added brand color theme (blue/amber/emerald/red/orchid/slate), Inter + Space Grotesk fonts via Google Fonts, `@theme inline` Tailwind v4 tokens, `fadeIn`/`fadeInUp` keyframes, thin scrollbar styles
+- **layout.tsx**: Sidebar widened to `w-60` (240px), gradient logo icon with lightning bolt, icon-based nav items (`h-10 rounded-xl`), active state with left accent bar (`w-0.5 bg-brand-blue-500`), primary/secondary nav divider, workspace context pill in footer, `useLocation()` for active link detection
+- **status-badge.tsx**: Updated to brand palette (emerald=ready, amber=connecting, blue=completed, red=error, slate=cancelled), added border, `rounded-lg`, `text-[11px]`
+- **modal.tsx**: `rounded-2xl`, `backdrop-blur-sm`, `animate-fade-in` on content
+- **spinner.tsx**: Brand blue/slate colors
+- **error-banner.tsx**: Brand red palette, `rounded-xl`, `animate-fade-in`
+- **home.tsx**: `rounded-2xl` semi-transparent cards (`bg-white/80 backdrop-blur-sm border-black/[0.06]`), color-coded workspace folder icons (blue/orchid/emerald/amber), stats row at bottom, staggered `animate-fade-in-up` with delays
+- **workspace.tsx**: Workspace icon + mono ID in header, 4-column stats grid (Total/Active/Completed/Errors), CSS grid-based table rows inside `rounded-2xl` card, animated back nav arrow (`group-hover:-translate-x-0.5`), session rows navigate to `/sessions/:id`, "Open →" hover reveal
+- **settings.tsx**: Form labels with `uppercase tracking-[0.14em]`, eye icon on password field, grid-based provider rows with amber gradient icon, hover-reveal delete button
+- **not-found.tsx**: `font-display` for 404, centered layout, animated arrow link
+- All 21 frontend tests pass, all 326 Rust tests pass
+- Key design tokens: `border-black/[0.06]` for subtle borders, `bg-white/80 backdrop-blur-sm` for semi-transparent surfaces, `rounded-2xl` for cards, `font-display` for headings
+- Open Design project: `weave-redesign` (3 HTML mockups: home.html, workspace.html, settings.html)
 
 ## Notes for Next Session
 

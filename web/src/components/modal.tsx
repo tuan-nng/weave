@@ -26,12 +26,14 @@ export function Modal({ open, onClose, children }: ModalProps) {
   return (
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => {
         if (e.target === backdropRef.current) onClose();
       }}
     >
-      <div className="bg-white rounded-xl shadow-xl max-w-lg w-full mx-4 p-6">{children}</div>
+      <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full mx-4 p-6 animate-fade-in">
+        {children}
+      </div>
     </div>
   );
 }
