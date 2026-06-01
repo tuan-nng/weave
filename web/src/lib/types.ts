@@ -4,9 +4,12 @@ export interface Workspace {
   id: string;
   name: string;
   status: string;
+  is_default: boolean;
   created_at: string;
   updated_at: string;
 }
+
+export type SessionStatus = "connecting" | "ready" | "completed" | "error" | "cancelled";
 
 export interface Session {
   id: string;
@@ -14,7 +17,7 @@ export interface Session {
   provider_id: string;
   specialist_id: string | null;
   parent_session_id: string | null;
-  status: string;
+  status: SessionStatus;
   model: string | null;
   cwd: string | null;
   created_at: string;
@@ -35,6 +38,14 @@ export interface Provider {
   type: string;
   name: string;
   created_at: string;
+}
+
+export interface SpecialistInfo {
+  name: string;
+  description: string;
+  model: string | null;
+  tool_profile: string | null;
+  tags: string[];
 }
 
 export interface Task {

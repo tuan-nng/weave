@@ -2,6 +2,7 @@ pub mod health;
 pub mod providers;
 pub mod responses;
 pub mod sessions;
+pub mod specialists;
 pub mod traces;
 pub mod workspaces;
 
@@ -39,6 +40,8 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             "/api/providers/{id}/models",
             get(providers::list_provider_models),
         )
+        // Specialist routes
+        .route("/api/specialists", get(specialists::list_specialists))
         // Session routes
         .route(
             "/api/workspaces/{wid}/sessions",

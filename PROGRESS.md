@@ -10,9 +10,9 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 - **Last updated:** 2026-06-01
 - **Latest commit:** (pending commit)
-- **Active feature:** none
+- **Active feature:** None (feat-020 completed)
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
-- **Test status:** green — 323 Rust tests + 12 frontend tests pass
+- **Test status:** green — 326 Rust tests + 21 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
 
 ## Completed Since Project Start
@@ -42,7 +42,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## In Progress
 
-(none)
+(none — ready for next feature)
 
 ## Blocked
 
@@ -50,12 +50,12 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Known Issues
 
-- `web/` directory does not exist yet (expected — Phase 3)
+(none)
 
 ## Next Steps
 
-1. Start feat-020: Home page with workspace list, session list, settings page
-2. Continue Phase 3 (Frontend) — feat-020 through feat-023
+1. Pick feat-021 (Session chat view) from feature_list.json
+2. Continue Phase 3 (Frontend) — feat-021 through feat-023
 
 ## Session Notes
 
@@ -187,6 +187,18 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - Router uses `createBrowserRouter` with 5 routes (home, workspace, session, settings, not-found)
 - Vite dev proxy: `/api` → `http://localhost:3000`
 - Phase 3 (Frontend) started — next: feat-020 (Home page, workspace list, settings)
+
+### 2026-06-01 — feat-020: Frontend pages (in progress)
+- Backend: Created `GET /api/specialists` endpoint (`api/specialists.rs`)
+- Added `Serialize` derive to `Specialist` struct (system_prompt excluded via `#[serde(skip)]`)
+- Added `SpecialistRegistry::insert()` method for testing/runtime registration
+- Registered route in `api/mod.rs`
+- 3 new tests pass: test_list_specialists, test_list_specialists_excludes_system_prompt, test_list_specialists_empty
+- Frontend: Added `SpecialistInfo` interface to `types.ts`
+- Frontend: Added `api.specialists.list()` to `api.ts`
+- Frontend: Added `specialists` query keys to `query-keys.ts`
+- Architecture: Minimal approach — 3 shared components (Modal, ErrorBanner, Spinner), 2 hooks (useWorkspaces, useProviders), inline sub-components in pages
+- Next: Design UI with Open Design MCP, then implement components
 
 ## Out-of-Scope Items Noticed
 

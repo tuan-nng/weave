@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,8 +7,18 @@ import HomePage from "../pages/home";
 import SettingsPage from "../pages/settings";
 import NotFoundPage from "../pages/not-found";
 
+// Mock the API module
+vi.mock("../../lib/api", () => ({
+  api: {
+    workspaces: { list: vi.fn().mockResolvedValue({ data: [] }) },
+    providers: { list: vi.fn().mockResolvedValue([]) },
+  },
+}));
+
 function renderWithRouter(path: string) {
-  const queryClient = new QueryClient();
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   const router = createMemoryRouter(
     [
       {
@@ -31,15 +41,15 @@ function renderWithRouter(path: string) {
 }
 
 describe("App shell", () => {
-  it("renders home page at /", () => {
+  it("renders home page at /", async () => {
     renderWithRouter("/");
-    expect(screen.getByRole("heading", { name: "Home" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Workspaces" })).toBeInTheDocument();
     expect(screen.getByText("Weave")).toBeInTheDocument();
   });
 
-  it("renders settings page at /settings", () => {
+  it("renders settings page at /settings", async () => {
     renderWithRouter("/settings");
-    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
   });
 
   it("renders 404 for unknown routes", () => {
@@ -48,7 +58,7 @@ describe("App shell", () => {
     expect(screen.getByText("Go home")).toBeInTheDocument();
   });
 
-  it("has navigation links in sidebar", () => {
+  it("has navigation links in sidebar", async () => {
     renderWithRouter("/");
     expect(screen.getByRole("link", { name: "Home" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");

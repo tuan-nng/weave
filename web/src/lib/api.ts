@@ -10,6 +10,7 @@ import type {
   Provider,
   Session,
   Message,
+  SpecialistInfo,
   TraceRow,
   UpdateWorkspaceRequest,
   Workspace,
@@ -122,6 +123,11 @@ export const api = {
       }),
     delete: (id: string) => apiFetch<null>(`/api/providers/${id}`, { method: "DELETE" }),
     models: (id: string) => apiFetch<ModelInfo[]>(`/api/providers/${id}/models`),
+  },
+
+  // Specialists
+  specialists: {
+    list: () => apiFetch<SpecialistInfo[]>("/api/specialists"),
   },
 
   // Sessions

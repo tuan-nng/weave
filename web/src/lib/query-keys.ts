@@ -17,6 +17,11 @@ export const queryKeys = {
     models: (id: string) => [...queryKeys.providers.all(), "models", id] as const,
   },
 
+  specialists: {
+    all: () => [...queryKeys.all, "specialists"] as const,
+    list: () => [...queryKeys.specialists.all(), "list"] as const,
+  },
+
   sessions: {
     all: () => [...queryKeys.all, "sessions"] as const,
     list: (workspaceId: string, params?: PaginationParams) =>

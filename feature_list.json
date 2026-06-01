@@ -209,10 +209,10 @@
       "id": "feat-020",
       "phase": "phase-3",
       "behavior": "Home page: workspace list with create/rename/delete. Workspace detail page: session list with status badges, create session button (pick provider + optional specialist + optional model). Settings page: provider list, add provider form (type, name, base_url, api_key, default_model), delete provider. All data via TanStack Query with loading skeletons and error banners.",
-      "verification": "cd web && npm run test -- --run home && cd web && npm run test -- --run settings",
-      "state": "not_started",
+      "verification": "cd web && bun run test -- --run home && cd web && bun run test -- --run settings",
+      "state": "passing",
       "dependencies": ["feat-019"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 326 Rust tests + 21 frontend tests; specialists API endpoint (GET /api/specialists) with 3 tests; HomePage with workspace CRUD + 5 tests; SettingsPage with provider management + 4 tests; shared components (Modal, ErrorBanner, Spinner, StatusBadge); TanStack Query hooks (useWorkspaces, useProviders)"
     },
     {
       "id": "feat-021",

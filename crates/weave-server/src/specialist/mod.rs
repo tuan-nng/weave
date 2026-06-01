@@ -4,13 +4,13 @@
 //! YAML frontmatter (between `---` delimiters) with metadata, and a markdown
 //! body that serves as the system prompt.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{info, warn};
 
 /// A specialist definition loaded from a markdown file with YAML frontmatter.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Specialist {
     /// Unique specialist identifier (used as HashMap key and session.specialist_id).
     pub name: String,
@@ -112,6 +112,11 @@ impl SpecialistRegistry {
     /// Return the number of loaded specialists.
     pub fn count(&self) -> usize {
         self.specialists.len()
+    }
+
+    /// Insert a specialist into the registry. Used for testing and runtime registration.
+    pub fn insert(&mut self, specialist: Specialist) {
+        self.specialists.insert(specialist.name.clone(), specialist);
     }
 
     /// Return all loaded specialists.
