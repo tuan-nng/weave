@@ -9,7 +9,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** 8cb76ab (UI redesign)
+- **Latest commit:** c39e187 (feat-021: session chat view)
 - **Active feature:** feat-021 (Session chat view) — passing
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
 - **Test status:** green — 326 Rust tests + 21 frontend tests pass
