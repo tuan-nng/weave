@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod fs;
+pub mod shell;
 
 use crate::agent::ToolDefinition;
 use crate::error::AppError;

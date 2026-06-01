@@ -252,6 +252,11 @@ pub fn optional_bool(input: &Value, field: &str) -> bool {
     input.get(field).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+/// Extract an optional u64 field from the input JSON.
+pub fn optional_u64(input: &Value, field: &str) -> Option<u64> {
+    input.get(field).and_then(|v| v.as_u64())
+}
+
 // ---------------------------------------------------------------------------
 // Result helpers
 // ---------------------------------------------------------------------------
@@ -435,6 +440,24 @@ mod tests {
     fn test_optional_bool_true() {
         let input = serde_json::json!({"recursive": true});
         assert!(optional_bool(&input, "recursive"));
+    }
+
+    #[test]
+    fn test_optional_u64_present() {
+        let input = serde_json::json!({"timeout_ms": 5000});
+        assert_eq!(optional_u64(&input, "timeout_ms"), Some(5000));
+    }
+
+    #[test]
+    fn test_optional_u64_absent() {
+        let input = serde_json::json!({});
+        assert_eq!(optional_u64(&input, "timeout_ms"), None);
+    }
+
+    #[test]
+    fn test_optional_u64_wrong_type() {
+        let input = serde_json::json!({"timeout_ms": "not_a_number"});
+        assert_eq!(optional_u64(&input, "timeout_ms"), None);
     }
 
     // --- Result helpers ---

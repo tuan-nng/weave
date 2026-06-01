@@ -156,9 +156,9 @@
       "phase": "phase-2",
       "behavior": "Shell tool: shell_exec with command, optional cwd, optional timeout_ms (default 30000). Runs via tokio::process::Command. Captures stdout + stderr + exit code. Timeout kills the process. Cwd defaults to session's working directory. Output truncated at 100KB. Records trace event with duration.",
       "verification": "cargo test -p weave-server -- test_shell_exec_basic && cargo test -p weave-server -- test_shell_exec_timeout && cargo test -p weave-server -- test_shell_exec_cwd",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-012"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 216 tests (14 new: 11 shell_exec + 3 optional_u64); clippy clean; fmt clean; ShellExecTool in tools/shell.rs; optional_u64 helper added to fs/mod.rs; sh -c wrapper; tokio::time::timeout + child.kill() + child.wait() for zombie reaping; spawn_read_task helper for DRY stdout/stderr reading; 100KB per-stream truncation with UTF-8 boundary safety; tracing::debug! trace event (secrets-safe); all review findings addressed"
     },
     {
       "id": "feat-015",

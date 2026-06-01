@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** 954e5ad
+- **Latest commit:** (pending commit)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 202 tests pass (21 new for feat-013 + 181 existing)
+- **Test status:** green — 216 tests pass (14 new for feat-014 + 202 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -33,6 +33,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-011**: SpecialistLoader (YAML frontmatter parsing, SpecialistRegistry, system prompt + model override injection)
 - [x] **feat-012**: ToolRegistry (ToolExecutor trait, 5 profiles, profile-based filtering, SessionService integration)
 - [x] **feat-013**: Filesystem tools (fs_read, fs_write, fs_edit, fs_search, fs_list — PathValidator, symlink-aware containment, control-plane protection)
+- [x] **feat-014**: Shell tool (shell_exec — sh -c wrapper, tokio::process::Command, timeout, 100KB output truncation, tracing::info! trace event)
 
 ## In Progress
 
@@ -48,7 +49,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-014: Shell tool (depends on feat-012 — passing)
+1. Start feat-015: Git tools (depends on feat-012 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Session Notes
@@ -92,15 +93,32 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - 202 tests pass (21 new: 5 tool implementations + 16 validation/helper/verification tests)
 - `test_support::make_context` helper added for creating `ToolContext` in tests
 
+### 2026-06-01 — feat-014: Shell tool
+- Created `src/tools/shell.rs` — single file, flat structure (not a directory)
+- `ShellExecTool` implements `ToolExecutor` with `sh -c` wrapper
+- Uses `tokio::process::Command` with `Stdio::piped()` for stdout/stderr capture
+- Timeout: `tokio::time::timeout` + `child.wait()` (not `wait_with_output` which takes ownership)
+- On timeout: `child.kill().await` + `child.wait().await` to reap zombie, then await reader tasks
+- `spawn_read_task` helper extracts DRY pattern for stdout/stderr reading
+- Output truncated at 100KB per stream (`MAX_STREAM_BYTES`) with UTF-8 boundary safety
+- `truncate_output` finds a UTF-8 boundary, uses `from_utf8_lossy` for incomplete sequences
+- Cwd validation: `PathValidator::require_absolute` + `is_dir()` check — no codebase_root containment
+- `optional_u64` helper added to `tools/fs/mod.rs` with 3 unit tests (present, absent, wrong_type)
+- Registered in `main.rs` after filesystem tools
+- `shell_exec` already in `implementation` profile — no profile changes needed
+- Logging: `tracing::debug!` (not `info!`) to avoid persisting secrets from command strings
+- 216 tests pass (14 new: 11 shell_exec + 3 optional_u64)
+- No new dependencies — `tokio` already has `process` and `time` features
+- All 6 review findings addressed (zombie reaping, task cleanup, DRY, logging level, doc comment, tests)
+
 ## Notes for Next Session
 
-- feat-013 created: `src/tools/fs/` (6 files)
-- `PathValidator::resolve_path` handles symlink resolution by walking up to nearest existing ancestor
-- `fs/mod.rs` exports `MAX_DEPTH` and `MAX_RESULTS` as `pub(crate)` for use by sub-modules
-- Tool registration in `main.rs`: 5 tools registered after `ToolRegistry::new()`
-- Profiles updated: `implementation` now has 8 tools (was 5), `review` now has 5 (was 4)
-- TOCTOU race between validation and write is acceptable for v1 (single-agent-per-session model)
-- Next feature: feat-014 (shell_exec) — will reuse `PathValidator` for path containment
+- feat-014 created: `src/tools/shell.rs` (single file)
+- `ShellExecTool` uses `child.wait()` instead of `child.wait_with_output()` to allow kill on timeout
+- `optional_u64` helper now in `tools/fs/mod.rs` alongside `optional_string` and `optional_bool`
+- Tool registration in `main.rs`: 6 tools now (5 fs + 1 shell)
+- `implementation` profile has 8 tools listed, 6 now registered (shell_exec newly registered, git and task still pending)
+- Next feature: feat-015 (git tools) — will likely need a `tools/git/` directory
 
 ## Out-of-Scope Items Noticed
 

@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(tools::fs::FsEditTool));
     tool_registry.register(Arc::new(tools::fs::FsSearchTool));
     tool_registry.register(Arc::new(tools::fs::FsListTool));
+    tool_registry.register(Arc::new(tools::shell::ShellExecTool));
     let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding
