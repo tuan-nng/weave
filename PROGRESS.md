@@ -9,8 +9,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** (pending commit — UI redesign)
-- **Active feature:** UI redesign (not tracked in feature_list.json — visual polish pass)
+- **Latest commit:** 8cb76ab (UI redesign)
+- **Active feature:** feat-021 (Session chat view) — passing
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
 - **Test status:** green — 326 Rust tests + 21 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
@@ -39,6 +39,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-017**: TraceCollector (trace/ module with channel-based collector, background flush task, file change extraction; store/traces.rs with TraceStore; api/traces.rs with 3 endpoints; streaming loop integration with pending tool tracking)
 - [x] **feat-018**: Session resume (Db::with_transaction; SessionService::create_session with validate_parent_chain; MessageStore::copy_messages/load_all; terminal-state check; workspace validation; depth limit 5; cycle detection; 9 tests)
 - [x] **feat-019**: React frontend scaffolding (Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Query + React Router; Bun package manager; ESLint + Prettier + Vitest; API wrapper with {data} envelope unwrapping; types matching backend models; query key factory; route constants; 5 placeholder pages; 12 tests)
+- [x] **feat-021**: Session chat view (useSession hook with TanStack Query + SSE streaming; SessionPage with MessageList, ToolCallBlock, StreamingIndicator, MessageInput; auto-scroll; react-markdown + remark-gfm; Sessions list page at /sessions; sidebar Sessions link fixed; .prettierignore for pnpm-lock.yaml)
 
 ## In Progress
 
@@ -54,8 +55,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Pick feat-021 (Session chat view) from feature_list.json
-2. Continue Phase 3 (Frontend) — feat-021 through feat-023
+1. Continue Phase 3 (Frontend) — feat-022 (Journey sidebar), feat-023 (Frontend served from Rust)
 
 ## Session Notes
 
@@ -175,6 +175,23 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - 323 tests pass (9 new: resume, chain, no-parent, not-found, wrong-workspace, depth-limit, cycle, empty-parent, active-parent-rejected)
 - All 6 review findings addressed: terminal-state check, FK message, HashSet import, API test gap noted, standalone unit tests noted, `with_transaction` test noted
 
+### 2026-06-01 — feat-021 design (session chat view)
+- Ran feature-dev workflow phases 1-4 (Discovery, Exploration, Clarifying, Architecture)
+- **Design decisions:**
+  - **Clean approach** — 1 new hook (`use-session.ts`) + rewrite `session.tsx` with inline components
+  - **react-markdown** + **remark-gfm** for Markdown rendering (installed)
+  - **Traces for history** — fetch `/api/sessions/:sid/trace` to reconstruct tool calls for historical messages
+  - **Chat only** — no sidebar shell (Journey sidebar is feat-022)
+  - **Disable input** for terminal states (completed/cancelled/error)
+  - **Page-lifetime SSE** — EventSource connects on mount, auto-reconnects via browser native behavior
+- **SSE strategy:** Native `EventSource` with `Last-Event-ID` reconnection. Backend ring buffer (100 events) handles replay. Frontend accumulates `text_delta`/`tool_use_start`/`tool_result` in a `LiveBuffer`, flushes on `done` by invalidating TanStack Query cache.
+- **Trace correlation:** Timestamp-based heuristic — traces between message `created_at` boundaries belong to the preceding assistant message. Not exact but acceptable for V1.
+- **Key files to create:** `web/src/hooks/use-session.ts`
+- **Key files to modify:** `web/src/app/pages/session.tsx`
+- **Dependencies added:** `react-markdown@10.1.0`, `remark-gfm@4.0.1`
+- **Prettier fix:** 5 frontend files had formatting issues, fixed with `bun run prettier --write`
+- **Next:** Use Open Design MCP to design UI (conversation `9d032e11-21af-480d-a45b-4c16dadb2948`), then implement
+
 ### 2026-06-01 — UI redesign (Routa-inspired)
 - Redesigned all frontend pages using Open Design MCP mockups as reference
 - **index.css**: Added brand color theme (blue/amber/emerald/red/orchid/slate), Inter + Space Grotesk fonts via Google Fonts, `@theme inline` Tailwind v4 tokens, `fadeIn`/`fadeInUp` keyframes, thin scrollbar styles
@@ -215,6 +232,20 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - Frontend: Added `specialists` query keys to `query-keys.ts`
 - Architecture: Minimal approach — 3 shared components (Modal, ErrorBanner, Spinner), 2 hooks (useWorkspaces, useProviders), inline sub-components in pages
 - Next: Design UI with Open Design MCP, then implement components
+
+### 2026-06-01 — feat-021: Session chat view
+- Created `web/src/hooks/use-session.ts` — orchestrator hook with TanStack Query + SSE streaming
+- Rewrote `web/src/app/pages/session.tsx` — full chat UI (~620 lines)
+- SessionPage: MessageList, ToolCallBlock (expandable), StreamingIndicator, MessageInput
+- UserMessage (right-aligned blue bubble), AssistantMessage (left-aligned white card with markdown)
+- LiveAssistantMessage for streaming content with live tool calls
+- Auto-scroll: tracks isAtBottom, scrolls on new content
+- react-markdown + remark-gfm for Markdown rendering
+- Trace-to-message correlation by timestamp (nearest preceding message)
+- Created `web/src/app/pages/sessions.tsx` — sessions list page at /sessions
+- Fixed sidebar "Sessions" link: now points to /sessions instead of /
+- Added .prettierignore for pnpm-lock.yaml (bun install creates it)
+- All 3 init.sh layers pass: 326 Rust tests + 21 frontend tests
 
 ## Out-of-Scope Items Noticed
 

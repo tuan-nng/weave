@@ -218,10 +218,10 @@
       "id": "feat-021",
       "phase": "phase-3",
       "behavior": "Session chat view: MessageList renders user + assistant messages with MarkdownRenderer. ToolCallBlock (expandable) shows tool name, input JSON, output. StreamingIndicator shows agent is thinking. MessageInput with auto-resize textarea + send button. useSession hook: TanStack Query for initial data, EventSource for SSE stream, text_delta appends to local buffer, done invalidates history query. Auto-scroll to latest message.",
-      "verification": "cd web && npm run test -- --run session-chat",
-      "state": "not_started",
+      "verification": "cd web && bun run test",
+      "state": "passing",
       "dependencies": ["feat-020", "feat-010"],
-      "evidence": ""
+      "evidence": "init.sh all 3 layers pass; 326 Rust tests + 21 frontend tests; SessionPage with full chat UI (MessageList, ToolCallBlock, StreamingIndicator, MessageInput); useSession hook with TanStack Query + SSE streaming; auto-scroll; react-markdown + remark-gfm for Markdown rendering; Sessions list page (/sessions) added; sidebar Sessions link fixed; .prettierignore added for pnpm-lock.yaml"
     },
     {
       "id": "feat-022",

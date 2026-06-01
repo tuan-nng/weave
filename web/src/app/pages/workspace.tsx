@@ -80,8 +80,18 @@ export default function WorkspacePage() {
       <div className="flex items-center justify-between mb-8 animate-fade-in">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-blue-50 to-brand-blue-100 border border-brand-blue-200/60 flex items-center justify-center">
-            <svg className="w-5 h-5 text-brand-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            <svg
+              className="w-5 h-5 text-brand-blue-500"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={1.8}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+              />
             </svg>
           </div>
           <div>
@@ -97,7 +107,13 @@ export default function WorkspacePage() {
           onClick={() => setShowNewSession(true)}
           className="h-10 px-5 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md inline-flex items-center gap-2"
         >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
           </svg>
           New Session
@@ -106,25 +122,36 @@ export default function WorkspacePage() {
 
       {/* Quick Stats */}
       {sessions && (
-        <div className="grid grid-cols-4 gap-3 mb-8 animate-fade-in-up" style={{ animationDelay: "50ms" }}>
+        <div
+          className="grid grid-cols-4 gap-3 mb-8 animate-fade-in-up"
+          style={{ animationDelay: "50ms" }}
+        >
           <div className="rounded-xl border border-black/[0.06] bg-white/80 px-4 py-3">
-            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-0.5">Total</p>
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-0.5">
+              Total
+            </p>
             <p className="text-xl font-display font-semibold text-slate-900">{sessions.length}</p>
           </div>
           <div className="rounded-xl border border-brand-blue-200/40 bg-brand-blue-50/50 px-4 py-3">
-            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-blue-400 mb-0.5">Active</p>
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-blue-400 mb-0.5">
+              Active
+            </p>
             <p className="text-xl font-display font-semibold text-brand-blue-600">
               {sessions.filter((s) => s.status === "connecting" || s.status === "ready").length}
             </p>
           </div>
           <div className="rounded-xl border border-brand-emerald-200/40 bg-brand-emerald-50/50 px-4 py-3">
-            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-emerald-500 mb-0.5">Completed</p>
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-emerald-500 mb-0.5">
+              Completed
+            </p>
             <p className="text-xl font-display font-semibold text-brand-emerald-600">
               {sessions.filter((s) => s.status === "completed").length}
             </p>
           </div>
           <div className="rounded-xl border border-brand-red-200/40 bg-brand-red-50/50 px-4 py-3">
-            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-red-400 mb-0.5">Errors</p>
+            <p className="text-[10px] font-medium uppercase tracking-[0.16em] text-brand-red-400 mb-0.5">
+              Errors
+            </p>
             <p className="text-xl font-display font-semibold text-brand-red-500">
               {sessions.filter((s) => s.status === "error").length}
             </p>
@@ -139,11 +166,21 @@ export default function WorkspacePage() {
             {/* Table Header */}
             <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
               <div className="grid grid-cols-[140px_1fr_160px_140px_120px] gap-4 items-center">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Status</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Specialist</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Model</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Created</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 text-right">Actions</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Status
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Specialist
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Model
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Created
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 text-right">
+                  Actions
+                </span>
               </div>
             </div>
 
@@ -178,7 +215,10 @@ export default function WorkspacePage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+        <div
+          className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up"
+          style={{ animationDelay: "100ms" }}
+        >
           <div className="w-12 h-12 bg-brand-slate-100 rounded-xl flex items-center justify-center mx-auto mb-4">
             <svg
               className="w-6 h-6 text-slate-400"
@@ -209,7 +249,13 @@ export default function WorkspacePage() {
             onClick={() => setShowNewSession(false)}
             className="text-slate-400 hover:text-slate-600 transition-colors"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
@@ -238,7 +284,9 @@ export default function WorkspacePage() {
 
           {/* Specialist */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Specialist</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+              Specialist
+            </label>
             <input
               type="text"
               value={form.specialist_id ?? ""}
@@ -255,7 +303,9 @@ export default function WorkspacePage() {
 
           {/* Model */}
           <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Model</label>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+              Model
+            </label>
             <input
               type="text"
               value={form.model ?? ""}

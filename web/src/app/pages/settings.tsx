@@ -69,7 +69,9 @@ export default function SettingsPage() {
 
       {/* Header */}
       <div className="mb-8 animate-fade-in">
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">Settings</h1>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">
+          Settings
+        </h1>
         <p className="mt-1.5 text-sm text-slate-500">Configure your AI providers and preferences</p>
       </div>
 
@@ -77,12 +79,16 @@ export default function SettingsPage() {
       <div className="mb-8 animate-fade-in-up" style={{ animationDelay: "50ms" }}>
         <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-6 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
           <h2 className="text-base font-semibold text-slate-900 mb-1">Add Provider</h2>
-          <p className="text-xs text-slate-400 mb-5">Connect an AI provider to use with your sessions</p>
+          <p className="text-xs text-slate-400 mb-5">
+            Connect an AI provider to use with your sessions
+          </p>
 
           <form onSubmit={handleAdd} className="space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Type</label>
+                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+                  Type
+                </label>
                 <input
                   type="text"
                   value="Anthropic"
@@ -91,7 +97,9 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Name</label>
+                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+                  Name
+                </label>
                 <input
                   type="text"
                   value={form.name}
@@ -102,7 +110,9 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Base URL</label>
+                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+                  Base URL
+                </label>
                 <input
                   type="text"
                   value={form.base_url}
@@ -111,7 +121,9 @@ export default function SettingsPage() {
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">API Key</label>
+                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+                  API Key
+                </label>
                 <div className="relative">
                   <input
                     type="password"
@@ -121,15 +133,31 @@ export default function SettingsPage() {
                     className="w-full h-10 px-3.5 pr-10 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
                     required
                   />
-                  <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  <svg
+                    className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                    />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                    />
                   </svg>
                 </div>
               </div>
             </div>
             <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Default Model</label>
+              <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+                Default Model
+              </label>
               <input
                 type="text"
                 value={form.default_model}
@@ -143,8 +171,18 @@ export default function SettingsPage() {
                 disabled={createProvider.isPending}
                 className="h-10 px-6 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md inline-flex items-center gap-2 disabled:opacity-50"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 6v6m0 0v6m0-6h6m-6 0H6"
+                  />
                 </svg>
                 Add Provider
               </button>
@@ -161,10 +199,18 @@ export default function SettingsPage() {
             {/* Table Header */}
             <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
               <div className="grid grid-cols-[1fr_100px_140px_100px] gap-4 items-center">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Name</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Type</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">Created</span>
-                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 text-right">Actions</span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Name
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Type
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Created
+                </span>
+                <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 text-right">
+                  Actions
+                </span>
               </div>
             </div>
 
@@ -177,8 +223,18 @@ export default function SettingsPage() {
                 <div className="grid grid-cols-[1fr_100px_140px_100px] gap-4 items-center">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-amber-50 to-brand-amber-100 border border-brand-amber-200/60 flex items-center justify-center flex-shrink-0">
-                      <svg className="w-4 h-4 text-brand-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                      <svg
+                        className="w-4 h-4 text-brand-amber-600"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={1.8}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M13 10V3L4 14h7v7l9-11h-7z"
+                        />
                       </svg>
                     </div>
                     <span className="text-sm font-medium text-slate-900">{p.name}</span>
@@ -203,7 +259,10 @@ export default function SettingsPage() {
           </div>
         </div>
       ) : (
-        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+        <div
+          className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up"
+          style={{ animationDelay: "100ms" }}
+        >
           <div className="w-12 h-12 bg-brand-slate-100 rounded-xl flex items-center justify-center mx-auto mb-4">
             <svg
               className="w-6 h-6 text-slate-400"
@@ -217,7 +276,11 @@ export default function SettingsPage() {
                 strokeLinejoin="round"
                 d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"
               />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+              />
             </svg>
           </div>
           <h3 className="text-sm font-medium text-slate-900 mb-1">No providers</h3>

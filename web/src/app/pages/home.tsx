@@ -13,18 +13,50 @@ import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
 
 const WORKSPACE_COLORS = [
-  { from: "from-brand-blue-50", to: "to-brand-blue-100", border: "border-brand-blue-200/60", icon: "text-brand-blue-500" },
-  { from: "from-brand-orchid-50", to: "to-brand-orchid-100", border: "border-brand-orchid-200/60", icon: "text-brand-orchid-500" },
-  { from: "from-brand-emerald-50", to: "to-brand-emerald-100", border: "border-brand-emerald-200/60", icon: "text-brand-emerald-500" },
-  { from: "from-brand-amber-50", to: "to-brand-amber-100", border: "border-brand-amber-200/60", icon: "text-brand-amber-500" },
+  {
+    from: "from-brand-blue-50",
+    to: "to-brand-blue-100",
+    border: "border-brand-blue-200/60",
+    icon: "text-brand-blue-500",
+  },
+  {
+    from: "from-brand-orchid-50",
+    to: "to-brand-orchid-100",
+    border: "border-brand-orchid-200/60",
+    icon: "text-brand-orchid-500",
+  },
+  {
+    from: "from-brand-emerald-50",
+    to: "to-brand-emerald-100",
+    border: "border-brand-emerald-200/60",
+    icon: "text-brand-emerald-500",
+  },
+  {
+    from: "from-brand-amber-50",
+    to: "to-brand-amber-100",
+    border: "border-brand-amber-200/60",
+    icon: "text-brand-amber-500",
+  },
 ];
 
 function WorkspaceIcon({ colorIndex }: { colorIndex: number }) {
   const c = WORKSPACE_COLORS[colorIndex % WORKSPACE_COLORS.length];
   return (
-    <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${c.from} ${c.to} border ${c.border} flex items-center justify-center flex-shrink-0`}>
-      <svg className={`w-5 h-5 ${c.icon}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+    <div
+      className={`w-10 h-10 rounded-xl bg-gradient-to-br ${c.from} ${c.to} border ${c.border} flex items-center justify-center flex-shrink-0`}
+    >
+      <svg
+        className={`w-5 h-5 ${c.icon}`}
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={1.8}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+        />
       </svg>
     </div>
   );
@@ -108,7 +140,9 @@ export default function HomePage() {
 
       {/* Header */}
       <div className="mb-8 animate-fade-in">
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">Workspaces</h1>
+        <h1 className="font-display text-2xl font-semibold tracking-tight text-slate-900">
+          Workspaces
+        </h1>
         <p className="mt-1.5 text-sm text-slate-500">Manage your agent coordination workspaces</p>
       </div>
 
@@ -117,7 +151,13 @@ export default function HomePage() {
         <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)] hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)] transition-shadow duration-200">
           <form onSubmit={handleCreate} className="flex items-center gap-3">
             <div className="relative flex-1">
-              <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <svg
+                className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
               </svg>
               <input
@@ -150,7 +190,9 @@ export default function HomePage() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4 min-w-0">
-                  <WorkspaceIcon colorIndex={ws.is_default ? 0 : (index % (WORKSPACE_COLORS.length - 1)) + 1} />
+                  <WorkspaceIcon
+                    colorIndex={ws.is_default ? 0 : (index % (WORKSPACE_COLORS.length - 1)) + 1}
+                  />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2.5">
                       {renamingId === ws.id ? (
@@ -212,7 +254,10 @@ export default function HomePage() {
           ))}
         </div>
       ) : (
-        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up" style={{ animationDelay: "100ms" }}>
+        <div
+          className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-12 text-center animate-fade-in-up"
+          style={{ animationDelay: "100ms" }}
+        >
           <div className="w-12 h-12 bg-brand-slate-100 rounded-xl flex items-center justify-center mx-auto mb-4">
             <svg
               className="w-6 h-6 text-slate-400"
@@ -235,17 +280,30 @@ export default function HomePage() {
 
       {/* Stats Row */}
       {workspaces && workspaces.length > 0 && (
-        <div className="mt-10 grid grid-cols-3 gap-4 animate-fade-in-up" style={{ animationDelay: "150ms" }}>
+        <div
+          className="mt-10 grid grid-cols-3 gap-4 animate-fade-in-up"
+          style={{ animationDelay: "150ms" }}
+        >
           <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
-            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Workspaces</p>
-            <p className="text-2xl font-display font-semibold text-slate-900">{workspaces.length}</p>
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">
+              Workspaces
+            </p>
+            <p className="text-2xl font-display font-semibold text-slate-900">
+              {workspaces.length}
+            </p>
           </div>
           <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
-            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Providers</p>
-            <p className="text-2xl font-display font-semibold text-brand-blue-600">{providers?.length ?? 0}</p>
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">
+              Providers
+            </p>
+            <p className="text-2xl font-display font-semibold text-brand-blue-600">
+              {providers?.length ?? 0}
+            </p>
           </div>
           <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm px-5 py-4">
-            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">Status</p>
+            <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 mb-1">
+              Status
+            </p>
             <p className="text-2xl font-display font-semibold text-brand-emerald-600">Ready</p>
           </div>
         </div>
