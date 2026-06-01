@@ -5,6 +5,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub mod fs;
+
 use crate::agent::ToolDefinition;
 use crate::error::AppError;
 
@@ -107,6 +109,9 @@ impl ToolRegistry {
             vec![
                 "fs_read".to_string(),
                 "fs_write".to_string(),
+                "fs_edit".to_string(),
+                "fs_search".to_string(),
+                "fs_list".to_string(),
                 "shell_exec".to_string(),
                 "git".to_string(),
                 "task".to_string(),
@@ -116,6 +121,7 @@ impl ToolRegistry {
             "review".to_string(),
             vec![
                 "fs_read".to_string(),
+                "fs_search".to_string(),
                 "git".to_string(),
                 "task".to_string(),
                 "artifacts".to_string(),
@@ -252,6 +258,16 @@ impl Default for ToolRegistry {
 pub(crate) mod test_support {
     use super::*;
     use async_trait::async_trait;
+
+    /// Create a `ToolContext` for testing with the given root path.
+    pub(crate) fn make_context(root: &std::path::Path) -> super::ToolContext {
+        super::ToolContext {
+            session_id: "test-session".to_string(),
+            cwd: root.to_path_buf(),
+            codebase_root: root.to_path_buf(),
+            trace_collector: std::sync::Arc::new(super::TraceCollector::new()),
+        }
+    }
 
     /// Mock tool for testing tool registry operations.
     pub(crate) struct MockTool {

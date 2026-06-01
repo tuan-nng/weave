@@ -8,11 +8,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-05-31
-- **Latest commit:** 680f35e
+- **Last updated:** 2026-06-01
+- **Latest commit:** 954e5ad
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 149 tests pass (14 new for feat-012 + 135 existing)
+- **Test status:** green — 202 tests pass (21 new for feat-013 + 181 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -32,6 +32,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-010**: SSE infrastructure (SseManager, EventBuffer, SSE endpoint, reconnection, backpressure)
 - [x] **feat-011**: SpecialistLoader (YAML frontmatter parsing, SpecialistRegistry, system prompt + model override injection)
 - [x] **feat-012**: ToolRegistry (ToolExecutor trait, 5 profiles, profile-based filtering, SessionService integration)
+- [x] **feat-013**: Filesystem tools (fs_read, fs_write, fs_edit, fs_search, fs_list — PathValidator, symlink-aware containment, control-plane protection)
 
 ## In Progress
 
@@ -47,7 +48,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-013: Filesystem tools (depends on feat-012, feat-011 — both passing)
+1. Start feat-014: Shell tool (depends on feat-012 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Session Notes
@@ -75,16 +76,31 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - `test_support` module exports `MockTool` for shared use across test modules
 - 149 tests pass (14 new: 12 tools + 2 service integration)
 
+### 2026-06-01 — feat-013: Filesystem tools
+- Created `src/tools/fs/` directory with 6 files: `mod.rs`, `read.rs`, `write.rs`, `edit.rs`, `search.rs`, `list.rs`
+- `PathValidator` in `fs/mod.rs`: `require_absolute`, `validate_write_path` (symlink-aware), `resolve_path`, `is_control_plane`
+- Symlink escape prevention: `resolve_path` canonicalizes the path (or nearest existing ancestor) before containment check
+- Control-plane protection: hardcoded list of prefixes (`.git/`, `resources/specialists/`, etc.) and files (`Cargo.toml`, `weave.db`, etc.)
+- Shared constants: `MAX_DEPTH=10`, `MAX_RESULTS=100` in `fs/mod.rs`, imported by `search.rs` and `list.rs`
+- `fs_search` uses `regex::RegexBuilder` with 1MB size limit to prevent ReDoS
+- `fs_edit` requires exactly 1 match of `old_string` — errors on 0 or >1 matches
+- `fs_list` skips hidden directories (starting with `.`) for consistency with `fs_search`
+- Updated `implementation` profile: added `fs_edit`, `fs_search`, `fs_list`
+- Updated `review` profile: added `fs_search`
+- Registered all 5 tools in `main.rs`
+- Added `glob = "0.3"`, `regex = "1"` to dependencies, `tempfile = "3"` to dev-dependencies
+- 202 tests pass (21 new: 5 tool implementations + 16 validation/helper/verification tests)
+- `test_support::make_context` helper added for creating `ToolContext` in tests
+
 ## Notes for Next Session
 
-- feat-012 created: `src/tools/mod.rs`
-- `ToolRegistry` is immutable after startup — no Mutex needed
-- Profile resolution in `run_prompt_task` happens after specialist resolution but before `system_prompt` extraction
-- `validate_profile_name` in `send_prompt` prevents spawning a task that will immediately fail
-- Empty tool list from `resolve_profile` is converted to `None` in `run_prompt_task` (not sent as `tools: []`)
-- `test_support::MockTool` is `pub(crate)` — reusable from other test modules
-- `CapturingAgent` is shared at the top of `service/sessions::tests` module
-- Next feature: feat-013 (filesystem tools) will register concrete `ToolExecutor` implementations
+- feat-013 created: `src/tools/fs/` (6 files)
+- `PathValidator::resolve_path` handles symlink resolution by walking up to nearest existing ancestor
+- `fs/mod.rs` exports `MAX_DEPTH` and `MAX_RESULTS` as `pub(crate)` for use by sub-modules
+- Tool registration in `main.rs`: 5 tools registered after `ToolRegistry::new()`
+- Profiles updated: `implementation` now has 8 tools (was 5), `review` now has 5 (was 4)
+- TOCTOU race between validation and write is acceptable for v1 (single-agent-per-session model)
+- Next feature: feat-014 (shell_exec) — will reuse `PathValidator` for path containment
 
 ## Out-of-Scope Items Noticed
 

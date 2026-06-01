@@ -50,6 +50,11 @@ futures-util = "0.3"
 # Database
 rusqlite = { version = "0.35", features = ["bundled"] }
 
+# Filesystem tools
+glob = "0.3"
+regex = "1"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tempfile = "3"

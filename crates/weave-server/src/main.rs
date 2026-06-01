@@ -68,8 +68,14 @@ async fn main() -> anyhow::Result<()> {
         "Specialists loaded"
     );
 
-    // 3.8 Initialize tool registry (empty — tools register in feat-013+)
-    let tools = Arc::new(tools::ToolRegistry::new());
+    // 3.8 Initialize tool registry with filesystem tools
+    let mut tool_registry = tools::ToolRegistry::new();
+    tool_registry.register(Arc::new(tools::fs::FsReadTool));
+    tool_registry.register(Arc::new(tools::fs::FsWriteTool));
+    tool_registry.register(Arc::new(tools::fs::FsEditTool));
+    tool_registry.register(Arc::new(tools::fs::FsSearchTool));
+    tool_registry.register(Arc::new(tools::fs::FsListTool));
+    let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding
     if config.host != "127.0.0.1" && config.host != "localhost" && !config.allow_remote {

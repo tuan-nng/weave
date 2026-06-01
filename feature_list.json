@@ -145,11 +145,11 @@
     {
       "id": "feat-013",
       "phase": "phase-2",
-      "behavior": "Filesystem tools: file_read (read file content), file_write (write/overwrite, creates parent dirs), file_edit (search/replace patch), search_files (grep with glob filter), list_directory (recursive option). All paths must be absolute. Write operations restricted to session's codebase root (no .. traversal). Control-plane paths (.git/config, weave.db, Cargo.toml, resources/specialists/) are read-only. Tool results include success flag, bytes written/read, error messages with fix instructions.",
+      "behavior": "Filesystem tools: fs_read (read file content), fs_write (write/overwrite, creates parent dirs), fs_edit (search/replace patch, unique match required), fs_search (regex search with glob filter), fs_list (directory listing, recursive option). All paths must be absolute. Write operations restricted to session's codebase root (symlink-aware canonicalization, no .. traversal). Control-plane paths (.git/, weave.db, Cargo.toml, resources/specialists/, resources/migrations/, .claude/, CLAUDE.md, DECISIONS.md, PROGRESS.md, feature_list.json, init.sh, justfile) are read-only. Tool results include success flag, bytes written/read, error messages with fix instructions.",
       "verification": "cargo test -p weave-server -- test_file_write_read && cargo test -p weave-server -- test_file_path_containment && cargo test -p weave-server -- test_control_plane_protection",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-012", "feat-011"],
-      "evidence": ""
+      "evidence": "commit 954e5ad; init.sh all 3 layers pass; 202 tests (21 new: test_fs_read_*, test_fs_write_*, test_fs_edit_*, test_fs_search_*, test_fs_list_*, test_file_write_read, test_file_path_containment, test_control_plane_protection, test_symlink_escape_blocked, test_validate_write_path_*, test_normalize_*, test_require_*, test_optional_*, test_*_result); clippy clean; fmt clean; PathValidator with symlink-aware resolve_path; MAX_DEPTH=10, MAX_RESULTS=100; regex size limit 1MB; implementation profile has 8 tools, review has 5"
     },
     {
       "id": "feat-014",
