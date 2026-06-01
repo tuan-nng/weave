@@ -95,15 +95,25 @@ impl ToolExecutor for ShellExecTool {
 ///
 /// Uses `child.wait()` instead of `child.wait_with_output()` so we can still
 /// call `child.kill()` on timeout. Stdout/stderr are read in separate tasks.
+///
+/// On Unix, uses `process_group(0)` so the shell and all its children share
+/// a process group. On timeout, the entire group is killed via `killpg`,
+/// preventing grandchildren (e.g. `sleep` inside `sh -c`) from holding pipes open.
 async fn run_command(command: &str, cwd: &PathBuf, timeout_ms: u64) -> ToolResult {
-    let mut child = match Command::new("sh")
-        .arg("-c")
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+
+    // On Unix, create a new process group so we can kill the entire tree on timeout.
+    #[cfg(unix)]
     {
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             return error(format!(
@@ -158,8 +168,8 @@ async fn run_command(command: &str, cwd: &PathBuf, timeout_ms: u64) -> ToolResul
             ))
         }
         Err(_) => {
-            // Timeout — kill the child process and reap the zombie.
-            let _ = child.kill().await;
+            // Timeout — kill the entire process group to ensure grandchildren die too.
+            kill_process_tree(&mut child).await;
             let _ = child.wait().await;
             // Await reader tasks to release pipe FDs.
             let _ = stdout_task.await;
@@ -170,6 +180,27 @@ async fn run_command(command: &str, cwd: &PathBuf, timeout_ms: u64) -> ToolResul
             ))
         }
     }
+}
+
+/// Kill a process and all its children.
+///
+/// On Unix, uses `killpg` to send SIGKILL to the entire process group
+/// (the child was spawned with `process_group(0)` so it is the group leader).
+/// Falls back to `child.kill()` if the process group kill fails.
+async fn kill_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // killpg sends SIGKILL to the entire process group.
+            // Safety: killpg is a libc function, pid comes from the child.
+            let ret = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+            if ret == 0 {
+                return;
+            }
+        }
+    }
+    // Fallback: kill just the direct child.
+    let _ = child.kill().await;
 }
 
 /// Spawn a task that reads an async reader to completion, returning the bytes.
