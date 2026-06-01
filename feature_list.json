@@ -165,9 +165,9 @@
       "phase": "phase-2",
       "behavior": "Git tools: git_status (branch, staged/unstaged/untracked), git_diff (unified diff, truncated 50KB, optional staged/file filter), git_log (recent commits with hash+message, default 10), git_commit (message, optional stage_all, validates real user.name/user.email — rejects placeholder/test identities). All tools take cwd parameter, default to session working directory.",
       "verification": "cargo test -p weave-server -- test_git_status && cargo test -p weave-server -- test_git_commit_validation",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-012"],
-      "evidence": ""
+      "evidence": "commit c1cf3ab; init.sh all 3 layers pass; 259 tests (43 new: 24 git tools + 19 updated/extracted); clippy clean; fmt clean; tools/git/ directory with mod.rs, status.rs, diff.rs, log.rs, commit.rs; run_git async command runner; validate_git_cwd async repo detection; validate_commit_identity placeholder rejection; truncate_diff 50KB; cwd_property shared schema helper; git_test_support shared test helper; spawn_read_task + truncate_bytes extracted to tools/mod.rs; profiles: implementation (4 git), review (3 git, no commit); all 8 review findings addressed"
     },
     {
       "id": "feat-016",

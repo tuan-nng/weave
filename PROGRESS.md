@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** fba0752
+- **Latest commit:** c1cf3ab
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 216 tests pass (14 new for feat-014 + 202 existing)
+- **Test status:** green — 259 tests pass (43 new for feat-015 + 216 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -34,6 +34,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-012**: ToolRegistry (ToolExecutor trait, 5 profiles, profile-based filtering, SessionService integration)
 - [x] **feat-013**: Filesystem tools (fs_read, fs_write, fs_edit, fs_search, fs_list — PathValidator, symlink-aware containment, control-plane protection)
 - [x] **feat-014**: Shell tool (shell_exec — sh -c wrapper, tokio::process::Command, timeout, 100KB output truncation, tracing::info! trace event)
+- [x] **feat-015**: Git tools (git_status, git_diff, git_log, git_commit — tools/git/ directory, async run_git, validate_commit_identity, 50KB diff truncation, profile updates)
 
 ## In Progress
 
@@ -49,7 +50,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-015: Git tools (depends on feat-012 — passing)
+1. Start feat-016: Task context tools (depends on feat-012 — passing)
 2. Continue Phase 2 (Agent Tools & Observability)
 
 ## Session Notes
@@ -111,14 +112,31 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - No new dependencies — `tokio` already has `process` and `time` features
 - All 6 review findings addressed (zombie reaping, task cleanup, DRY, logging level, doc comment, tests)
 
+### 2026-06-01 — feat-015: Git tools
+- Created `src/tools/git/` directory with 5 files: `mod.rs`, `status.rs`, `diff.rs`, `log.rs`, `commit.rs`
+- `run_git` in `mod.rs`: async git command runner using `tokio::process::Command` (not `sh -c`)
+- `validate_git_cwd`: async git repo detection via `git rev-parse --git-dir`
+- `validate_commit_identity`: rejects placeholder names (test, tester, example, etc.) and domains (@example.com, @test.com, @localhost)
+- `truncate_diff`: 50KB truncation using shared `truncate_bytes` from `tools/mod.rs`
+- `cwd_property()`: shared JSON schema helper for the common `cwd` parameter
+- `git_test_support::git_init`: shared test helper (parameterized name, email, commit flag)
+- Profiles updated: `implementation` has 4 git tools, `review` has 3 (no `git_commit`)
+- Extracted `spawn_read_task` and `truncate_bytes` to `tools/mod.rs` (shared with shell.rs)
+- Shell tool updated to use shared helpers (removed local copies)
+- `validate_git_cwd` is async (uses `run_git` instead of `std::process::Command`)
+- Commit tool reads effective config (not `--local`) — respects global git identity
+- Empty/whitespace commit messages rejected early
+- 259 tests pass (43 new: 24 git tools + 19 updated/extracted)
+- All 8 review findings addressed (blocking I/O, DRY, weak assertions, empty message, config)
+
 ## Notes for Next Session
 
-- feat-014 created: `src/tools/shell.rs` (single file)
-- `ShellExecTool` uses `child.wait()` instead of `child.wait_with_output()` to allow kill on timeout
-- `optional_u64` helper now in `tools/fs/mod.rs` alongside `optional_string` and `optional_bool`
-- Tool registration in `main.rs`: 6 tools now (5 fs + 1 shell)
-- `implementation` profile has 8 tools listed, 6 now registered (shell_exec newly registered, git and task still pending)
-- Next feature: feat-015 (git tools) — will likely need a `tools/git/` directory
+- feat-015 created: `src/tools/git/` directory (5 files)
+- `spawn_read_task` and `truncate_bytes` now in `tools/mod.rs` as shared helpers
+- Tool registration in `main.rs`: 10 tools now (5 fs + 1 shell + 4 git)
+- `implementation` profile has 11 tools listed, 10 now registered (task still pending)
+- `review` profile has 7 tools listed (3 git tools, no git_commit)
+- Next feature: feat-016 (task context tools) — depends on feat-012
 
 ## Out-of-Scope Items Noticed
 
