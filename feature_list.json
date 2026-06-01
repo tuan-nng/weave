@@ -185,7 +185,7 @@
       "verification": "cargo test -p weave-server -- test_trace_collection && cargo test -p weave-server -- test_journey_summary && cargo test -p weave-server -- test_file_change_summary",
       "state": "passing",
       "dependencies": ["feat-009", "feat-012"],
-      "evidence": "init.sh all 3 layers pass; 314 tests (17 new: 6 store/traces + 7 trace module + 3 API + 1 UTF-8 truncation); clippy clean; fmt clean; src/trace/mod.rs with TraceCollector (mpsc::UnboundedSender), extract_file_changes(), spawn_flush_task(); src/store/traces.rs with TraceStore (insert_batch, list_by_session, list_journey, list_file_changes); src/api/traces.rs with 3 GET endpoints; service/sessions.rs streaming loop integration with pending_tools tracking and drain_pending_tools(); all review findings addressed (UTF-8 truncation, orphaned tool calls, output_json encoding, cancellation flush)"
+      "evidence": "commit c7f572c; init.sh all 3 layers pass; 314 tests (17 new: 6 store/traces + 7 trace module + 3 API + 1 UTF-8 truncation); clippy clean; fmt clean; src/trace/mod.rs with TraceCollector (mpsc::UnboundedSender), extract_file_changes(), spawn_flush_task(); src/store/traces.rs with TraceStore (insert_batch, list_by_session, list_journey, list_file_changes); src/api/traces.rs with 3 GET endpoints; service/sessions.rs streaming loop integration with pending_tools tracking and drain_pending_tools(); all review findings addressed (UTF-8 truncation, orphaned tool calls, output_json encoding, cancellation flush)"
     },
     {
       "id": "feat-018",
