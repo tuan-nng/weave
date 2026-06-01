@@ -9,7 +9,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** (pending commit)
+- **Latest commit:** fba0752
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
 - **Test status:** green — 216 tests pass (14 new for feat-014 + 202 existing)

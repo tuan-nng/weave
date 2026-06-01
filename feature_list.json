@@ -158,7 +158,7 @@
       "verification": "cargo test -p weave-server -- test_shell_exec_basic && cargo test -p weave-server -- test_shell_exec_timeout && cargo test -p weave-server -- test_shell_exec_cwd",
       "state": "passing",
       "dependencies": ["feat-012"],
-      "evidence": "init.sh all 3 layers pass; 216 tests (14 new: 11 shell_exec + 3 optional_u64); clippy clean; fmt clean; ShellExecTool in tools/shell.rs; optional_u64 helper added to fs/mod.rs; sh -c wrapper; tokio::time::timeout + child.kill() + child.wait() for zombie reaping; spawn_read_task helper for DRY stdout/stderr reading; 100KB per-stream truncation with UTF-8 boundary safety; tracing::debug! trace event (secrets-safe); all review findings addressed"
+      "evidence": "commit fba0752; init.sh all 3 layers pass; 216 tests (14 new: 11 shell_exec + 3 optional_u64); clippy clean; fmt clean; ShellExecTool in tools/shell.rs; optional_u64 helper added to fs/mod.rs; sh -c wrapper; tokio::time::timeout + child.kill() + child.wait() for zombie reaping; spawn_read_task helper for DRY stdout/stderr reading; 100KB per-stream truncation with UTF-8 boundary safety; tracing::debug! trace event (secrets-safe); all review findings addressed"
     },
     {
       "id": "feat-015",
