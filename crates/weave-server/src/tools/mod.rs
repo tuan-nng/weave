@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod fs;
+pub mod git;
 pub mod shell;
 
 use crate::agent::ToolDefinition;
@@ -114,7 +115,10 @@ impl ToolRegistry {
                 "fs_search".to_string(),
                 "fs_list".to_string(),
                 "shell_exec".to_string(),
-                "git".to_string(),
+                "git_status".to_string(),
+                "git_diff".to_string(),
+                "git_log".to_string(),
+                "git_commit".to_string(),
                 "task".to_string(),
             ],
         );
@@ -123,7 +127,9 @@ impl ToolRegistry {
             vec![
                 "fs_read".to_string(),
                 "fs_search".to_string(),
-                "git".to_string(),
+                "git_status".to_string(),
+                "git_diff".to_string(),
+                "git_log".to_string(),
                 "task".to_string(),
                 "artifacts".to_string(),
             ],
@@ -252,6 +258,45 @@ impl Default for ToolRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// Shared I/O helpers
+// ---------------------------------------------------------------------------
+
+/// Spawn a task that reads an async reader to completion, returning the bytes.
+///
+/// Used by shell and git tools to capture stdout/stderr from child processes.
+pub(crate) fn spawn_read_task(
+    handle: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+) -> tokio::task::JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        match handle {
+            Some(mut h) => {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                h.read_to_end(&mut buf).await.ok();
+                buf
+            }
+            None => Vec::new(),
+        }
+    })
+}
+
+/// Truncate bytes to `max_bytes`, finding a safe UTF-8 boundary.
+///
+/// Returns (content, truncated_flag).
+pub(crate) fn truncate_bytes(bytes: &[u8], max_bytes: usize) -> (String, bool) {
+    if bytes.len() <= max_bytes {
+        return (String::from_utf8_lossy(bytes).into_owned(), false);
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
+        end -= 1;
+    }
+
+    (String::from_utf8_lossy(&bytes[..end]).into_owned(), true)
+}
+
+// ---------------------------------------------------------------------------
 // Test support (shared across test modules)
 // ---------------------------------------------------------------------------
 
@@ -353,14 +398,26 @@ mod tests {
         registry.register(Arc::new(MockTool::new("fs_read")));
         registry.register(Arc::new(MockTool::new("fs_write")));
         registry.register(Arc::new(MockTool::new("shell_exec")));
-        registry.register(Arc::new(MockTool::new("git")));
+        registry.register(Arc::new(MockTool::new("git_status")));
+        registry.register(Arc::new(MockTool::new("git_diff")));
+        registry.register(Arc::new(MockTool::new("git_log")));
+        registry.register(Arc::new(MockTool::new("git_commit")));
         registry.register(Arc::new(MockTool::new("task")));
 
         let defs = registry.resolve_profile("implementation").unwrap();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["fs_read", "fs_write", "shell_exec", "git", "task"]
+            vec![
+                "fs_read",
+                "fs_write",
+                "shell_exec",
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "task"
+            ]
         );
     }
 
@@ -369,13 +426,17 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(MockTool::new("fs_read")));
         registry.register(Arc::new(MockTool::new("shell_exec")));
-        registry.register(Arc::new(MockTool::new("git")));
+        registry.register(Arc::new(MockTool::new("git_status")));
+        registry.register(Arc::new(MockTool::new("git_diff")));
 
         let defs = registry.resolve_profile("full").unwrap();
-        assert_eq!(defs.len(), 3);
+        assert_eq!(defs.len(), 4);
         let mut names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, vec!["fs_read", "git", "shell_exec"]);
+        assert_eq!(
+            names,
+            vec!["fs_read", "git_diff", "git_status", "shell_exec"]
+        );
     }
 
     #[test]

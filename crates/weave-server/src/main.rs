@@ -76,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(tools::fs::FsSearchTool));
     tool_registry.register(Arc::new(tools::fs::FsListTool));
     tool_registry.register(Arc::new(tools::shell::ShellExecTool));
+    tool_registry.register(Arc::new(tools::git::GitStatusTool));
+    tool_registry.register(Arc::new(tools::git::GitDiffTool));
+    tool_registry.register(Arc::new(tools::git::GitLogTool));
+    tool_registry.register(Arc::new(tools::git::GitCommitTool));
     let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding
