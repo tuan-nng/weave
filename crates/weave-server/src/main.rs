@@ -80,6 +80,15 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(tools::git::GitDiffTool));
     tool_registry.register(Arc::new(tools::git::GitLogTool));
     tool_registry.register(Arc::new(tools::git::GitCommitTool));
+    // Task context tools (first tools with DB access)
+    tool_registry.register(Arc::new(tools::task::GetTaskTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::task::ListTasksTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::task::UpdateTaskStatusTool {
+        db: db.clone(),
+    }));
+    tool_registry.register(Arc::new(tools::task::UpdateTaskFieldsTool {
+        db: db.clone(),
+    }));
     let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding

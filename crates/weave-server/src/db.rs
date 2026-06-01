@@ -19,6 +19,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "003",
         include_str!("migrations/003_workspace_unique_name.sql"),
     ),
+    ("004", include_str!("migrations/004_task_context.sql")),
 ];
 
 impl Db {
@@ -168,6 +169,6 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 3, "user_version should be 3 after all migrations");
+        assert_eq!(v1, 4, "user_version should be 4 after all migrations");
     }
 }

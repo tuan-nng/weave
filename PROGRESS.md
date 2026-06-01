@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** c1cf3ab
+- **Latest commit:** e884448 (feat-016)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 259 tests pass (43 new for feat-015 + 216 existing)
+- **Test status:** green — 297 tests pass (38 new for feat-016 + 259 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -129,14 +129,28 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - 259 tests pass (43 new: 24 git tools + 19 updated/extracted)
 - All 8 review findings addressed (blocking I/O, DRY, weak assertions, empty message, config)
 
+### 2026-06-01 — feat-016: Task context tools
+- Created `src/tools/task/` directory with 5 files: `mod.rs`, `get.rs`, `list.rs`, `update_status.rs`, `update_fields.rs`
+- Created `src/store/tasks.rs` — TaskStore with workspace-scoped queries (JOIN through boards)
+- Migration 004: adds `acceptance_criteria`, `completion_summary`, `verification_report` columns to tasks table
+- `ToolContext` now has `workspace_id: String` field — used for workspace-scoped tool operations
+- `VALID_TASK_STATUSES` constant: `in_progress`, `review_required`, `completed`, `needs_fix`, `blocked`
+- Task tools hold `Arc<Db>` as a field (first tools with DB access, unlike unit-struct fs/shell/git tools)
+- `list` capped at 500 rows (DEFAULT_LIST_LIMIT) to prevent unbounded result sets
+- Profiles updated: `implementation` (4 task tools), `review` (3), `planning` (3), `reporting` (2)
+- Replaced placeholder `"task"` and `"task_read"` profile entries with actual tool names
+- 297 tests pass (38 new: 22 store/tasks + 16 tools/task)
+- All review findings addressed: workspace scoping via JOIN, RETURNING_COLS for UPDATE queries, list limit
+
 ## Notes for Next Session
 
-- feat-015 created: `src/tools/git/` directory (5 files)
-- `spawn_read_task` and `truncate_bytes` now in `tools/mod.rs` as shared helpers
-- Tool registration in `main.rs`: 10 tools now (5 fs + 1 shell + 4 git)
-- `implementation` profile has 11 tools listed, 10 now registered (task still pending)
-- `review` profile has 7 tools listed (3 git tools, no git_commit)
-- Next feature: feat-016 (task context tools) — depends on feat-012
+- feat-016 created: `src/tools/task/` directory (5 files), `src/store/tasks.rs`
+- `ToolContext` now has `workspace_id` field — all future tools should use it for workspace scoping
+- Task tools are the first to hold `Arc<Db>` — pattern for future DB-accessing tools
+- Tool registration in `main.rs`: 14 tools now (5 fs + 1 shell + 4 git + 4 task)
+- `implementation` profile has 15 tools listed, 14 now registered (artifacts still pending)
+- `review` profile has 10 tools listed (3 git tools, no git_commit, 3 task tools)
+- Next feature: feat-017 (TraceCollector) — depends on feat-009, feat-012
 
 ## Out-of-Scope Items Noticed
 

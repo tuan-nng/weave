@@ -174,9 +174,9 @@
       "phase": "phase-2",
       "behavior": "Task context tools: get_task (current task details with title, description, acceptance criteria), list_tasks (filter by status/column_id), update_task_status (in_progress, review_required, completed, needs_fix, blocked), update_task_fields (completion_summary, verification_report). These tools are the bridge between kanban tasks and agent sessions — agents know what they're working on.",
       "verification": "cargo test -p weave-server -- test_get_task_context && cargo test -p weave-server -- test_update_task_status",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-012"],
-      "evidence": ""
+      "evidence": "commit e884448; init.sh all 3 layers pass; 297 tests (38 new: 22 store/tasks + 16 tools/task); clippy clean; fmt clean; tools/task/ directory with mod.rs, get.rs, list.rs, update_status.rs, update_fields.rs; TaskStore with workspace-scoped queries (JOIN through boards); VALID_TASK_STATUSES constant; migration 004 adds acceptance_criteria, completion_summary, verification_report columns; ToolContext now has workspace_id field; profiles updated: implementation (4 task tools), review (3), planning (3), reporting (2); list capped at 500 rows; all review findings addressed (workspace scoping, RETURNING_COLS, list limit)"
     },
     {
       "id": "feat-017",

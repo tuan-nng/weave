@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub mod fs;
 pub mod git;
 pub mod shell;
+pub mod task;
 
 use crate::agent::ToolDefinition;
 use crate::error::AppError;
@@ -35,6 +36,7 @@ impl TraceCollector {
 /// root (for path containment), and a trace collector for observability.
 pub struct ToolContext {
     pub session_id: String,
+    pub workspace_id: String,
     pub cwd: PathBuf,
     pub codebase_root: PathBuf,
     pub trace_collector: Arc<TraceCollector>,
@@ -119,7 +121,10 @@ impl ToolRegistry {
                 "git_diff".to_string(),
                 "git_log".to_string(),
                 "git_commit".to_string(),
-                "task".to_string(),
+                "get_task".to_string(),
+                "list_tasks".to_string(),
+                "update_task_status".to_string(),
+                "update_task_fields".to_string(),
             ],
         );
         profiles.insert(
@@ -130,14 +135,18 @@ impl ToolRegistry {
                 "git_status".to_string(),
                 "git_diff".to_string(),
                 "git_log".to_string(),
-                "task".to_string(),
+                "get_task".to_string(),
+                "list_tasks".to_string(),
+                "update_task_status".to_string(),
                 "artifacts".to_string(),
             ],
         );
         profiles.insert(
             "planning".to_string(),
             vec![
-                "task".to_string(),
+                "get_task".to_string(),
+                "list_tasks".to_string(),
+                "update_task_fields".to_string(),
                 "kanban".to_string(),
                 "notes".to_string(),
             ],
@@ -145,7 +154,8 @@ impl ToolRegistry {
         profiles.insert(
             "reporting".to_string(),
             vec![
-                "task_read".to_string(),
+                "get_task".to_string(),
+                "list_tasks".to_string(),
                 "notes".to_string(),
                 "artifacts".to_string(),
             ],
@@ -309,6 +319,7 @@ pub(crate) mod test_support {
     pub(crate) fn make_context(root: &std::path::Path) -> super::ToolContext {
         super::ToolContext {
             session_id: "test-session".to_string(),
+            workspace_id: "test-workspace".to_string(),
             cwd: root.to_path_buf(),
             codebase_root: root.to_path_buf(),
             trace_collector: std::sync::Arc::new(super::TraceCollector::new()),
@@ -402,7 +413,10 @@ mod tests {
         registry.register(Arc::new(MockTool::new("git_diff")));
         registry.register(Arc::new(MockTool::new("git_log")));
         registry.register(Arc::new(MockTool::new("git_commit")));
-        registry.register(Arc::new(MockTool::new("task")));
+        registry.register(Arc::new(MockTool::new("get_task")));
+        registry.register(Arc::new(MockTool::new("list_tasks")));
+        registry.register(Arc::new(MockTool::new("update_task_status")));
+        registry.register(Arc::new(MockTool::new("update_task_fields")));
 
         let defs = registry.resolve_profile("implementation").unwrap();
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -416,7 +430,10 @@ mod tests {
                 "git_diff",
                 "git_log",
                 "git_commit",
-                "task"
+                "get_task",
+                "list_tasks",
+                "update_task_status",
+                "update_task_fields",
             ]
         );
     }

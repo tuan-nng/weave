@@ -1222,7 +1222,9 @@ You are a senior Rust engineer."#,
 
         // Build a tool registry with tools matching the "planning" profile
         let mut tool_registry = ToolRegistry::new();
-        tool_registry.register(Arc::new(MockTool::new("task")));
+        tool_registry.register(Arc::new(MockTool::new("get_task")));
+        tool_registry.register(Arc::new(MockTool::new("list_tasks")));
+        tool_registry.register(Arc::new(MockTool::new("update_task_fields")));
         tool_registry.register(Arc::new(MockTool::new("kanban")));
         tool_registry.register(Arc::new(MockTool::new("notes")));
         let tools = Arc::new(tool_registry);
@@ -1302,7 +1304,16 @@ You are a planning specialist."#,
         let tool_defs = request.tools.expect("expected tools to be set");
         let mut tool_names: Vec<&str> = tool_defs.iter().map(|d| d.name.as_str()).collect();
         tool_names.sort();
-        assert_eq!(tool_names, vec!["kanban", "notes", "task"]);
+        assert_eq!(
+            tool_names,
+            vec![
+                "get_task",
+                "kanban",
+                "list_tasks",
+                "notes",
+                "update_task_fields"
+            ]
+        );
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
