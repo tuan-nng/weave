@@ -1,6 +1,5 @@
 import { Link } from "react-router";
-import { useWorkspaces } from "../../hooks/use-workspaces";
-import { useWorkspaceSessions } from "../../hooks/use-workspaces";
+import { useWorkspaces, useWorkspaceSessions } from "../../hooks/use-workspaces";
 import { ROUTES } from "../../lib/routes";
 import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
@@ -33,7 +32,7 @@ function WorkspaceSessions({
             <div className="flex items-center justify-between">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-slate-900 truncate">
-                  {s.title || `Session ${s.id.slice(0, 8)}`}
+                  {s.specialist_id || `Session ${s.id.slice(0, 8)}`}
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
                   {new Date(s.created_at).toLocaleDateString()} · {s.model || "default model"}

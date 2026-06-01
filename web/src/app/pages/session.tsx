@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSession } from "../../hooks/use-session";
 import { ROUTES } from "../../lib/routes";
-import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
 import { StatusBadge } from "../../components/status-badge";
 import type { LiveBuffer } from "../../hooks/use-session";
@@ -66,6 +65,8 @@ function ToolCallBlock({
     >
       <button
         type="button"
+        aria-expanded={expanded}
+        aria-controls={`tool-output-${toolName}`}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-100/60 transition-colors duration-150"
         onClick={() => setExpanded(!expanded)}
       >
@@ -166,12 +167,25 @@ function ToolCallBlock({
 // ---------------------------------------------------------------------------
 
 function TraceToolCallBlock({ trace }: { trace: TraceRow }) {
-  const data = trace.data_json ? JSON.parse(trace.data_json) : {};
+  let data: Record<string, unknown> = {};
+  try {
+    data = trace.data_json ? JSON.parse(trace.data_json) : {};
+  } catch {
+    // corrupted trace data — fall back to summary
+  }
+
+  let parsedInput: unknown = {};
+  try {
+    parsedInput = data.input_json ? JSON.parse(data.input_json as string) : {};
+  } catch {
+    // corrupted input data
+  }
+
   return (
     <ToolCallBlock
-      toolName={data.tool_name ?? trace.summary}
-      input={data.input_json ? JSON.parse(data.input_json) : {}}
-      output={data.output_json ?? null}
+      toolName={(data.tool_name as string) ?? trace.summary}
+      input={parsedInput}
+      output={(data.output_json as string) ?? null}
       status="complete"
     />
   );
@@ -343,20 +357,7 @@ function LiveAssistantMessage({
           ))}
           {isStreaming && text.length === 0 && toolCalls.length === 0 && (
             <div className="flex items-center gap-2 py-2">
-              <div className="flex gap-1">
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                  style={{ animationDelay: "0ms" }}
-                />
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                  style={{ animationDelay: "200ms" }}
-                />
-                <span
-                  className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                  style={{ animationDelay: "400ms" }}
-                />
-              </div>
+              <StreamingIndicator />
               <span className="text-xs text-slate-400">Thinking...</span>
             </div>
           )}
@@ -412,7 +413,11 @@ function MessageInput({
     <div className="flex-shrink-0 border-t border-slate-200/80 bg-white/80 backdrop-blur-sm">
       <div className="max-w-3xl mx-auto px-5 py-4">
         <div className="relative">
+          <label htmlFor="session-message-input" className="sr-only">
+            Message
+          </label>
           <textarea
+            id="session-message-input"
             ref={textareaRef}
             rows={1}
             value={value}
@@ -425,6 +430,7 @@ function MessageInput({
           />
           <button
             type="button"
+            aria-label="Send message"
             onClick={handleSubmit}
             disabled={disabled || isSending || value.trim().length === 0}
             className="absolute right-2 bottom-2 w-8 h-8 flex items-center justify-center rounded-xl bg-brand-blue-500 text-white hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
@@ -455,7 +461,7 @@ function MessageInput({
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const sessionId = id!;
+  const sessionId = id ?? "";
 
   const {
     session,
@@ -470,8 +476,6 @@ export default function SessionPage() {
     isSending,
     isCancelling,
   } = useSession(sessionId);
-
-  const [bannerError, setBannerError] = useState<string | null>(null);
 
   // Auto-scroll
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -497,7 +501,7 @@ export default function SessionPage() {
   }, []);
 
   // Auto-scroll on new content
-  const contentLength = messages.length + liveBuffer.textChunks.join("").length;
+  const contentLength = messages.length + liveBuffer.textChunks.length;
   useEffect(() => {
     if (isAtBottomRef.current) {
       scrollToBottom();
@@ -514,8 +518,17 @@ export default function SessionPage() {
     [sendPrompt, scrollToBottom],
   );
 
-  // Correlate traces to messages
-  const traceMap = correlateTraces(messages, traces);
+  // Correlate traces to messages (memoized — O(n*m) computation)
+  const traceMap = useMemo(() => correlateTraces(messages, traces), [messages, traces]);
+
+  // Missing session ID guard (after hooks to satisfy rules-of-hooks)
+  if (!id) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <p className="text-sm text-slate-500">Missing session ID</p>
+      </div>
+    );
+  }
 
   // Terminal state check
   const isTerminal =
@@ -554,8 +567,6 @@ export default function SessionPage() {
 
   return (
     <div className="flex flex-col h-full bg-[#fafafa]">
-      {bannerError && <ErrorBanner message={bannerError} onDismiss={() => setBannerError(null)} />}
-
       {/* Chat Header */}
       <header className="flex-shrink-0 h-14 flex items-center justify-between px-5 bg-white/80 backdrop-blur-sm border-b border-slate-200/80">
         <div className="flex items-center gap-3">

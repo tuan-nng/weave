@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/query-keys";
-import type { SseEvent, Session, Message, TraceRow } from "../lib/types";
+import type { SseDoneEvent, SseEvent, Session, Message, TraceRow } from "../lib/types";
 
 // ---------------------------------------------------------------------------
 // Live streaming types
@@ -48,6 +48,8 @@ export interface UseSessionResult {
   cancelSession: () => void;
   isSending: boolean;
   isCancelling: boolean;
+  sendError: Error | null;
+  cancelError: Error | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +58,9 @@ export interface UseSessionResult {
 
 export function useSession(sessionId: string): UseSessionResult {
   const qc = useQueryClient();
+  // Capture qc in a ref so the SSE effect doesn't depend on it
+  const qcRef = useRef(qc);
+  qcRef.current = qc;
 
   // --- TanStack Query: initial data ---
   const sessionQuery = useQuery({
@@ -83,11 +88,8 @@ export function useSession(sessionId: string): UseSessionResult {
   }, []);
 
   // --- SSE connection ---
-  const eventSourceRef = useRef<EventSource | null>(null);
-
   useEffect(() => {
     const es = new EventSource(`/api/sessions/${sessionId}/stream`);
-    eventSourceRef.current = es;
 
     const handleEvent = (type: string, data: unknown) => {
       const event = { type, ...(data as object) } as SseEvent;
@@ -154,15 +156,20 @@ export function useSession(sessionId: string): UseSessionResult {
           }));
           break;
 
-        case "done":
+        case "done": {
           // Invalidate queries to refetch persisted data
-          qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(sessionId) });
-          qc.invalidateQueries({ queryKey: queryKeys.sessions.history(sessionId) });
-          qc.invalidateQueries({ queryKey: queryKeys.traces.list(sessionId) });
-          // Reset live buffer
-          bufferRef.current = EMPTY_LIVE_BUFFER;
-          setLiveBuffer(EMPTY_LIVE_BUFFER);
+          qcRef.current.invalidateQueries({ queryKey: queryKeys.sessions.detail(sessionId) });
+          qcRef.current.invalidateQueries({ queryKey: queryKeys.sessions.history(sessionId) });
+          qcRef.current.invalidateQueries({ queryKey: queryKeys.traces.list(sessionId) });
+          // Preserve stop_reason from the done event
+          const doneBuffer: LiveBuffer = {
+            ...EMPTY_LIVE_BUFFER,
+            stopReason: (event as SseDoneEvent).stop_reason ?? null,
+          };
+          bufferRef.current = doneBuffer;
+          setLiveBuffer(doneBuffer);
           break;
+        }
 
         case "error":
           updateLiveBuffer((prev) => ({
@@ -173,8 +180,13 @@ export function useSession(sessionId: string): UseSessionResult {
           break;
 
         case "connected":
+          // Reconnection happened — clear stale streaming state
+          bufferRef.current = EMPTY_LIVE_BUFFER;
+          setLiveBuffer(EMPTY_LIVE_BUFFER);
+          break;
+
         case "gap":
-          // Protocol events — no UI action needed
+          // Protocol event — no UI action needed
           break;
       }
     };
@@ -197,8 +209,8 @@ export function useSession(sessionId: string): UseSessionResult {
         try {
           const data = JSON.parse(e.data);
           handleEvent(type, data);
-        } catch {
-          // Ignore parse errors
+        } catch (err) {
+          console.warn("[useSession] Failed to parse SSE event:", type, e.data, err);
         }
       });
     }
@@ -210,15 +222,17 @@ export function useSession(sessionId: string): UseSessionResult {
 
     return () => {
       es.close();
-      eventSourceRef.current = null;
     };
-  }, [sessionId, qc, updateLiveBuffer]);
+  }, [sessionId, updateLiveBuffer]);
 
   // --- Mutations ---
   const sendMutation = useMutation({
     mutationFn: (prompt: string) => api.sessions.sendPrompt(sessionId, prompt),
     onSuccess: () => {
       updateLiveBuffer((prev) => ({ ...prev, isStreaming: true, stopReason: null }));
+    },
+    onError: () => {
+      updateLiveBuffer((prev) => ({ ...prev, isStreaming: false, stopReason: "send_error" }));
     },
   });
 
@@ -250,5 +264,7 @@ export function useSession(sessionId: string): UseSessionResult {
     cancelSession: cancelMutation.mutate,
     isSending: sendMutation.isPending,
     isCancelling: cancelMutation.isPending,
+    sendError: sendMutation.error as Error | null,
+    cancelError: cancelMutation.error as Error | null,
   };
 }
