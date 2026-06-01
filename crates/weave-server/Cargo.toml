@@ -50,6 +50,10 @@ futures-util = "0.3"
 # Database
 rusqlite = { version = "0.35", features = ["bundled"] }
 
+# Unix process management (for process group killing in shell_exec)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Filesystem tools
 glob = "0.3"
 regex = "1"
