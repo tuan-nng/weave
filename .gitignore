@@ -6,6 +6,8 @@
 node_modules/
 web/dist/
 web/.vite/
+web/pnpm-lock.yaml
+web/pnpm-workspace.yaml
 
 # Database
 *.db
