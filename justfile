@@ -9,7 +9,7 @@ default:
 # Install all dependencies (Rust + frontend)
 setup:
     cargo fetch
-    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && npm ci; else echo "No web/ directory — skipping frontend deps"; fi
+    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && bun install --frozen-lockfile; else echo "No web/ directory — skipping frontend deps"; fi
 
 # ── Development ──────────────────────────────────────────────────────────────
 # Start backend dev server with auto-reload
@@ -18,7 +18,7 @@ dev:
 
 # Start frontend dev server (Vite)
 dev-web:
-    cd web && npm run dev
+    cd web && bun run dev
 
 # ── Build ────────────────────────────────────────────────────────────────────
 # Build release binary (includes frontend)
@@ -36,17 +36,17 @@ check: lint test
 # Run all linters (clippy + frontend)
 lint:
     cargo clippy -p weave-server -- -D warnings
-    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && npm run lint; else echo "No web/ directory — skipping frontend lint"; fi
+    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && bun run lint; else echo "No web/ directory — skipping frontend lint"; fi
 
 # Check formatting (Rust + frontend)
 fmt:
     cargo fmt --check
-    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && npm run format:check; else echo "No web/ directory — skipping frontend format check"; fi
+    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && bun run format:check; else echo "No web/ directory — skipping frontend format check"; fi
 
 # Auto-fix formatting
 fmt-fix:
     cargo fmt
-    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && npm run format; else echo "No web/ directory — skipping frontend format fix"; fi
+    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && bun run format; else echo "No web/ directory — skipping frontend format fix"; fi
 
 # Run all tests (Rust + frontend)
 test: test-rust test-web
@@ -57,7 +57,7 @@ test-rust:
 
 # Run frontend tests only (skips if web/ doesn't exist)
 test-web:
-    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && npm test; else echo "No web/ directory — skipping frontend tests"; fi
+    @if [ -d "web" ] && [ -f "web/package.json" ]; then cd web && bun run test; else echo "No web/ directory — skipping frontend tests"; fi
 
 # ── Clean ────────────────────────────────────────────────────────────────────
 # Remove build artifacts

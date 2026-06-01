@@ -9,11 +9,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** 3906a26 (feat-018)
+- **Latest commit:** (pending commit)
 - **Active feature:** none
-- **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 323 tests pass (9 new for feat-018 + 314 existing)
-- **Lint status:** green — clippy clean, fmt clean
+- **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
+- **Test status:** green — 323 Rust tests + 12 frontend tests pass
+- **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
 
 ## Completed Since Project Start
 
@@ -38,6 +38,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-016**: Task context tools (get_task, list_tasks, update_task_status, update_task_fields — tools/task/ directory, TaskStore, workspace-scoped queries, migration 004)
 - [x] **feat-017**: TraceCollector (trace/ module with channel-based collector, background flush task, file change extraction; store/traces.rs with TraceStore; api/traces.rs with 3 endpoints; streaming loop integration with pending tool tracking)
 - [x] **feat-018**: Session resume (Db::with_transaction; SessionService::create_session with validate_parent_chain; MessageStore::copy_messages/load_all; terminal-state check; workspace validation; depth limit 5; cycle detection; 9 tests)
+- [x] **feat-019**: React frontend scaffolding (Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Query + React Router; Bun package manager; ESLint + Prettier + Vitest; API wrapper with {data} envelope unwrapping; types matching backend models; query key factory; route constants; 5 placeholder pages; 12 tests)
 
 ## In Progress
 
@@ -53,8 +54,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-019: Frontend phase begins (Phase 3)
-2. Continue Phase 3 (Frontend) — feat-019 through feat-023
+1. Start feat-020: Home page with workspace list, session list, settings page
+2. Continue Phase 3 (Frontend) — feat-020 through feat-023
 
 ## Session Notes
 
@@ -176,12 +177,16 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Notes for Next Session
 
-- feat-018 added: `Db::with_transaction`, `SessionStore::create_tx`, `MessageStore::copy_messages`/`load_all`, `SessionService::create_session`, `validate_parent_chain`
-- `SessionStore::create` still exists (used in tests) but has `#[allow(dead_code)]` — production uses `create_tx` via service
-- `map_fk_violation` is now a module-level function (not a method on SessionStore)
-- `load_all_messages` private function removed from service — replaced by `MessageStore::load_all`
-- Phase 2 (Agent Tools & Observability) is now complete (feat-011 through feat-018)
-- Next: Phase 3 (Frontend) — feat-019
+- feat-019 created `web/` directory with full React frontend scaffolding
+- Package manager is **Bun** (not npm) — all justfile commands updated to use `bun`
+- Tailwind CSS v4 uses `@tailwindcss/vite` plugin + `@import "tailwindcss"` in CSS (no tailwind.config.js)
+- API wrapper in `web/src/lib/api.ts`: `api.workspaces.list()`, `api.sessions.sendPrompt()`, etc.
+- Types in `web/src/lib/types.ts`: match Rust Serialize structs exactly
+- Query key factory in `web/src/lib/query-keys.ts` for TanStack Query cache management
+- Route constants in `web/src/lib/routes.ts`
+- Router uses `createBrowserRouter` with 5 routes (home, workspace, session, settings, not-found)
+- Vite dev proxy: `/api` → `http://localhost:3000`
+- Phase 3 (Frontend) started — next: feat-020 (Home page, workspace list, settings)
 
 ## Out-of-Scope Items Noticed
 

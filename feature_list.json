@@ -200,10 +200,10 @@
       "id": "feat-019",
       "phase": "phase-3",
       "behavior": "React frontend scaffolding: Vite + React 19 + TypeScript + Tailwind CSS + TanStack Query + React Router. API wrapper (src/lib/api.ts) with fetch, consistent error handling, base URL config. Types file (src/lib/types.ts) matching backend API contracts. Vite dev server proxies /api to backend. Builds with zero TypeScript errors.",
-      "verification": "cd web && npm run build 2>&1 | grep -c 'error' yields 0 && cd web && npx tsc --noEmit",
-      "state": "not_started",
+      "verification": "cd web && bun run build 2>&1 | grep -c 'error' yields 0 && cd web && bun run typecheck",
+      "state": "passing",
       "dependencies": ["feat-001"],
-      "evidence": ""
+      "evidence": "bun run build succeeds (tsc -b + vite build, 0 errors); bun run typecheck passes; 12 tests pass (8 api + 4 app shell); ESLint clean; Prettier clean; just check passes (323 Rust + 12 frontend); review fixes: conditional Content-Type, safe JSON parse, health endpoint robustness, tsbuildinfo gitignore, vite-env.d.ts added"
     },
     {
       "id": "feat-020",
