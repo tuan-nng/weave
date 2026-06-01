@@ -9,7 +9,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** c39e187 (feat-021: session chat view)
+- **Latest commit:** 3cb05d8 (code review fixes)
 - **Active feature:** feat-021 (Session chat view) — passing
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
 - **Test status:** green — 326 Rust tests + 21 frontend tests pass
@@ -245,6 +245,30 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - Created `web/src/app/pages/sessions.tsx` — sessions list page at /sessions
 - Fixed sidebar "Sessions" link: now points to /sessions instead of /
 - Added .prettierignore for pnpm-lock.yaml (bun install creates it)
+- All 3 init.sh layers pass: 326 Rust tests + 21 frontend tests
+
+### 2026-06-01 — feat-021 code review (Phase 6)
+- Launched 3 parallel code-reviewer agents for session.tsx, use-session.ts, sessions.tsx
+- **session.tsx fixes:**
+  - Replaced non-null `id!` assertion with early return guard (rules-of-hooks safe)
+  - Added `useMemo` for `correlateTraces` — was O(n*m) on every streaming re-render
+  - Added try/catch around `JSON.parse` in `TraceToolCallBlock` — corrupted traces no longer crash the page
+  - Added `aria-expanded`, `aria-controls` on ToolCallBlock toggle button
+  - Added `sr-only` label on textarea, `aria-label` on send button
+  - Replaced `textChunks.join("").length` with `textChunks.length` for contentLength
+  - Replaced duplicated thinking dots with `<StreamingIndicator />` component
+  - Removed dead `bannerError` state and unused `ErrorBanner` import
+- **use-session.ts fixes:**
+  - Used `qcRef` to avoid EventSource recreation when query client reference changes
+  - Reset live buffer on SSE `connected` event (prevents stale content after reconnect)
+  - Preserved `stop_reason` from `done` event (was discarding it)
+  - Log SSE parse errors with `console.warn` instead of silent catch
+  - Removed dead `eventSourceRef`
+  - Added `sendError`/`cancelError` to return type
+  - Added `onError` callback on `sendMutation`
+- **sessions.tsx fixes:**
+  - Fixed `s.title` type error — `Session` has no `title` field, used `specialist_id`
+  - Combined duplicate imports from same module
 - All 3 init.sh layers pass: 326 Rust tests + 21 frontend tests
 
 ## Out-of-Scope Items Noticed
