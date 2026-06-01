@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 
 use super::fs::{error, optional_string, optional_u64, require_string, success, PathValidator};
+use super::{spawn_read_task, truncate_bytes};
 use crate::tools::{ToolContext, ToolExecutor, ToolResult};
 
 /// Maximum bytes captured per stream (stdout, stderr).
@@ -145,8 +146,8 @@ async fn run_command(command: &str, cwd: &PathBuf, timeout_ms: u64) -> ToolResul
             let stdout_bytes = stdout_task.await.unwrap_or_default();
             let stderr_bytes = stderr_task.await.unwrap_or_default();
 
-            let (stdout, stdout_truncated) = truncate_output(&stdout_bytes);
-            let (stderr, stderr_truncated) = truncate_output(&stderr_bytes);
+            let (stdout, stdout_truncated) = truncate_bytes(&stdout_bytes, MAX_STREAM_BYTES);
+            let (stderr, stderr_truncated) = truncate_bytes(&stderr_bytes, MAX_STREAM_BYTES);
 
             success(json!({
                 "stdout": stdout,
@@ -201,41 +202,6 @@ async fn kill_process_tree(child: &mut tokio::process::Child) {
     }
     // Fallback: kill just the direct child.
     let _ = child.kill().await;
-}
-
-/// Spawn a task that reads an async reader to completion, returning the bytes.
-fn spawn_read_task(
-    handle: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
-) -> tokio::task::JoinHandle<Vec<u8>> {
-    tokio::spawn(async move {
-        match handle {
-            Some(mut h) => {
-                use tokio::io::AsyncReadExt;
-                let mut buf = Vec::new();
-                h.read_to_end(&mut buf).await.ok();
-                buf
-            }
-            None => Vec::new(),
-        }
-    })
-}
-
-/// Truncate output to `MAX_STREAM_BYTES`, returning (content, truncated_flag).
-///
-/// Finds a UTF-8 boundary at or before `MAX_STREAM_BYTES`. Uses `from_utf8_lossy`
-/// to handle any incomplete multi-byte sequence at the boundary.
-fn truncate_output(bytes: &[u8]) -> (String, bool) {
-    if bytes.len() <= MAX_STREAM_BYTES {
-        return (String::from_utf8_lossy(bytes).into_owned(), false);
-    }
-
-    // Find last valid UTF-8 boundary at or before MAX_STREAM_BYTES.
-    let mut end = MAX_STREAM_BYTES;
-    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
-        end -= 1;
-    }
-
-    (String::from_utf8_lossy(&bytes[..end]).into_owned(), true)
 }
 
 #[cfg(test)]
