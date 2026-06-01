@@ -1956,6 +1956,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "glob",
+ "libc",
  "regex",
  "reqwest",
  "rusqlite",
