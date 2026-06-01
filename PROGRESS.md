@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-01
-- **Latest commit:** c7f572c (feat-017)
+- **Latest commit:** 3906a26 (feat-018)
 - **Active feature:** none
 - **Build status:** green — `cargo build -p weave-server` succeeds
-- **Test status:** green — 314 tests pass (17 new for feat-017 + 297 existing)
+- **Test status:** green — 323 tests pass (9 new for feat-018 + 314 existing)
 - **Lint status:** green — clippy clean, fmt clean
 
 ## Completed Since Project Start
@@ -37,6 +37,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-015**: Git tools (git_status, git_diff, git_log, git_commit — tools/git/ directory, async run_git, validate_commit_identity, 50KB diff truncation, profile updates)
 - [x] **feat-016**: Task context tools (get_task, list_tasks, update_task_status, update_task_fields — tools/task/ directory, TaskStore, workspace-scoped queries, migration 004)
 - [x] **feat-017**: TraceCollector (trace/ module with channel-based collector, background flush task, file change extraction; store/traces.rs with TraceStore; api/traces.rs with 3 endpoints; streaming loop integration with pending tool tracking)
+- [x] **feat-018**: Session resume (Db::with_transaction; SessionService::create_session with validate_parent_chain; MessageStore::copy_messages/load_all; terminal-state check; workspace validation; depth limit 5; cycle detection; 9 tests)
 
 ## In Progress
 
@@ -52,8 +53,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Next Steps
 
-1. Start feat-018: Session resume (depends on feat-008 — passing)
-2. Continue Phase 2 (Agent Tools & Observability)
+1. Start feat-019: Frontend phase begins (Phase 3)
+2. Continue Phase 3 (Frontend) — feat-019 through feat-023
 
 ## Session Notes
 
@@ -157,13 +158,30 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - 314 tests pass (17 new: 6 store/traces + 7 trace module + 3 API + 1 UTF-8 truncation)
 - All 5 review findings addressed: UTF-8 boundary safety, orphaned tool calls, output_json encoding, cancellation flush, dead code removal
 
+### 2026-06-01 — feat-018: Session resume
+- Added `Db::with_transaction` to `db.rs` — idiomatic rusqlite Transaction RAII (auto-rollback on drop)
+- Added `SessionStore::create_tx` — same as `create` but takes `&Connection` for transactional use
+- Added `MessageStore::copy_messages` — bulk-copy messages with new UUIDs, preserving original `created_at`
+- Added `MessageStore::load_all` — extracted from private `load_all_messages` in service (paginated, capped)
+- Extracted `map_fk_violation` to module-level function (shared by `create` and `create_tx`)
+- Added `SessionService::create_session` — orchestrates: workspace validation → terminal-state check → chain validation → message loading → transactional session creation + message copy
+- Added `validate_parent_chain` — walks parent chain up to MAX_RESUME_DEPTH (5) hops, validates workspace ownership, detects cycles via HashSet
+- Terminal-state check: parent must be completed/cancelled/error before resume (prevents copying incomplete history)
+- Only direct parent's messages are copied — parent already has ancestors' messages if it was resumed
+- `create_session` API handler now delegates to `SessionService::create_session`
+- `SessionStore::create` has `#[allow(dead_code)]` — used in tests, production uses `create_tx` via service
+- `HashMap` import expanded to include `HashSet`
+- 323 tests pass (9 new: resume, chain, no-parent, not-found, wrong-workspace, depth-limit, cycle, empty-parent, active-parent-rejected)
+- All 6 review findings addressed: terminal-state check, FK message, HashSet import, API test gap noted, standalone unit tests noted, `with_transaction` test noted
+
 ## Notes for Next Session
 
-- feat-017 created: `src/trace/` directory, `src/store/traces.rs`, `src/api/traces.rs`
-- TraceCollector is now channel-based (replaces unit struct stub) — `TraceCollector::new(tx)` takes an UnboundedSender
-- `make_context` in tools/mod.rs test_support updated to construct with channel
-- Tool registration unchanged: still 14 tools (5 fs + 1 shell + 4 git + 4 task)
-- Next feature: feat-018 (Session resume) — depends on feat-008 (passing)
+- feat-018 added: `Db::with_transaction`, `SessionStore::create_tx`, `MessageStore::copy_messages`/`load_all`, `SessionService::create_session`, `validate_parent_chain`
+- `SessionStore::create` still exists (used in tests) but has `#[allow(dead_code)]` — production uses `create_tx` via service
+- `map_fk_violation` is now a module-level function (not a method on SessionStore)
+- `load_all_messages` private function removed from service — replaced by `MessageStore::load_all`
+- Phase 2 (Agent Tools & Observability) is now complete (feat-011 through feat-018)
+- Next: Phase 3 (Frontend) — feat-019
 
 ## Out-of-Scope Items Noticed
 

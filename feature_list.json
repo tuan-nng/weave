@@ -192,9 +192,9 @@
       "phase": "phase-2",
       "behavior": "Session resume: POST /api/workspaces/:wid/sessions with parent_session_id copies all messages from parent session into new session. New session starts with full conversation history as context. SessionService handles the message copying within a transaction. Supports chaining (grandparent sessions resolved recursively up to depth 5).",
       "verification": "cargo test -p weave-server -- test_session_resume && cargo test -p weave-server -- test_session_resume_chain",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": ["feat-008"],
-      "evidence": ""
+      "evidence": "commit 3906a26; init.sh all 3 layers pass; 323 tests (9 new: test_session_resume, test_session_resume_chain, test_session_resume_no_parent, test_session_resume_parent_not_found, test_session_resume_wrong_workspace, test_session_resume_depth_limit, test_session_resume_cycle, test_session_resume_empty_parent, test_session_resume_active_parent_rejected); clippy clean; fmt clean; Db::with_transaction for idiomatic rusqlite transactions; SessionService::create_session orchestrates resume with validate_parent_chain + MessageStore::copy_messages; terminal-state check prevents resuming active sessions; workspace ownership validated at every chain hop; depth limit 5 hops; cycle detection via HashSet"
     },
     {
       "id": "feat-019",
