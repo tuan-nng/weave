@@ -230,11 +230,21 @@ pub async fn session_stream(
                         }),
                     );
 
-                    // Read buffered events for replay
-                    let buffered: Vec<_> = if let Some(after_id) = last_id {
-                        mgr.get_after(&sid, after_id)
-                    } else {
-                        mgr.get_after(&sid, 0)
+                    // Read buffered events for replay. The ring buffer holds
+                    // the last 100 events for the session, which spans
+                    // multiple turns. Replaying ALL of them on a fresh
+                    // connection (e.g. page reload) would cause the
+                    // frontend to re-apply text_deltas from prior turns
+                    // to its live buffer, producing duplicate / stale
+                    // bubbles. The browser's EventSource only sends a
+                    // `Last-Event-ID` header on auto-reconnects, NOT on
+                    // the first connection — so we treat a missing
+                    // `last_id` as a fresh mount and skip the replay
+                    // entirely. Mid-turn reconnects within a session
+                    // will still get the relevant buffered events.
+                    let buffered: Vec<_> = match last_id {
+                        Some(after_id) => mgr.get_after(&sid, after_id),
+                        None => Vec::new(),
                     };
                     let max_id = buffered.last().map(|e| e.id).unwrap_or(0);
 

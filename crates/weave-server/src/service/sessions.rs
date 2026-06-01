@@ -423,31 +423,56 @@ async fn run_prompt_task(
     let mut accumulated = String::new();
     let mut stream = stream;
     let mut had_error = false;
+    // Captured from the agent's terminal `Done` event so we can broadcast
+    // it *after* the assistant message has been persisted to the database.
+    // The frontend's `done` handler invalidates the history query, and the
+    // refetch would otherwise race ahead of the INSERT and return a
+    // history without the new message — causing a visible flash where the
+    // streamed text disappears before the persisted message appears.
+    let mut pending_stop_reason: Option<agent::StopReason> = None;
+    // Set when the user cancelled (either mid-stream or after a race with
+    // the agent's `Done`). The post-loop finalization reads this to
+    // decide whether to persist a partial message with stop_reason=
+    // "cancelled" and to set the session status to "cancelled".
+    let mut cancelled: bool = false;
 
     loop {
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!(session_id, "session cancelled by user");
-                // Drain orphaned pending tool calls
-                drain_pending_tools(&trace_collector, session_id, &mut pending_tools);
-                drop(trace_collector);
-                let _ = flush_handle.await;
-                sse_manager.broadcast(
-                    session_id,
-                    SseWireEvent::Done { stop_reason: agent::StopReason::Cancelled },
-                );
-                let _ = SessionStore::update_status(&db, session_id, "cancelled");
-                return;
+                cancelled = true;
+                // Break out of the loop; the post-loop finalization block
+                // is the single source of truth for persist + status +
+                // broadcast, including the cancel path. This replaces the
+                // prior early-return that silently dropped the partial
+                // streamed text on cancel.
+                break;
             }
             item = StreamExt::next(&mut stream) => {
                 match item {
                     Some(Ok(event)) => {
-                        // Broadcast every agent event to SSE subscribers
-                        let is_terminal = matches!(
-                            event,
-                            agent::StreamEvent::Done { .. } | agent::StreamEvent::Error { .. }
-                        );
-                        sse_manager.broadcast(session_id, sse::stream_event_to_wire(event.clone()));
+                        // Broadcast every non-terminal agent event to SSE
+                        // subscribers inline. The `Done` event is captured
+                        // here and broadcast later, after the assistant
+                        // message has been persisted, so the frontend's
+                        // history refetch always finds the new message.
+                        match &event {
+                            agent::StreamEvent::Done { stop_reason } => {
+                                pending_stop_reason = Some(stop_reason.clone());
+                            }
+                            agent::StreamEvent::Error { .. } => {
+                                sse_manager.broadcast(
+                                    session_id,
+                                    sse::stream_event_to_wire(event.clone()),
+                                );
+                            }
+                            _ => {
+                                sse_manager.broadcast(
+                                    session_id,
+                                    sse::stream_event_to_wire(event.clone()),
+                                );
+                            }
+                        }
                         match event {
                             agent::StreamEvent::TextDelta { text } => {
                                 accumulated.push_str(&text);
@@ -502,9 +527,6 @@ async fn run_prompt_task(
                             }
                             _ => {}
                         }
-                        if is_terminal {
-                            break;
-                        }
                     },
                     Some(Err(e)) => {
                         error!(session_id, error = %e, "agent stream provider error");
@@ -531,32 +553,162 @@ async fn run_prompt_task(
     drop(trace_collector);
     let _ = flush_handle.await;
 
-    // Check cancellation after loop (race between Done and Cancel)
+    // Re-check cancellation after loop (race between Done and Cancel). If
+    // the agent finished normally but the user clicked Cancel at almost
+    // the same instant, we treat the turn as cancelled — the user
+    // expressed intent before the result was visible to them.
     if cancel_token.is_cancelled() {
-        info!(session_id, "session cancelled by user (after stream end)");
-        sse_manager.broadcast(
+        cancelled = true;
+    }
+
+    // Decide the stop_reason and final_status for this turn. The order
+    // matters: cancellation wins over error wins over the agent's natural
+    // stop_reason, because user intent outranks both transport failure
+    // and the model's own end-of-stream signal.
+    let stop_reason = if cancelled {
+        agent::StopReason::Cancelled
+    } else if had_error {
+        // There is no StopReason::Error variant; reuse EndTurn and let
+        // the metadata JSON record the "errored" tag so the frontend
+        // can render an Error badge.
+        agent::StopReason::EndTurn
+    } else {
+        pending_stop_reason.unwrap_or(agent::StopReason::EndTurn)
+    };
+
+    let final_status = if cancelled {
+        "cancelled"
+    } else if had_error {
+        "error"
+    } else {
+        // On success the session returns to "ready" so the user can send
+        // more prompts in the same session (multi-turn). The terminal
+        // "completed" status is only reached via explicit close
+        // (PATCH /api/sessions/:id) or future idle-timeout/cleanup work.
+        "ready"
+    };
+
+    // Persist the assistant message. On cancel and on streaming error, the
+    // partial streamed text is preserved with the appropriate
+    // `stop_reason` encoded in the metadata JSON. The `messages.metadata`
+    // column is TEXT NULL and is the natural extension point — no
+    // migration required. The frontend parses the metadata on
+    // `message_persisted` to render a "Cancelled" / "Error" badge on the
+    // partial bubble.
+    let metadata_json = build_message_metadata(&stop_reason, had_error);
+    let persisted_message: Option<crate::store::sessions::Message> = if !accumulated.is_empty() {
+        match MessageStore::create(
+            &db,
             session_id,
-            SseWireEvent::Done {
-                stop_reason: agent::StopReason::Cancelled,
-            },
-        );
-        let _ = SessionStore::update_status(&db, session_id, "cancelled");
-        return;
-    }
-
-    // Save assistant message if we have content
-    if !accumulated.is_empty() {
-        if let Err(e) = MessageStore::create(&db, session_id, "assistant", &accumulated, None) {
-            abort_with_error(&db, session_id, e, "failed to save assistant message");
-            return;
+            "assistant",
+            &accumulated,
+            metadata_json.as_deref(),
+        ) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                error!(session_id, error = %e, "failed to save assistant message");
+                // Don't abort the whole task — still broadcast MessagePersisted
+                // (sentinel) and Done so the frontend leaves the streaming
+                // state. The session status below will reflect the error.
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
-    // Update final session status
-    let final_status = if had_error { "error" } else { "completed" };
     if let Err(e) = SessionStore::update_status(&db, session_id, final_status) {
         error!(session_id, error = %e, "failed to update session to {}", final_status);
     }
+
+    // Broadcast `message_persisted` *after* MessageStore::create returns
+    // and *before* the terminal `done` event. This is the load-bearing
+    // invariant for the frontend's id-based handoff: when the client sees
+    // `message_persisted`, the row is already in the database and any
+    // history refetch will find it. When the partial was empty (e.g.
+    // cancel before any text streamed), we still emit the event with
+    // `id == ""` so the frontend knows the live bubble is no longer the
+    // latest and can collapse it cleanly.
+    let now = chrono::Utc::now().to_rfc3339();
+    let (
+        persisted_id,
+        persisted_role,
+        persisted_content,
+        persisted_created_at,
+        persisted_stop_reason,
+    ) = match &persisted_message {
+        Some(msg) => (
+            msg.id.clone(),
+            msg.role.clone(),
+            msg.content.clone(),
+            msg.created_at.clone(),
+            stop_reason_to_wire(&stop_reason, had_error),
+        ),
+        None => (
+            String::new(),
+            "assistant".to_string(),
+            String::new(),
+            now,
+            stop_reason_to_wire(&stop_reason, had_error),
+        ),
+    };
+    sse_manager.broadcast(
+        session_id,
+        SseWireEvent::MessagePersisted {
+            id: persisted_id,
+            role: persisted_role,
+            stop_reason: persisted_stop_reason,
+            content: persisted_content,
+            created_at: persisted_created_at,
+        },
+    );
+
+    // Broadcast the terminal `done` event last. The frontend's `done`
+    // handler invalidates the history query, which now refetches a
+    // history that contains the row we just broadcast in
+    // `message_persisted` — no race, no flash.
+    sse_manager.broadcast(session_id, SseWireEvent::Done { stop_reason });
+}
+
+/// Build the `messages.metadata` JSON string for a persisted assistant
+/// message. Returns `None` for the common `EndTurn` case so we don't
+/// write empty `{}` rows to the DB. The frontend parses this JSON to
+/// render a "Cancelled" / "Error" / "MaxTokens" badge on the persisted
+/// bubble.
+fn build_message_metadata(stop_reason: &agent::StopReason, had_error: bool) -> Option<String> {
+    let tag: &str = if had_error {
+        "error"
+    } else {
+        match stop_reason {
+            agent::StopReason::Cancelled => "cancelled",
+            agent::StopReason::MaxTokens => "max_tokens",
+            agent::StopReason::EndTurn | agent::StopReason::ToolUse => return None,
+        }
+    };
+    Some(serde_json::json!({ "stop_reason": tag }).to_string())
+}
+
+/// Compute the wire-format string carried in
+/// `message_persisted.stop_reason`. The internal `agent::StopReason` enum
+/// has no `Error` variant, so a streaming error is encoded as
+/// `("end_turn", had_error=true)` in the internal flow but the wire
+/// string is "error" so the frontend can render an Error badge without
+/// having to inspect the metadata JSON. The metadata JSON still carries
+/// the same "error" tag for symmetry with how the persisted row records
+/// it. `None` is reserved for the "no message was persisted this turn"
+/// sentinel — every other case returns a stable string.
+fn stop_reason_to_wire(stop_reason: &agent::StopReason, had_error: bool) -> Option<String> {
+    let s = if had_error {
+        "error"
+    } else {
+        match stop_reason {
+            agent::StopReason::EndTurn => "end_turn",
+            agent::StopReason::MaxTokens => "max_tokens",
+            agent::StopReason::ToolUse => "tool_use",
+            agent::StopReason::Cancelled => "cancelled",
+        }
+    };
+    Some(s.to_string())
 }
 
 /// Drain orphaned pending tool calls (ToolUseStart without matching ToolResult).
@@ -1122,6 +1274,501 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cancel_persists_partial_text_with_metadata() {
+        // The cancel-during-stream path must:
+        //   1. Persist the partial text as an assistant message
+        //   2. Encode stop_reason=cancelled in messages.metadata
+        //   3. Set session.status = "cancelled"
+        //   4. Broadcast MessagePersisted (with the persisted id) BEFORE Done{Cancelled}
+        // This is the load-bearing new behavior — without it, the user
+        // would see the streamed text disappear on cancel with no
+        // persisted row to anchor to.
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct PartialAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for PartialAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "first chunk ".into(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "second chunk".into(),
+                        }))
+                        .await;
+                    // Sleep long enough for cancel to fire
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(PartialAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut rx = sse.subscribe(&session.id);
+
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        // Wait for at least one text_delta to land
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+
+        // Cancel
+        SessionService::cancel_session(&active, &session.id).unwrap();
+
+        // Collect remaining events
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(event)) => {
+                    let is_done = matches!(&event, crate::sse::SseWireEvent::Done { .. });
+                    events.push(event);
+                    if is_done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Find the MessagePersisted event; it must have a non-empty id
+        // (the partial was persisted) and stop_reason = cancelled.
+        let mp = events
+            .iter()
+            .find_map(|e| match e {
+                crate::sse::SseWireEvent::MessagePersisted {
+                    id,
+                    stop_reason,
+                    content,
+                    ..
+                } => Some((id.clone(), stop_reason.clone(), content.clone())),
+                _ => None,
+            })
+            .expect("expected MessagePersisted event on cancel");
+        let (mp_id, mp_stop, mp_content) = mp;
+        assert!(
+            !mp_id.is_empty(),
+            "MessagePersisted id must be non-empty when partial was persisted"
+        );
+        assert_eq!(mp_stop.as_deref(), Some("cancelled"));
+        assert_eq!(mp_content, "first chunk second chunk");
+
+        // The MessagePersisted must come before the Done event in the stream.
+        let mp_idx = events
+            .iter()
+            .position(|e| matches!(e, crate::sse::SseWireEvent::MessagePersisted { .. }))
+            .unwrap();
+        let done_idx = events
+            .iter()
+            .position(|e| matches!(e, crate::sse::SseWireEvent::Done { .. }))
+            .unwrap();
+        assert!(
+            mp_idx < done_idx,
+            "MessagePersisted must come before Done; got mp_idx={} done_idx={}",
+            mp_idx,
+            done_idx
+        );
+
+        // Wait for the task to clean up
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Session is cancelled
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "cancelled");
+
+        // The persisted row exists with the right metadata
+        let history =
+            crate::store::sessions::MessageStore::load_all(&db, &session.id, 100).unwrap();
+        let partial = history
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("partial assistant message");
+        assert_eq!(partial.content, "first chunk second chunk");
+        let parsed: serde_json::Value =
+            serde_json::from_str(partial.metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["stop_reason"], "cancelled");
+        // The persisted id matches what the SSE event carried
+        assert_eq!(partial.id, mp_id);
+    }
+
+    #[tokio::test]
+    async fn test_stream_error_persists_partial_text_with_metadata() {
+        // When the agent emits StreamEvent::Error mid-stream, the partial
+        // streamed text must be persisted with metadata = {"stop_reason":"error"}
+        // and the session status must be "error". MessagePersisted
+        // carries the persisted id; Done closes the stream.
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct ErroringAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for ErroringAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "before error".into(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Error {
+                            message: "provider stream interrupted".into(),
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(ErroringAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut rx = sse.subscribe(&session.id);
+
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        // Collect events through to Done
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(event)) => {
+                    let is_done = matches!(&event, crate::sse::SseWireEvent::Done { .. });
+                    events.push(event);
+                    if is_done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Find the partial MessagePersisted (with non-empty id) and Done
+        let mp = events
+            .iter()
+            .find_map(|e| match e {
+                crate::sse::SseWireEvent::MessagePersisted {
+                    id,
+                    stop_reason,
+                    content,
+                    ..
+                } => Some((id.clone(), stop_reason.clone(), content.clone())),
+                _ => None,
+            })
+            .expect("MessagePersisted on stream error");
+        let (mp_id, mp_stop, mp_content) = mp;
+        assert!(!mp_id.is_empty());
+        assert_eq!(mp_stop.as_deref(), Some("error"));
+        assert_eq!(mp_content, "before error");
+
+        // Session is in error status
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "error");
+
+        // Persisted row has the error metadata
+        let history =
+            crate::store::sessions::MessageStore::load_all(&db, &session.id, 100).unwrap();
+        let partial = history.iter().find(|m| m.role == "assistant").unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(partial.metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["stop_reason"], "error");
+    }
+
+    #[tokio::test]
+    async fn test_empty_turn_emits_sentinel_message_persisted() {
+        // A turn that streams no text (e.g. tool-only or instant Done
+        // with no text) must still emit a MessagePersisted event with
+        // id="" so the frontend collapses any live bubble. No row
+        // is written to the messages table in this case.
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct EmptyAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for EmptyAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Done {
+                            stop_reason: agent::StopReason::EndTurn,
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(EmptyAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let mut rx = sse.subscribe(&session.id);
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        // Collect events through Done
+        let mut events = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await {
+                Ok(Ok(event)) => {
+                    let is_done = matches!(&event, crate::sse::SseWireEvent::Done { .. });
+                    events.push(event);
+                    if is_done {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // There must be exactly one MessagePersisted event, and it must
+        // carry id="" (sentinel for "no row persisted").
+        let mp_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::sse::SseWireEvent::MessagePersisted { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(mp_events.len(), 1);
+        assert_eq!(mp_events[0], "", "empty turn should emit sentinel id=\"\"");
+
+        // No assistant row was created
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let history =
+            crate::store::sessions::MessageStore::load_all(&db, &session.id, 100).unwrap();
+        assert!(!history.iter().any(|m| m.role == "assistant"));
+    }
+
+    #[tokio::test]
     async fn test_sse_broadcast_on_prompt() {
         use async_trait::async_trait;
         use futures_core::Stream;
@@ -1265,15 +1912,48 @@ mod tests {
             .collect();
         assert_eq!(text_deltas, vec!["Hello", " World"]);
 
-        let has_done = events.iter().any(|e| {
+        // The last two events must be MessagePersisted (carrying the
+        // persisted row) followed by Done. The id-based handoff
+        // depends on this exact ordering: when the client sees
+        // MessagePersisted, the row is in the DB; when it sees Done,
+        // it invalidates the history cache, which refetches a history
+        // that already contains the row.
+        assert!(
+            events.len() >= 4,
+            "expected at least 4 events (2 TextDelta + MessagePersisted + Done), got {}",
+            events.len()
+        );
+        match &events[events.len() - 2] {
+            crate::sse::SseWireEvent::MessagePersisted {
+                id,
+                role,
+                content,
+                stop_reason,
+                ..
+            } => {
+                assert!(
+                    !id.is_empty(),
+                    "MessagePersisted id must be non-empty for a real turn"
+                );
+                assert_eq!(role, "assistant");
+                assert_eq!(content, "Hello World");
+                assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+            }
+            other => panic!(
+                "expected second-to-last event to be MessagePersisted, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+        let last = &events[events.len() - 1];
+        assert!(
             matches!(
-                e,
+                last,
                 crate::sse::SseWireEvent::Done {
                     stop_reason: agent::StopReason::EndTurn
                 }
-            )
-        });
-        assert!(has_done, "expected Done event with EndTurn");
+            ),
+            "expected last event to be Done{{EndTurn}}"
+        );
 
         // Wait for task to finish
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1281,9 +1961,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        // Session should be completed
+        // Session should be back to "ready" after a successful turn (multi-turn).
+        // The terminal "completed" status is only reached via explicit close.
         let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
-        assert_eq!(session.status, "completed");
+        assert_eq!(session.status, "ready");
     }
 
     #[tokio::test]

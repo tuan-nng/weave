@@ -343,33 +343,55 @@ impl MessageStore {
             .map_err(AppError::from)
     }
 
-    /// Cursor-based listing by session, ordered by `id`.
+    /// Cursor-based listing by session, ordered by `created_at` (asc).
     ///
-    /// The cursor is a message ID. Messages with IDs after the cursor
-    /// are returned, up to `limit`.
+    /// Messages are sorted by their `created_at` timestamp with `id` as a
+    /// deterministic tiebreaker for sub-second ties. The cursor is a
+    /// `"<created_at>|<id>"` pair encoding the last message of the previous
+    /// page; on the next call, only messages strictly after that pair are
+    /// returned.
+    ///
+    /// Sorting by `created_at` (not `id`) is required because message IDs
+    /// are random v4 UUIDs and carry no time order — sorting by `id` produced
+    /// a random message order in the UI.
     pub fn list_by_session(
         db: &Db,
         session_id: &str,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<MessagePage, AppError> {
-        let cursor = cursor.unwrap_or("");
+        // Parse the cursor into (created_at, id). Empty / None means "start".
+        let (cursor_ts, cursor_id) = match cursor {
+            Some(c) if !c.is_empty() => match c.split_once('|') {
+                Some((ts, id)) => (ts.to_string(), id.to_string()),
+                None => {
+                    return Err(AppError::Validation(format!(
+                        "invalid cursor: expected '<created_at>|<id>', got {c:?}"
+                    )));
+                }
+            },
+            _ => (String::new(), String::new()),
+        };
 
         let conn = db.conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, role, content, metadata, created_at
              FROM messages
-             WHERE session_id = ?1 AND id > ?2
-             ORDER BY id ASC
-             LIMIT ?3",
+             WHERE session_id = ?1
+               AND (created_at > ?2 OR (created_at = ?2 AND id > ?3))
+             ORDER BY created_at ASC, id ASC
+             LIMIT ?4",
         )?;
 
         let rows: Vec<Message> = stmt
-            .query_map(rusqlite::params![session_id, cursor, limit], Self::map_row)?
+            .query_map(
+                rusqlite::params![session_id, cursor_ts, cursor_id, limit],
+                Self::map_row,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
         let next_cursor = if rows.len() == limit as usize {
-            rows.last().map(|m| m.id.clone())
+            rows.last().map(|m| format!("{}|{}", m.created_at, m.id))
         } else {
             None
         };
@@ -693,7 +715,10 @@ pub(crate) mod tests {
         assert_eq!(page3.data.len(), 1);
         assert!(page3.cursor.is_none());
 
-        // Verify id ordering (cursor-based pagination uses id)
+        // Verify created_at ordering (cursor-based pagination uses
+        // created_at + id; created_at is monotonically non-decreasing for
+        // messages inserted in order, so the tiebreaker (id) is what
+        // disambiguates sub-second ties).
         let all: Vec<&Message> = page1
             .data
             .iter()
@@ -702,8 +727,51 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(all.len(), 5);
         for window in all.windows(2) {
-            assert!(window[0].id <= window[1].id);
+            assert!(
+                window[0].created_at < window[1].created_at
+                    || (window[0].created_at == window[1].created_at
+                        && window[0].id <= window[1].id),
+                "messages out of order: {:?} then {:?}",
+                window[0],
+                window[1]
+            );
         }
+    }
+
+    /// Regression: list_by_session must order by created_at, not by id.
+    ///
+    /// IDs are random v4 UUIDs and carry no time order. Previously, sorting
+    /// by `id` produced a random message order in the UI (e.g. assistant
+    /// messages appearing above their user prompts).
+    #[test]
+    fn test_message_list_orders_by_created_at_not_id() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+
+        // Create 4 messages in order. We use the `id` field of the returned
+        // Message to assert that the *insertion* order is preserved by the
+        // listing, regardless of UUID randomness.
+        let mut created_ids = Vec::new();
+        for i in 0..4 {
+            let m = MessageStore::create(
+                &db,
+                &session.id,
+                "user",
+                &format!(r#"{{"text":"m{}"}}"#, i),
+                None,
+            )
+            .unwrap();
+            created_ids.push(m.id);
+        }
+
+        let page = MessageStore::list_by_session(&db, &session.id, None, 10).unwrap();
+        let listed_ids: Vec<&str> = page.data.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            listed_ids, created_ids,
+            "list_by_session must return messages in insertion order"
+        );
     }
 
     #[test]

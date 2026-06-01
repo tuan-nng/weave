@@ -18,7 +18,7 @@
       "id": "phase-3",
       "name": "Frontend",
       "description": "Browser UI for creating sessions, chatting with agents, and observing their work.",
-      "features": ["feat-019", "feat-020", "feat-021", "feat-022", "feat-023"]
+      "features": ["feat-019", "feat-020", "feat-021", "feat-022", "feat-023", "feat-036"]
     },
     {
       "id": "phase-4",
@@ -348,6 +348,15 @@
       "state": "not_started",
       "dependencies": ["feat-001"],
       "evidence": ""
+    },
+    {
+      "id": "feat-036",
+      "phase": "phase-3",
+      "behavior": "Re-implement session chat streaming for smooth UX. (1) New SSE event `message_persisted` carrying the persisted row id, role, content, stop_reason, created_at is broadcast AFTER MessageStore::create returns and BEFORE the terminal `done` event. (2) On cancel and on streaming error, the partial streamed text is persisted with stop_reason=cancelled|error encoded in the existing messages.metadata column. (3) Frontend useSession is a useReducer with a discriminated Action union; content-equality dedup in LiveAssistantMessage is replaced with id-based handoff (`liveBubbleId !== persistedTurnId`). (4) dead state removed (thinkingChunks). (5) On user scroll-up while streaming, a 'jump to latest' pill appears. (6) Initial loading renders a 3-row skeleton, not a centered spinner. (7) Thinking blocks render inline and collapsible.",
+      "verification": "cd web && bun run test && cargo test -p weave-server --lib",
+      "state": "passing",
+      "dependencies": ["feat-021", "feat-010"],
+      "evidence": "./init.sh all 3 layers pass; 333 Rust tests (was 326; +3 SSE wire-event tests + 1 cancel-persists-partial + 1 error-persists-partial + 1 empty-turn-sentinel) + 45 frontend tests (was 21; +24 useSession reducer tests); clippy clean, rustfmt + prettier clean. Backend: SseWireEvent::MessagePersisted variant + event_type() arm + 3 new tests; run_prompt_task unified exit paths via build_message_metadata + stop_reason_to_wire; persist partial on cancel (metadata={\"stop_reason\":\"cancelled\"}) and on error (metadata={\"stop_reason\":\"error\"}); empty accumulator emits MessagePersisted with id='' sentinel; Done broadcast ordering invariant: MessagePersisted → Done, after MessageStore::create. Frontend: useReducer + Action union in use-session; LiveBuffer adds streamId and persistedTurnId fields; SessionPage derives livePersistedMessage = messages.find(m => m.id === liveBuffer.persistedTurnId) and passes it to LiveAssistantMessage; the live bubble hides when persistedMessage is defined (atomic with the persisted AssistantMessage appearing — no gap); AssistantMessage accepts skipAnimate prop to suppress animate-fade-in-up on the message that just replaced a live bubble; ThinkingBlock collapsible component; StopReasonBadge on persisted AssistantMessage whose metadata parses to cancelled|error|max_tokens; jump-to-latest pill on scroll-up; 3-row skeleton loading; thinkingChunks dead state removed. Round 2 fix moved the liveSuperseded gate from 'persistedTurnId !== null' to 'persistedMessage !== undefined' — closes the visible gap between the live bubble hiding and the persisted bubble rendering, eliminates the perceived 'reload' of the response. Browser-verified with 3-turn session (cat story, haiku, math) — clean persisted bubbles, no flash, no streaming markers on the persisted message, status 'Ready' immediately after each turn."
     }
   ]
 }

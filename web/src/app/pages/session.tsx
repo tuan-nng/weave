@@ -4,10 +4,9 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSession } from "../../hooks/use-session";
 import { ROUTES } from "../../lib/routes";
-import { Spinner } from "../../components/spinner";
 import { StatusBadge } from "../../components/status-badge";
-import type { LiveBuffer } from "../../hooks/use-session";
-import type { Message, TraceRow } from "../../lib/types";
+import type { LiveBuffer, LiveThinkingBlock } from "../../hooks/use-session";
+import type { Message, MessageMetadata, TraceRow } from "../../lib/types";
 
 // ---------------------------------------------------------------------------
 // Trace-to-message correlation
@@ -240,14 +239,134 @@ function UserMessage({ message }: { message: Message }) {
 // AssistantMessage
 // ---------------------------------------------------------------------------
 
-function AssistantMessage({ message, traces }: { message: Message; traces: TraceRow[] }) {
+/**
+ * Parse `messages.metadata` (TEXT NULL in the DB) and return the
+ * stop_reason tag, if any. Invalid JSON is treated as no tag — a
+ * legacy row written before the `message_persisted` protocol.
+ */
+function parseMessageMetadata(raw: string | null): MessageMetadata | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && "stop_reason" in parsed) {
+      const sr = (parsed as { stop_reason: unknown }).stop_reason;
+      if (sr === "cancelled" || sr === "error" || sr === "max_tokens") {
+        return { stop_reason: sr };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Small chip shown next to an assistant message when its metadata
+ * indicates an abnormal termination. Visible inline, not as a
+ * full-width banner — the user has already seen the partial text,
+ * so the chip is a quiet annotation.
+ */
+function StopReasonBadge({ stopReason }: { stopReason: MessageMetadata["stop_reason"] }) {
+  if (!stopReason) return null;
+  const config: Record<
+    NonNullable<MessageMetadata["stop_reason"]>,
+    { label: string; className: string }
+  > = {
+    cancelled: {
+      label: "Cancelled",
+      className: "bg-amber-50 text-amber-700 border border-amber-200/60",
+    },
+    error: {
+      label: "Stopped (error)",
+      className: "bg-rose-50 text-rose-700 border border-rose-200/60",
+    },
+    max_tokens: {
+      label: "Stopped (max tokens)",
+      className: "bg-slate-100 text-slate-600 border border-slate-200/60",
+    },
+  };
+  const c = config[stopReason];
+  return (
+    <span
+      className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-medium ${c.className}`}
+    >
+      {c.label}
+    </span>
+  );
+}
+
+/**
+ * Collapsible thinking block, default closed. The reducer accumulates
+ * all thinking text for a turn into a single block; this component
+ * owns the local "expanded" state. The block-level `expanded` flag on
+ * `LiveThinkingBlock` is the initial value, so an in-flight thinking
+ * block that the user has expanded stays expanded as more text
+ * arrives (the reducer is responsible for preserving that).
+ */
+function ThinkingBlock({ block }: { block: LiveThinkingBlock }) {
+  const [expanded, setExpanded] = useState(block.expanded);
+  return (
+    <div className="mb-3 rounded-lg border border-slate-200/80 bg-slate-50/60 overflow-hidden">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] font-medium text-slate-500 hover:bg-slate-100/60 transition-colors"
+      >
+        <svg
+          className="w-3 h-3 text-slate-400 transition-transform"
+          style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)" }}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+        <span>Thinking</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 text-[12px] text-slate-500 italic font-mono whitespace-pre-wrap border-t border-slate-200/60">
+          {block.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssistantMessage({
+  message,
+  traces,
+  skipAnimate,
+}: {
+  message: Message;
+  traces: TraceRow[];
+  /**
+   * When true, suppress the `animate-fade-in-up` mount animation.
+   *
+   * The animation runs on every fresh mount, including the moment
+   * the persisted `AssistantMessage` replaces the live streaming
+   * bubble. With the animation, the user sees: live bubble
+   * disappears → blank → message fades in from below. That looks
+   * like a reload of the same content.
+   *
+   * Skipping the animation makes the swap atomic from the user's
+   * perspective: live bubble is gone, persisted bubble is there,
+   * no intermediate fade. We only skip the animation for the
+   * specific message that just replaced a live bubble — every
+   * other mount (e.g. navigating to a session, loading history on
+   * first paint) still gets the fade-in.
+   */
+  skipAnimate?: boolean;
+}) {
   const time = new Date(message.created_at).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
+  const meta = parseMessageMetadata(message.metadata);
 
   return (
-    <div className="flex justify-start animate-fade-in-up">
+    <div className={skipAnimate ? "flex justify-start" : "flex justify-start animate-fade-in-up"}>
       <div className="w-full">
         {/* Avatar row */}
         <div className="flex items-center gap-2 mb-2">
@@ -269,6 +388,7 @@ function AssistantMessage({ message, traces }: { message: Message; traces: Trace
           <span className="text-xs font-medium text-slate-500">Weave</span>
           <span className="text-[10px] text-slate-300">&middot;</span>
           <span className="text-[10px] text-slate-400">{time}</span>
+          {meta?.stop_reason && <StopReasonBadge stopReason={meta.stop_reason} />}
         </div>
         {/* Message body */}
         <div className="bg-white border border-black/[0.06] rounded-2xl rounded-tl-md p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
@@ -291,15 +411,44 @@ function AssistantMessage({ message, traces }: { message: Message; traces: Trace
 
 function LiveAssistantMessage({
   liveBuffer,
-  isStreaming,
+  persistedMessage,
 }: {
   liveBuffer: LiveBuffer;
-  isStreaming: boolean;
+  /**
+   * The persisted Message keyed by `liveBuffer.persistedTurnId`, if
+   * the history query has already returned it. We pass this in
+   * rather than the full `messages` array so the component stays
+   * pure and the parent can decide where the lookup lives.
+   *
+   * The live bubble hides only when this is defined — i.e. when the
+   * persisted `AssistantMessage` is actually about to render. Hiding
+   * on `liveBuffer.persistedTurnId` alone (the previous behavior)
+   * created a visible gap: the live bubble would disappear the
+   * moment the `message_persisted` SSE event landed, but the
+   * `AssistantMessage` wouldn't render until the history refetch
+   * resolved, which is one network round-trip later. The user saw:
+   * streamed text → blank → re-rendered text. Gating on
+   * `persistedMessage` closes the gap.
+   */
+  persistedMessage: Message | undefined;
 }) {
   const text = liveBuffer.textChunks.join("");
   const toolCalls = Array.from(liveBuffer.toolCalls.values());
+  const thinking = liveBuffer.thinking;
 
-  if (!isStreaming && text.length === 0 && toolCalls.length === 0) return null;
+  // Id-based handoff: the server tells us the persisted row id via
+  // `message_persisted`. The handoff completes when the matching row
+  // is in the messages array (rendered as `AssistantMessage` by the
+  // parent). The previous gate — "is persistedTurnId set?" — hid the
+  // live bubble one network round-trip too early and produced a
+  // visible flash. The new gate is "is the persisted row rendered?"
+  // which is atomic with the persisted bubble appearing, so the user
+  // sees a seamless swap.
+  const liveSuperseded = persistedMessage !== undefined;
+  const hasContent = text.length > 0 || toolCalls.length > 0 || thinking.length > 0;
+  if (liveSuperseded || !hasContent) {
+    return null;
+  }
 
   const time = new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -329,7 +478,7 @@ function LiveAssistantMessage({
           <span className="text-xs font-medium text-slate-500">Weave</span>
           <span className="text-[10px] text-slate-300">&middot;</span>
           <span className="text-[10px] text-slate-400">{time}</span>
-          {isStreaming && (
+          {liveBuffer.isStreaming && (
             <>
               <StreamingIndicator />
               <span className="text-xs text-slate-400 ml-0.5">
@@ -340,6 +489,10 @@ function LiveAssistantMessage({
         </div>
         {/* Message body */}
         <div className="bg-white border border-black/[0.06] rounded-2xl rounded-tl-md p-5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+          {/* Thinking blocks (collapsible) */}
+          {thinking.map((block, i) => (
+            <ThinkingBlock key={i} block={block} />
+          ))}
           {text.length > 0 && (
             <div className="prose prose-sm prose-slate max-w-none prose-pre:bg-slate-900 prose-pre:text-slate-100 prose-pre:rounded-xl prose-code:before:hidden prose-code:after:hidden">
               <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
@@ -355,7 +508,7 @@ function LiveAssistantMessage({
               status={tc.status}
             />
           ))}
-          {isStreaming && text.length === 0 && toolCalls.length === 0 && (
+          {liveBuffer.isStreaming && text.length === 0 && toolCalls.length === 0 && (
             <div className="flex items-center gap-2 py-2">
               <StreamingIndicator />
               <span className="text-xs text-slate-400">Thinking...</span>
@@ -468,6 +621,7 @@ export default function SessionPage() {
     messages,
     traces,
     liveBuffer,
+    pendingPrompts,
     isLoading,
     isError,
     error,
@@ -481,9 +635,15 @@ export default function SessionPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollTargetRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  // "↓ jump to latest" pill — shown when the user has scrolled up
+  // while content is still arriving (live streaming or a refetch in
+  // flight). Clicking the pill scrolls to the bottom and clears the
+  // pill. Auto-hide when the user scrolls back near the bottom.
+  const [showJumpPill, setShowJumpPill] = useState(false);
 
   const scrollToBottom = useCallback(() => {
     scrollTargetRef.current?.scrollIntoView({ behavior: "smooth" });
+    setShowJumpPill(false);
   }, []);
 
   // Track scroll position
@@ -493,20 +653,25 @@ export default function SessionPage() {
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = container;
-      isAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 100;
+      const atBottom = scrollHeight - scrollTop - clientHeight < 100;
+      isAtBottomRef.current = atBottom;
+      if (atBottom) setShowJumpPill(false);
     };
 
     container.addEventListener("scroll", handleScroll, { passive: true });
     return () => container.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Auto-scroll on new content
+  // Auto-scroll on new content. The jump-pill appears when content
+  // arrives while the user is scrolled up.
   const contentLength = messages.length + liveBuffer.textChunks.length;
   useEffect(() => {
     if (isAtBottomRef.current) {
       scrollToBottom();
+    } else if (liveBuffer.isStreaming || liveBuffer.textChunks.length > 0) {
+      setShowJumpPill(true);
     }
-  }, [contentLength, scrollToBottom]);
+  }, [contentLength, scrollToBottom, liveBuffer.isStreaming, liveBuffer.textChunks.length]);
 
   // Scroll to bottom when sending a prompt
   const handleSend = useCallback(
@@ -521,6 +686,20 @@ export default function SessionPage() {
   // Correlate traces to messages (memoized — O(n*m) computation)
   const traceMap = useMemo(() => correlateTraces(messages, traces), [messages, traces]);
 
+  // Live-bubble handoff: find the persisted message whose id matches
+  // the most recent `message_persisted` event. Passing this into
+  // `LiveAssistantMessage` closes the visible gap between "live
+  // bubble disappears" and "persisted AssistantMessage renders" — the
+  // previous version of the check (`persistedTurnId !== null`) hid
+  // the live bubble one network round-trip too early.
+  const livePersistedMessage = useMemo(
+    () =>
+      liveBuffer.persistedTurnId
+        ? messages.find((m) => m.id === liveBuffer.persistedTurnId)
+        : undefined,
+    [liveBuffer.persistedTurnId, messages],
+  );
+
   // Missing session ID guard (after hooks to satisfy rules-of-hooks)
   if (!id) {
     return (
@@ -530,18 +709,62 @@ export default function SessionPage() {
     );
   }
 
-  // Terminal state check
+  // Terminal state check — derived purely from the persisted session status.
+  // `liveBuffer.stopReason` is intentionally NOT part of this check: a non-null
+  // stopReason just records why the agent stopped (e.g. "end_turn", "max_tokens")
+  // and does not mean the session is over. The backend keeps a successful session
+  // in "ready" so the user can keep sending prompts in the same session.
   const isTerminal =
     session?.status === "completed" ||
     session?.status === "cancelled" ||
-    session?.status === "error" ||
-    liveBuffer.stopReason !== null;
+    session?.status === "error";
 
-  // Loading
+  // Loading — 3-row skeleton mirroring the message-list layout. This
+  // eliminates the previous white-flash on first paint: the user sees
+  // placeholder rows in the same shape as real messages, then they
+  // fill in as the data lands.
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <Spinner />
+      <div className="flex flex-col h-full bg-[#fafafa]">
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-3xl mx-auto px-5 py-6 space-y-6">
+            {/* User message skeleton (right-aligned) */}
+            <div className="flex justify-end">
+              <div className="max-w-[80%] h-10 w-64 rounded-2xl rounded-tr-md bg-slate-200/70 animate-pulse" />
+            </div>
+            {/* Assistant message skeleton (left-aligned) */}
+            <div className="flex justify-start">
+              <div className="w-full">
+                <div className="h-4 w-24 rounded bg-slate-200/70 animate-pulse mb-2" />
+                <div className="space-y-2">
+                  <div className="h-3 w-full rounded bg-slate-200/70 animate-pulse" />
+                  <div className="h-3 w-[90%] rounded bg-slate-200/70 animate-pulse" />
+                  <div className="h-3 w-[75%] rounded bg-slate-200/70 animate-pulse" />
+                </div>
+              </div>
+            </div>
+            {/* Streaming indicator skeleton */}
+            <div className="flex justify-start">
+              <div className="w-full">
+                <div className="h-4 w-24 rounded bg-slate-200/70 animate-pulse mb-2" />
+                <div className="flex items-center gap-2 py-2">
+                  <div className="flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse" />
+                    <div
+                      className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse"
+                      style={{ animationDelay: "0.15s" }}
+                    />
+                    <div
+                      className="w-1.5 h-1.5 rounded-full bg-slate-300 animate-pulse"
+                      style={{ animationDelay: "0.3s" }}
+                    />
+                  </div>
+                  <div className="h-3 w-16 rounded bg-slate-200/70 animate-pulse" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -617,19 +840,73 @@ export default function SessionPage() {
             msg.role === "user" ? (
               <UserMessage key={msg.id} message={msg} />
             ) : (
-              <AssistantMessage key={msg.id} message={msg} traces={traceMap.get(msg.id) ?? []} />
+              <AssistantMessage
+                key={msg.id}
+                message={msg}
+                traces={traceMap.get(msg.id) ?? []}
+                // The message that just replaced the live bubble
+                // appears with the same content the user has been
+                // watching. The fade-in animation is a 300ms
+                // upward slide that, in this specific case, reads
+                // as a "reload" of the same content. Suppress it
+                // only for that one message; every other mount
+                // (initial page load, navigating to a session)
+                // still gets the fade-in.
+                skipAnimate={msg.id === liveBuffer.persistedTurnId}
+              />
             ),
           )}
 
-          <LiveAssistantMessage liveBuffer={liveBuffer} isStreaming={liveBuffer.isStreaming} />
+          {/* Optimistic user prompts: sent but not yet in the persisted
+              history. Rendered above the streaming assistant bubble so the
+              user always sees their own message immediately on submit. The
+              useSession hook drops a pending prompt from this list once the
+              history query returns a message with the same id. */}
+          {pendingPrompts.map((p) => (
+            <UserMessage
+              key={p.id}
+              message={{
+                id: p.id,
+                session_id: sessionId,
+                role: "user",
+                content: p.content,
+                metadata: null,
+                created_at: p.createdAt,
+              }}
+            />
+          ))}
+
+          <LiveAssistantMessage liveBuffer={liveBuffer} persistedMessage={livePersistedMessage} />
 
           {/* Scroll target */}
           <div ref={scrollTargetRef} className="h-1" />
         </div>
       </div>
 
-      {/* Input Area */}
-      <MessageInput onSend={handleSend} disabled={isTerminal} isSending={isSending} />
+      {/* Input Area — wrapped in a relative container so the
+          "↓ jump to latest" pill can float above it on the right. */}
+      <div className="relative flex-shrink-0">
+        {showJumpPill && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            aria-label="Jump to latest message"
+            className="absolute right-5 -top-9 z-10 inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white border border-slate-200 shadow-md text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors animate-fade-in"
+          >
+            <svg
+              className="w-3 h-3"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+            </svg>
+            <span>Jump to latest</span>
+          </button>
+        )}
+        <MessageInput onSend={handleSend} disabled={isTerminal} isSending={isSending} />
+      </div>
     </div>
   );
 }

@@ -196,6 +196,20 @@ pub enum SseWireEvent {
     Error {
         message: String,
     },
+    /// Emitted exactly once per assistant turn, AFTER the assistant message
+    /// has been persisted to the database and BEFORE the terminal `done`
+    /// event. The frontend uses the `id` to swap the live streaming bubble
+    /// for the persisted one — replacing the old content-equality dedup
+    /// with a precise id-based handoff. `id == ""` is the sentinel for
+    /// "no message was persisted this turn" (e.g. cancel before any text,
+    /// or an empty accumulator).
+    MessagePersisted {
+        id: String,
+        role: String,
+        stop_reason: Option<String>,
+        content: String,
+        created_at: String,
+    },
     // SSE-protocol events
     Connected {
         session_id: String,
@@ -216,6 +230,7 @@ impl SseWireEvent {
             Self::Thinking { .. } => "thinking",
             Self::Done { .. } => "done",
             Self::Error { .. } => "error",
+            Self::MessagePersisted { .. } => "message_persisted",
             Self::Connected { .. } => "connected",
             Self::Gap { .. } => "gap",
         }
@@ -382,6 +397,93 @@ mod tests {
             "connected"
         );
         assert_eq!(SseWireEvent::Gap { missed: 0 }.event_type(), "gap");
+        assert_eq!(
+            SseWireEvent::MessagePersisted {
+                id: "x".into(),
+                role: "assistant".into(),
+                stop_reason: Some("end_turn".into()),
+                content: "hi".into(),
+                created_at: "2026-06-01T00:00:00Z".into(),
+            }
+            .event_type(),
+            "message_persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_message_persisted_serde_roundtrip() {
+        let event = SseWireEvent::MessagePersisted {
+            id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            role: "assistant".into(),
+            stop_reason: Some("end_turn".into()),
+            content: "Hello, world".into(),
+            created_at: "2026-06-01T20:14:33.512Z".into(),
+        };
+        let json = sse_data(&event);
+        // JSON shape: {"type":"message_persisted","id":...,"role":...,
+        //   "stop_reason":...,"content":...,"created_at":...}
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "message_persisted");
+        assert_eq!(value["id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(value["role"], "assistant");
+        assert_eq!(value["stop_reason"], "end_turn");
+        assert_eq!(value["content"], "Hello, world");
+        assert_eq!(value["created_at"], "2026-06-01T20:14:33.512Z");
+    }
+
+    #[tokio::test]
+    async fn test_message_persisted_sentinel_for_empty_turn() {
+        // When the turn produced no accumulated text, the persisted event
+        // still fires with id="" so the frontend knows the live bubble
+        // is no longer the latest. The stop_reason is still meaningful.
+        let event = SseWireEvent::MessagePersisted {
+            id: String::new(),
+            role: "assistant".into(),
+            stop_reason: Some("cancelled".into()),
+            content: String::new(),
+            created_at: "2026-06-01T20:14:33.512Z".into(),
+        };
+        assert_eq!(event.event_type(), "message_persisted");
+        let json = sse_data(&event);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["id"], "");
+        assert_eq!(value["stop_reason"], "cancelled");
+        assert_eq!(value["content"], "");
+    }
+
+    #[tokio::test]
+    async fn test_message_persisted_broadcast_and_receive() {
+        // The new event flows through SseManager like any other wire
+        // event — assigned an id, buffered, and delivered to subscribers.
+        let manager = SseManager::new();
+        let mut rx = manager.subscribe("session-1");
+
+        let assigned_id = manager.broadcast(
+            "session-1",
+            SseWireEvent::MessagePersisted {
+                id: "msg-1".into(),
+                role: "assistant".into(),
+                stop_reason: Some("end_turn".into()),
+                content: "hi".into(),
+                created_at: "2026-06-01T20:14:33.512Z".into(),
+            },
+        );
+        assert!(assigned_id > 0);
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            SseWireEvent::MessagePersisted {
+                id,
+                content,
+                stop_reason,
+                ..
+            } => {
+                assert_eq!(id, "msg-1");
+                assert_eq!(content, "hi");
+                assert_eq!(stop_reason, Some("end_turn".into()));
+            }
+            _ => panic!("expected MessagePersisted"),
+        }
     }
 
     #[tokio::test]

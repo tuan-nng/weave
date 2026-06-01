@@ -142,6 +142,7 @@ export type SseEventType =
   | "thinking"
   | "done"
   | "error"
+  | "message_persisted"
   | "connected"
   | "gap";
 
@@ -184,6 +185,21 @@ export interface SseErrorEvent {
   message: string;
 }
 
+/// Emitted by the backend exactly once per assistant turn, AFTER the
+/// assistant message has been written to the database and BEFORE the
+/// terminal `done` event. The frontend uses the `id` to swap the live
+/// streaming bubble for the persisted one — no content-string dedup
+/// needed. `id === ""` is the sentinel for "no message was persisted
+/// this turn" (e.g. cancel before any text streamed).
+export interface SseMessagePersistedEvent {
+  type: "message_persisted";
+  id: string;
+  role: string;
+  stop_reason: string | null;
+  content: string;
+  created_at: string;
+}
+
 export interface SseConnectedEvent {
   type: "connected";
   session_id: string;
@@ -202,8 +218,16 @@ export type SseEvent =
   | SseThinkingEvent
   | SseDoneEvent
   | SseErrorEvent
+  | SseMessagePersistedEvent
   | SseConnectedEvent
   | SseGapEvent;
+
+/// Parsed shape of `messages.metadata` (TEXT NULL in the database).
+/// Currently a single optional `stop_reason` tag, but the JSON shape
+/// leaves room for future fields without a migration.
+export interface MessageMetadata {
+  stop_reason?: "cancelled" | "error" | "max_tokens";
+}
 
 // Health
 
