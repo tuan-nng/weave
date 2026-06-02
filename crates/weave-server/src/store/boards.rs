@@ -365,4 +365,128 @@ mod tests {
         assert_eq!(col_count, 0, "column should be cascade-deleted");
         assert_eq!(task_count, 0, "task should be cascade-deleted");
     }
+
+    #[test]
+    fn test_default_board_template() {
+        let db = make_test_db();
+        let (ws_id, _bid, _cid) = seed_workspace_with_board(&db);
+
+        let template = [
+            NewColumnSpec {
+                name: "Backlog",
+                position: Some(0),
+                specialist_id: Some("backlog-refiner"),
+                auto_trigger: true,
+            },
+            NewColumnSpec {
+                name: "To Do",
+                position: Some(1000),
+                specialist_id: Some("todo-orchestrator"),
+                auto_trigger: true,
+            },
+            NewColumnSpec {
+                name: "In Progress",
+                position: Some(2000),
+                specialist_id: Some("dev-crafter"),
+                auto_trigger: true,
+            },
+            NewColumnSpec {
+                name: "Review",
+                position: Some(3000),
+                specialist_id: Some("review-guard"),
+                auto_trigger: true,
+            },
+            NewColumnSpec {
+                name: "Done",
+                position: Some(4000),
+                specialist_id: Some("done-reporter"),
+                auto_trigger: false,
+            },
+        ];
+
+        let board = BoardStore::create(&db, &ws_id, "Sprint 1", &template).unwrap();
+        assert_eq!(board.name, "Sprint 1", "board name should match");
+
+        let columns = ColumnStore::list_by_board(&db, &board.id).unwrap();
+
+        assert_eq!(columns.len(), 5, "default board must have 5 columns");
+
+        // Verify column names, specialist bindings, and auto-trigger flags.
+        let expected: Vec<(&str, &str, bool)> = vec![
+            ("Backlog", "backlog-refiner", true),
+            ("To Do", "todo-orchestrator", true),
+            ("In Progress", "dev-crafter", true),
+            ("Review", "review-guard", true),
+            ("Done", "done-reporter", false),
+        ];
+
+        for (i, (name, specialist_id, auto_trigger)) in expected.iter().enumerate() {
+            assert_eq!(columns[i].name, *name, "column[{i}] name");
+            assert_eq!(
+                columns[i].specialist_id.as_deref(),
+                Some(*specialist_id),
+                "column[{i}] specialist_id"
+            );
+            assert_eq!(
+                columns[i].auto_trigger, *auto_trigger,
+                "column[{i}] auto_trigger"
+            );
+        }
+
+        // Verify position ordering is ascending.
+        for i in 1..columns.len() {
+            assert!(
+                columns[i].position > columns[i - 1].position,
+                "column positions must be ascending: {} > {}",
+                columns[i].position,
+                columns[i - 1].position
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_board_specialists_load_from_disk() {
+        let specialists_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/specialists");
+        let mut registry = crate::specialist::SpecialistRegistry::new();
+        let (loaded, skipped) = registry.load_from_dir(&specialists_dir);
+
+        assert_eq!(
+            loaded, 5,
+            "must load 5 specialists from resources/specialists/"
+        );
+        assert_eq!(skipped, 0, "no specialist files should be skipped");
+
+        let expected: Vec<(&str, &str, &str)> = vec![
+            ("backlog-refiner", "planning", "Turns rough cards"),
+            ("todo-orchestrator", "planning", "Validates stories"),
+            ("dev-crafter", "implementation", "Implements changes"),
+            ("review-guard", "review", "Independently verifies"),
+            ("done-reporter", "reporting", "Writes completion"),
+        ];
+
+        for (name, profile, desc_prefix) in &expected {
+            let specialist = registry
+                .get_by_name(name)
+                .unwrap_or_else(|| panic!("specialist '{name}' not found"));
+            assert_eq!(
+                specialist.tool_profile.as_deref(),
+                Some(*profile),
+                "{name} tool_profile"
+            );
+            assert!(
+                specialist.description.starts_with(desc_prefix),
+                "{name} description starts with '{desc_prefix}', got '{}'",
+                specialist.description
+            );
+            assert!(
+                !specialist.system_prompt.is_empty(),
+                "{name} system_prompt must not be empty"
+            );
+            assert!(
+                specialist.tags.contains(&"kanban".to_string()),
+                "{name} must have 'kanban' tag"
+            );
+        }
+    }
 }

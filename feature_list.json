@@ -378,12 +378,12 @@
       "phase": "phase-4",
       "behavior": "Default board template: POST /api/workspaces/:wid/boards with columns=[Backlog(backlog-refiner,auto), To Do(todo-orchestrator,auto), In Progress(dev-crafter,auto), Review(review-guard,auto), Done(done-reporter,off)]. Built-in specialist markdown files in resources/specialists/: backlog-refiner.md, todo-orchestrator.md, dev-crafter.md, review-guard.md, done-reporter.md with appropriate tool_profile settings.",
       "verification": "cargo test -p weave-server -- test_default_board_template && ls resources/specialists/*.md | wc -l yields 5",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-025",
         "feat-011"
       ],
-      "evidence": ""
+      "evidence": "./init.sh all 3 layers pass; 397 Rust tests (was 395, +2: test_default_board_template, test_default_board_specialists_load_from_disk) + 76 frontend tests; clippy + rustfmt + prettier clean. 5 specialist markdown files created in resources/specialists/: backlog-refiner.md (planning), todo-orchestrator.md (planning), dev-crafter.md (implementation), review-guard.md (review), done-reporter.md (reporting). Each has valid YAML frontmatter (name, description, tool_profile, tags) + system prompt body with entry/exit gates. test_default_board_template verifies 5-column board creation with correct specialist_ids, auto_trigger flags, ascending positions, and board name. test_default_board_specialists_load_from_disk loads all 5 from disk via SpecialistRegistry::load_from_dir and verifies name, tool_profile, description prefix, non-empty system_prompt, and kanban tag. Startup log confirms 'Specialists loaded loaded=5 skipped=0'. Phase 6 review: 0 critical/high issues; 2 minor fixes applied (board name assertion, tags assertion). Files changed: 5 new specialist files, 1 modified (boards.rs)."
     },
     {
       "id": "feat-028",
