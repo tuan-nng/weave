@@ -423,6 +423,17 @@ async fn run_prompt_task(
     let mut accumulated = String::new();
     let mut stream = stream;
     let mut had_error = false;
+    // Buffer for coalescing `StreamEvent::Thinking` deltas into a single
+    // `Decision` trace event per contiguous thinking block. The Anthropic
+    // provider streams extended thinking as many small chunks (often 2-3
+    // word fragments), and emitting one trace row per delta produces a
+    // wall of unreadable fragments in the Journey sidebar (e.g. "Hmm,"
+    // / "the user" / "greeting" / "."). Flushing at the boundary with
+    // the next text/tool event — and at Done/Error — turns 30-50
+    // fragments per turn into one readable decision row per actual
+    // reasoning pass. The SSE wire still forwards every delta to
+    // subscribers unchanged; only the trace persistence is coalesced.
+    let mut thinking_buffer = String::new();
     // Captured from the agent's terminal `Done` event so we can broadcast
     // it *after* the assistant message has been persisted to the database.
     // The frontend's `done` handler invalidates the history query, and the
@@ -475,12 +486,15 @@ async fn run_prompt_task(
                         }
                         match event {
                             agent::StreamEvent::TextDelta { text } => {
+                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
                                 accumulated.push_str(&text);
                             }
                             agent::StreamEvent::ToolUseStart { id, name, input } => {
+                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
                                 pending_tools.insert(id, (name, input, std::time::Instant::now()));
                             }
                             agent::StreamEvent::ToolResult { id, result } => {
+                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
                                 if let Some((name, input, start)) = pending_tools.remove(&id) {
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     let ts = chrono::Utc::now().to_rfc3339();
@@ -504,16 +518,19 @@ async fn run_prompt_task(
                                 }
                             }
                             agent::StreamEvent::Thinking { text } => {
-                                trace_collector.emit(TraceEvent {
-                                    session_id: session_id.to_string(),
-                                    kind: TraceEventKind::Decision { text },
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                });
+                                // Coalesce: append to the buffer instead of
+                                // emitting per-delta. `flush_thinking()`
+                                // fires at the next text/tool/Done/Error
+                                // boundary. See `flush_thinking` for the
+                                // full rationale.
+                                thinking_buffer.push_str(&text);
                             }
                             agent::StreamEvent::Done { .. } => {
+                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
                                 break;
                             }
                             agent::StreamEvent::Error { message } => {
+                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
                                 error!(session_id, error = %message, "agent stream error");
                                 trace_collector.emit(TraceEvent {
                                     session_id: session_id.to_string(),
@@ -548,6 +565,11 @@ async fn run_prompt_task(
 
     // Drain orphaned pending tool calls (ToolUseStart without ToolResult)
     drain_pending_tools(&trace_collector, session_id, &mut pending_tools);
+
+    // Final flush of the thinking buffer. Covers the stream-ended-without-
+    // Done paths (provider error, channel close, cancel token fire) where
+    // the per-event flush never ran.
+    flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
 
     // Flush remaining trace events
     drop(trace_collector);
@@ -733,6 +755,33 @@ fn drain_pending_tools(
             timestamp: chrono::Utc::now().to_rfc3339(),
         });
     }
+}
+
+/// Flush accumulated `StreamEvent::Thinking` text into a single `Decision`
+/// trace event. Called at the boundary between a thinking block and the
+/// next text/tool event, and at terminal events (`Done`/`Error`).
+///
+/// Whitespace-only or empty buffers are dropped without emitting — a
+/// row with no readable text would be just as useless as the fragmented
+/// rows this helper replaces.
+///
+/// Defined as a free function (not a `FnMut` closure) so the call sites
+/// can hold their own `&mut` borrow of the buffer for the per-event
+/// `push_str` write. A closure that captures `&mut thinking_buffer`
+/// would lock the buffer for the closure's entire lifetime, blocking
+/// the direct `push_str` in the `Thinking` arm.
+fn flush_thinking(trace_collector: &trace::TraceCollector, session_id: &str, buf: &mut String) {
+    if buf.trim().is_empty() {
+        // Whitespace-only or empty — drop without emitting.
+        buf.clear();
+        return;
+    }
+    let text = std::mem::take(buf);
+    trace_collector.emit(TraceEvent {
+        session_id: session_id.to_string(),
+        kind: TraceEventKind::Decision { text },
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
 }
 
 /// Drop guard that ensures `active_sessions.remove()` is called even on panic.
@@ -2231,6 +2280,159 @@ You are broken."#,
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_thinking_deltas_coalesce_into_single_decision() {
+        // The Anthropic provider streams extended thinking as many small
+        // chunks (2-3 words each). The session loop must coalesce them
+        // into one Decision trace event per contiguous thinking block,
+        // so the Journey sidebar shows one readable row per reasoning
+        // pass rather than dozens of fragments. The boundary between
+        // the thinking block and the next text block is the natural
+        // flush point.
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct ThinkingAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for ThinkingAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    // 5 small deltas — exactly the kind of fragmentation
+                    // Anthropic's extended thinking stream produces.
+                    for chunk in ["Hmm,", " the user", " said ", "\"hi\"", " — a greeting"] {
+                        let _ = tx
+                            .send(Ok(agent::StreamEvent::Thinking {
+                                text: chunk.to_string(),
+                            }))
+                            .await;
+                    }
+                    // Boundary: a text delta marks the end of the
+                    // thinking block. The buffer must flush here.
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::TextDelta {
+                            text: "Hello!".into(),
+                        }))
+                        .await;
+                    let _ = tx
+                        .send(Ok(agent::StreamEvent::Done {
+                            stop_reason: agent::StopReason::EndTurn,
+                        }))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(ThinkingAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "hello",
+        )
+        .await
+        .unwrap();
+
+        // Wait for completion. `run_prompt_task` drops the trace
+        // collector and awaits the flush task before removing the
+        // session from the active set, so traces are durable by the
+        // time `active.contains` is false.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!active.contains(&session.id));
+
+        // Read traces back. Exactly one Decision row, with the
+        // concatenated text.
+        let traces = crate::store::traces::TraceStore::list_by_session(&db, &session.id).unwrap();
+        let decisions: Vec<_> = traces
+            .iter()
+            .filter(|t| t.event_type == "decision")
+            .collect();
+        assert_eq!(
+            decisions.len(),
+            1,
+            "5 thinking deltas should coalesce into 1 decision row, got {decisions:?}"
+        );
+        let expected = "Hmm, the user said \"hi\" — a greeting";
+        assert_eq!(decisions[0].summary, expected);
+        let data: serde_json::Value = serde_json::from_str(
+            decisions[0]
+                .data_json
+                .as_deref()
+                .expect("decision has data_json"),
+        )
+        .unwrap();
+        assert_eq!(data["text"], expected);
     }
 
     // --- Session resume tests (feat-018) ---
