@@ -1,4 +1,5 @@
 pub mod health;
+pub mod kanban;
 pub mod providers;
 pub mod responses;
 pub mod sessions;
@@ -79,6 +80,30 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
         .route(
             "/api/sessions/{sid}/trace/files",
             get(traces::get_session_file_changes),
+        )
+        // Kanban routes
+        .route(
+            "/api/workspaces/{wid}/boards",
+            get(kanban::list_boards).post(kanban::create_board),
+        )
+        .route(
+            "/api/workspaces/{wid}/boards/{id}",
+            get(kanban::get_board)
+                .patch(kanban::update_board)
+                .delete(kanban::delete_board),
+        )
+        .route(
+            "/api/workspaces/{wid}/boards/{bid}/columns",
+            axum::routing::post(kanban::create_column),
+        )
+        .route("/api/columns/{id}", axum::routing::patch(kanban::update_column))
+        .route(
+            "/api/workspaces/{wid}/boards/{bid}/cards",
+            axum::routing::post(kanban::create_card),
+        )
+        .route(
+            "/api/tasks/{id}",
+            axum::routing::patch(kanban::update_task).delete(kanban::delete_task),
         )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))

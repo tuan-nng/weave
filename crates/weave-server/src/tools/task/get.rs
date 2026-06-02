@@ -95,7 +95,7 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO tasks (id, board_id, column_id, title, position, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'in_progress', ?4, ?4)",
+                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'active', ?4, ?4)",
                 rusqlite::params![task_id, board_id, col_id, now],
             )
             .unwrap();
@@ -115,7 +115,7 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.data["task"]["title"], "Test Task");
-        assert_eq!(result.data["task"]["status"], "in_progress");
+        assert_eq!(result.data["task"]["status"], "active");
     }
 
     #[tokio::test]
@@ -158,7 +158,7 @@ mod tests {
         assert!(result.success);
         let task = &result.data["task"];
         assert_eq!(task["title"], "Test Task");
-        assert_eq!(task["status"], "in_progress");
+        assert_eq!(task["status"], "active");
         assert!(task["id"].is_string());
         assert!(task["board_id"].is_string());
         assert!(task["column_id"].is_string());

@@ -127,7 +127,7 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO tasks (id, board_id, column_id, title, position, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'in_progress', ?4, ?4)",
+                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'active', ?4, ?4)",
                 rusqlite::params![task_id, board_id, col_id, now],
             )
             .unwrap();

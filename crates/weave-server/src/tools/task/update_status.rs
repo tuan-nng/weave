@@ -21,8 +21,7 @@ impl ToolExecutor for UpdateTaskStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Update a task's status. Valid transitions: in_progress, review_required, \
-         completed, needs_fix, blocked."
+        "Update a task's status. Valid values: active, done, archived."
     }
 
     fn input_schema(&self) -> Value {
@@ -106,7 +105,7 @@ mod tests {
         db.conn()
             .execute(
                 "INSERT INTO tasks (id, board_id, column_id, title, position, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'in_progress', ?4, ?4)",
+                 VALUES (?1, ?2, ?3, 'Test Task', 0, 'active', ?4, ?4)",
                 rusqlite::params![task_id, board_id, col_id, now],
             )
             .unwrap();
@@ -123,11 +122,11 @@ mod tests {
 
         let tool = UpdateTaskStatusTool { db };
         let result = tool
-            .execute(json!({"task_id": task_id, "status": "completed"}), &ctx)
+            .execute(json!({"task_id": task_id, "status": "done"}), &ctx)
             .await;
 
         assert!(result.success);
-        assert_eq!(result.data["task"]["status"], "completed");
+        assert_eq!(result.data["task"]["status"], "done");
     }
 
     #[tokio::test]
@@ -175,10 +174,7 @@ mod tests {
 
         let tool = UpdateTaskStatusTool { db };
         let result = tool
-            .execute(
-                json!({"task_id": "nonexistent", "status": "completed"}),
-                &ctx,
-            )
+            .execute(json!({"task_id": "nonexistent", "status": "done"}), &ctx)
             .await;
 
         assert!(!result.success);
@@ -194,9 +190,9 @@ mod tests {
 
         let tool = UpdateTaskStatusTool { db };
         let result = tool
-            .execute(json!({"task_id": task_id, "status": "completed"}), &ctx)
+            .execute(json!({"task_id": task_id, "status": "done"}), &ctx)
             .await;
         assert!(result.success);
-        assert_eq!(result.data["task"]["status"], "completed");
+        assert_eq!(result.data["task"]["status"], "done");
     }
 }

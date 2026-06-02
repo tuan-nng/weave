@@ -1,19 +1,17 @@
+use chrono::Utc;
+use rusqlite::Connection;
+use serde::Serialize;
+use uuid::Uuid;
+
 use crate::db::Db;
 use crate::error::AppError;
-use chrono::Utc;
-use serde::Serialize;
+use crate::store::columns::rebalance_column;
 
-/// Valid task statuses for agent-facing task lifecycle.
+/// Valid task statuses for the kanban-level task lifecycle.
 ///
-/// These differ from the kanban-level `active/done/archived` values.
-/// The tools validate against this set before hitting the database.
-pub(crate) const VALID_TASK_STATUSES: &[&str] = &[
-    "in_progress",
-    "review_required",
-    "completed",
-    "needs_fix",
-    "blocked",
-];
+/// These are the values stored in `tasks.status` and accepted by
+/// both the HTTP PATCH endpoint and the agent tool `update_task_status`.
+pub(crate) const VALID_TASK_STATUSES: &[&str] = &["active", "done", "archived"];
 
 /// Default maximum number of tasks returned by `list`.
 const DEFAULT_LIST_LIMIT: u32 = 500;
@@ -37,10 +35,32 @@ pub struct Task {
 }
 
 /// Fields that can be updated by agents via `update_task_fields`.
+///
+/// Narrow, agent-facing: only the three context columns. The HTTP
+/// PATCH endpoint uses the wider `UpdateTask` struct below.
 pub struct UpdateTaskFields {
     pub acceptance_criteria: Option<String>,
     pub completion_summary: Option<String>,
     pub verification_report: Option<String>,
+}
+
+/// All editable task fields. Used by `PATCH /api/tasks/:tid`.
+///
+/// Fields use `Option<T>` to mean "if present, set to this value";
+/// nullable fields use `Option<Option<T>>` so the caller can
+/// distinguish "field absent" (`None`) from "field present and null"
+/// (`Some(None)`).
+#[derive(Clone)]
+pub struct UpdateTask {
+    pub title: Option<String>,
+    pub description: Option<Option<String>>,
+    pub column_id: Option<String>,
+    pub position: Option<i64>,
+    pub status: Option<String>,
+    pub session_id: Option<Option<String>>,
+    pub acceptance_criteria: Option<Option<String>>,
+    pub completion_summary: Option<Option<String>>,
+    pub verification_report: Option<Option<String>>,
 }
 
 /// Stateless store for task persistence.
@@ -60,6 +80,77 @@ const RETURNING_COLS: &str = "id, board_id, column_id, title, description, \
     verification_report, created_at, updated_at";
 
 impl TaskStore {
+    /// Insert a new task. `position` is auto-assigned when `None` (max+POSITION_STEP).
+    ///
+    /// Returns `Validation` if `column_id` does not belong to `board_id`.
+    /// This prevents cross-board and cross-workspace task placement.
+    pub fn create(
+        db: &Db,
+        board_id: &str,
+        column_id: &str,
+        title: &str,
+        description: Option<&str>,
+        position: Option<i64>,
+        status: Option<&str>,
+    ) -> Result<Task, AppError> {
+        let status = status.unwrap_or("active");
+        if !VALID_TASK_STATUSES.contains(&status) {
+            return Err(AppError::Validation(format!(
+                "invalid task status '{}'; valid values: {}",
+                status,
+                VALID_TASK_STATUSES.join(", ")
+            )));
+        }
+        if !column_belongs_to_board(db, column_id, board_id)? {
+            return Err(AppError::Validation(format!(
+                "column '{}' does not belong to board '{}'",
+                column_id, board_id
+            )));
+        }
+        let now = Utc::now().to_rfc3339();
+        let id = Uuid::new_v4().to_string();
+        let pos = match position {
+            Some(p) => p,
+            None => {
+                // next position in column
+                let max: Option<i64> = db
+                    .conn()
+                    .query_row(
+                        "SELECT MAX(position) FROM tasks WHERE column_id = ?1",
+                        [column_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                max.unwrap_or(0) + 1000
+            }
+        };
+
+        db.conn()
+            .query_row(
+                "INSERT INTO tasks (id, board_id, column_id, title, description, position, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 RETURNING id, board_id, column_id, title, description, position, status, session_id, acceptance_criteria, completion_summary, verification_report, created_at, updated_at",
+                rusqlite::params![id, board_id, column_id, title, description, pos, status, now],
+                Self::map_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    /// Hard delete a task. Workspace-scoped to prevent cross-workspace deletes.
+    pub fn delete(db: &Db, task_id: &str, workspace_id: &str) -> Result<(), AppError> {
+        let rows_affected = db.conn().execute(
+            "DELETE FROM tasks WHERE id = ?1 AND board_id IN (SELECT id FROM boards WHERE workspace_id = ?2)",
+            rusqlite::params![task_id, workspace_id],
+        )?;
+        if rows_affected == 0 {
+            return Err(AppError::NotFound {
+                resource: "task".into(),
+                id: task_id.into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Fetch a task by primary key, scoped to a workspace.
     pub fn get_by_id(db: &Db, task_id: &str, workspace_id: &str) -> Result<Task, AppError> {
         db.conn()
@@ -133,6 +224,18 @@ impl TaskStore {
         Ok(rows)
     }
 
+    /// List all tasks on a board, scoped to a workspace.
+    ///
+    /// Convenience over `list` with `board_id` filter; used by
+    /// `BoardStore::get_with_children`.
+    pub fn list_by_board(
+        db: &Db,
+        workspace_id: &str,
+        board_id: &str,
+    ) -> Result<Vec<Task>, AppError> {
+        Self::list(db, workspace_id, Some(board_id), None, None)
+    }
+
     /// Update task status with validation, scoped to a workspace.
     ///
     /// Validates against `VALID_TASK_STATUSES` before hitting the database.
@@ -176,14 +279,13 @@ impl TaskStore {
     /// Update the three context columns, scoped to a workspace.
     ///
     /// Only non-None fields are written. If all fields are None, returns the
-    /// task unchanged (no-op).
+    /// task unchanged (no-op). Used by the agent tool `update_task_fields`.
     pub fn update_fields(
         db: &Db,
         task_id: &str,
         workspace_id: &str,
         fields: &UpdateTaskFields,
     ) -> Result<Task, AppError> {
-        // If no fields to update, just return the current task
         if fields.acceptance_criteria.is_none()
             && fields.completion_summary.is_none()
             && fields.verification_report.is_none()
@@ -216,7 +318,6 @@ impl TaskStore {
         params.push(Box::new(now));
         idx += 1;
 
-        // WHERE clause: task_id + workspace scoping
         let task_id_idx = idx;
         let ws_id_idx = idx + 1;
 
@@ -244,6 +345,235 @@ impl TaskStore {
             })
     }
 
+    /// Generic partial update for all editable task fields. Used by
+    /// `PATCH /api/tasks/:tid`.
+    ///
+    /// Only fields that are `Some` (and `Some(Some(v))` for nullable
+    /// fields) are written. Returns `Validation` if `status` is present
+    /// but not in `VALID_TASK_STATUSES`.
+    ///
+    /// `column_id` is rejected — callers must use `move_to_column` so the
+    /// same-board invariant and position rebalance are honored.
+    pub fn update(
+        db: &Db,
+        task_id: &str,
+        workspace_id: &str,
+        fields: &UpdateTask,
+    ) -> Result<Task, AppError> {
+        if fields.column_id.is_some() {
+            return Err(AppError::Validation(
+                "use move_to_column to change a task's column; \
+                 setting column_id via update is not allowed"
+                    .into(),
+            ));
+        }
+        // No-op when nothing to change.
+        if fields.title.is_none()
+            && fields.description.is_none()
+            && fields.column_id.is_none()
+            && fields.position.is_none()
+            && fields.status.is_none()
+            && fields.session_id.is_none()
+            && fields.acceptance_criteria.is_none()
+            && fields.completion_summary.is_none()
+            && fields.verification_report.is_none()
+        {
+            return Self::get_by_id(db, task_id, workspace_id);
+        }
+
+        if let Some(s) = fields.status.as_deref() {
+            if !VALID_TASK_STATUSES.contains(&s) {
+                return Err(AppError::Validation(format!(
+                    "invalid task status '{}'; valid values: {}",
+                    s,
+                    VALID_TASK_STATUSES.join(", ")
+                )));
+            }
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut sets = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1u32;
+
+        if let Some(ref t) = fields.title {
+            sets.push(format!("title = ?{idx}"));
+            params.push(Box::new(t.clone()));
+            idx += 1;
+        }
+        if let Some(ref desc) = fields.description {
+            sets.push(format!("description = ?{idx}"));
+            params.push(Box::new(desc.clone()));
+            idx += 1;
+        }
+        if let Some(p) = fields.position {
+            sets.push(format!("position = ?{idx}"));
+            params.push(Box::new(p));
+            idx += 1;
+        }
+        if let Some(ref s) = fields.status {
+            sets.push(format!("status = ?{idx}"));
+            params.push(Box::new(s.clone()));
+            idx += 1;
+        }
+        if let Some(ref sid) = fields.session_id {
+            sets.push(format!("session_id = ?{idx}"));
+            params.push(Box::new(sid.clone()));
+            idx += 1;
+        }
+        if let Some(ref ac) = fields.acceptance_criteria {
+            sets.push(format!("acceptance_criteria = ?{idx}"));
+            params.push(Box::new(ac.clone()));
+            idx += 1;
+        }
+        if let Some(ref cs) = fields.completion_summary {
+            sets.push(format!("completion_summary = ?{idx}"));
+            params.push(Box::new(cs.clone()));
+            idx += 1;
+        }
+        if let Some(ref vr) = fields.verification_report {
+            sets.push(format!("verification_report = ?{idx}"));
+            params.push(Box::new(vr.clone()));
+            idx += 1;
+        }
+
+        sets.push(format!("updated_at = ?{idx}"));
+        params.push(Box::new(now));
+        idx += 1;
+
+        let task_id_idx = idx;
+        let ws_id_idx = idx + 1;
+
+        let sql = format!(
+            "UPDATE tasks SET {}
+             WHERE id = ?{task_id_idx} AND board_id IN (
+                 SELECT id FROM boards WHERE workspace_id = ?{ws_id_idx}
+             )
+             RETURNING {RETURNING_COLS}",
+            sets.join(", ")
+        );
+        params.push(Box::new(task_id.to_string()));
+        params.push(Box::new(workspace_id.to_string()));
+
+        let conn = db.conn();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        conn.query_row(&sql, params_refs.as_slice(), Self::map_row)
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "task".into(),
+                    id: task_id.into(),
+                },
+                other => other.into(),
+            })
+    }
+
+    /// Move a task to a new column, optionally updating its position.
+    /// Triggers a position rebalance inside the same transaction.
+    pub fn move_to_column(
+        db: &Db,
+        task_id: &str,
+        workspace_id: &str,
+        target_column_id: &str,
+        new_position: Option<i64>,
+    ) -> Result<Task, AppError> {
+        db.with_transaction(|conn| {
+            Self::move_to_column_tx(conn, task_id, workspace_id, target_column_id, new_position)
+        })
+    }
+
+    /// `move_to_column` variant for callers that already hold a `&Connection`
+    /// (e.g., composing with other writes in a larger transaction).
+    ///
+    /// Returns `Validation` if the target column does not belong to the
+    /// task's current board. This prevents cross-board and cross-workspace
+    /// task placement.
+    pub fn move_to_column_tx(
+        conn: &Connection,
+        task_id: &str,
+        workspace_id: &str,
+        target_column_id: &str,
+        new_position: Option<i64>,
+    ) -> Result<Task, AppError> {
+        // Verify the target column belongs to the task's current board.
+        let task_board_id: String = conn
+            .query_row(
+                "SELECT t.board_id FROM tasks t
+                 JOIN boards b ON b.id = t.board_id
+                 WHERE t.id = ?1 AND b.workspace_id = ?2",
+                rusqlite::params![task_id, workspace_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "task".into(),
+                    id: task_id.into(),
+                },
+                other => other.into(),
+            })?;
+        let target_board_id: Option<String> = conn
+            .query_row(
+                "SELECT board_id FROM columns WHERE id = ?1",
+                [target_column_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "column".into(),
+                    id: target_column_id.into(),
+                },
+                other => other.into(),
+            })?;
+        if target_board_id.as_deref() != Some(task_board_id.as_str()) {
+            return Err(AppError::Validation(format!(
+                "column '{}' does not belong to board '{}'",
+                target_column_id, task_board_id
+            )));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let pos = match new_position {
+            Some(p) => p,
+            None => {
+                let max: Option<i64> = conn
+                    .query_row(
+                        "SELECT MAX(position) FROM tasks WHERE column_id = ?1",
+                        [target_column_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(None);
+                max.unwrap_or(0) + 1000
+            }
+        };
+
+        let task = conn
+            .query_row(
+                &format!(
+                    "UPDATE tasks SET column_id = ?1, position = ?2, updated_at = ?3
+                     WHERE id = ?4 AND board_id IN (
+                         SELECT id FROM boards WHERE workspace_id = ?5
+                     )
+                     RETURNING {RETURNING_COLS}"
+                ),
+                rusqlite::params![target_column_id, pos, now, task_id, workspace_id],
+                Self::map_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "task".into(),
+                    id: task_id.into(),
+                },
+                other => other.into(),
+            })?;
+
+        // Rebalance the target column so future inserts between neighbors
+        // have a usable gap. This is O(N) on the column but N is small
+        // (typical kanban columns have <50 cards).
+        rebalance_column(conn, target_column_id)?;
+
+        Ok(task)
+    }
+
     /// Map a result row to a `Task`.
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         Ok(Task {
@@ -264,59 +594,48 @@ impl TaskStore {
     }
 }
 
+/// Return `Ok(true)` if `column_id` exists and belongs to `board_id`,
+/// `Ok(false)` if the column exists on a different board, or an error
+/// if the column does not exist at all.
+fn column_belongs_to_board(db: &Db, column_id: &str, board_id: &str) -> Result<bool, AppError> {
+    let actual_board: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT board_id FROM columns WHERE id = ?1",
+            [column_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                resource: "column".into(),
+                id: column_id.into(),
+            },
+            other => other.into(),
+        })?;
+    Ok(actual_board.as_deref() == Some(board_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::kanban_test_helpers::{
+        seed_workspace_with_board, seed_workspace_with_two_columns,
+    };
     use std::path::Path;
-
-    const TEST_WS: &str = "test-ws-id";
 
     fn test_db() -> Db {
         Db::open(Path::new(":memory:")).expect("failed to open test db")
     }
 
-    /// Seed a workspace, board, and column — required FK rows for creating tasks.
-    fn seed_task_deps(db: &Db) -> (String, String) {
-        let board_id = uuid::Uuid::new_v4().to_string();
-        let col_id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-
-        db.conn()
-            .execute(
-                "INSERT INTO workspaces (id, name, status, created_at, updated_at)
-                 VALUES (?1, 'test-ws', 'active', ?2, ?2)",
-                rusqlite::params![TEST_WS, now],
-            )
-            .unwrap();
-
-        db.conn()
-            .execute(
-                "INSERT INTO boards (id, workspace_id, name, created_at)
-                 VALUES (?1, ?2, 'test-board', ?3)",
-                rusqlite::params![board_id, TEST_WS, now],
-            )
-            .unwrap();
-
-        db.conn()
-            .execute(
-                "INSERT INTO columns (id, board_id, name, position, created_at)
-                 VALUES (?1, ?2, 'test-col', 0, ?3)",
-                rusqlite::params![col_id, board_id, now],
-            )
-            .unwrap();
-
-        (board_id, col_id)
-    }
-
-    /// Create a task with known values for testing.
     fn create_test_task(
         db: &Db,
+        workspace_id: &str,
         board_id: &str,
         column_id: &str,
         title: &str,
         status: &str,
     ) -> Task {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
         db.conn()
@@ -327,19 +646,19 @@ mod tests {
             )
             .unwrap();
 
-        TaskStore::get_by_id(db, &id, TEST_WS).unwrap()
+        TaskStore::get_by_id(db, &id, workspace_id).unwrap()
     }
 
     #[test]
     fn test_get_by_id() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let created = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let created = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
-        let fetched = TaskStore::get_by_id(&db, &created.id, TEST_WS).unwrap();
+        let fetched = TaskStore::get_by_id(&db, &created.id, &ws).unwrap();
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.title, "Test task");
-        assert_eq!(fetched.status, "in_progress");
+        assert_eq!(fetched.status, "active");
         assert_eq!(fetched.board_id, board_id);
         assert_eq!(fetched.column_id, col_id);
     }
@@ -347,8 +666,8 @@ mod tests {
     #[test]
     fn test_get_by_id_not_found() {
         let db = test_db();
-        seed_task_deps(&db);
-        let result = TaskStore::get_by_id(&db, "nonexistent", TEST_WS);
+        let (ws, _, _) = seed_workspace_with_board(&db);
+        let result = TaskStore::get_by_id(&db, "nonexistent", &ws);
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::NotFound { resource, id } => {
@@ -362,8 +681,8 @@ mod tests {
     #[test]
     fn test_get_by_id_wrong_workspace() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let result = TaskStore::get_by_id(&db, &task.id, "wrong-workspace");
         assert!(result.is_err());
@@ -376,34 +695,34 @@ mod tests {
     #[test]
     fn test_list_no_filters() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        create_test_task(&db, &board_id, &col_id, "Task 1", "in_progress");
-        create_test_task(&db, &board_id, &col_id, "Task 2", "completed");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
 
-        let tasks = TaskStore::list(&db, TEST_WS, None, None, None).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, None, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
 
     #[test]
     fn test_list_filter_by_status() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        create_test_task(&db, &board_id, &col_id, "Task 1", "in_progress");
-        create_test_task(&db, &board_id, &col_id, "Task 2", "completed");
-        create_test_task(&db, &board_id, &col_id, "Task 3", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 3", "active");
 
-        let tasks = TaskStore::list(&db, TEST_WS, None, None, Some("in_progress")).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, None, Some("active")).unwrap();
         assert_eq!(tasks.len(), 2);
-        assert!(tasks.iter().all(|t| t.status == "in_progress"));
+        assert!(tasks.iter().all(|t| t.status == "active"));
     }
 
     #[test]
     fn test_list_filter_by_column() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        create_test_task(&db, &board_id, &col_id, "Task 1", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
 
-        let tasks = TaskStore::list(&db, TEST_WS, None, Some(&col_id), None).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, Some(&col_id), None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].column_id, col_id);
     }
@@ -411,18 +730,12 @@ mod tests {
     #[test]
     fn test_list_filter_combined() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        create_test_task(&db, &board_id, &col_id, "Task 1", "in_progress");
-        create_test_task(&db, &board_id, &col_id, "Task 2", "completed");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
 
-        let tasks = TaskStore::list(
-            &db,
-            TEST_WS,
-            Some(&board_id),
-            Some(&col_id),
-            Some("in_progress"),
-        )
-        .unwrap();
+        let tasks =
+            TaskStore::list(&db, &ws, Some(&board_id), Some(&col_id), Some("active")).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Task 1");
     }
@@ -430,40 +743,49 @@ mod tests {
     #[test]
     fn test_list_empty() {
         let db = test_db();
-        seed_task_deps(&db);
-        let tasks = TaskStore::list(&db, TEST_WS, None, None, None).unwrap();
+        let (ws, _, _) = seed_workspace_with_board(&db);
+        let tasks = TaskStore::list(&db, &ws, None, None, None).unwrap();
         assert!(tasks.is_empty());
     }
 
     #[test]
     fn test_list_scoped_to_workspace() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        create_test_task(&db, &board_id, &col_id, "Task 1", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
 
-        // Different workspace sees nothing
         let tasks = TaskStore::list(&db, "other-ws", None, None, None).unwrap();
         assert!(tasks.is_empty());
     }
 
     #[test]
+    fn test_list_by_board() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        create_test_task(&db, &ws, &board_id, &col_id, "T1", "active");
+        create_test_task(&db, &ws, &board_id, &col_id, "T2", "active");
+        let tasks = TaskStore::list_by_board(&db, &ws, &board_id).unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
     fn test_update_status() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
-        let updated = TaskStore::update_status(&db, &task.id, TEST_WS, "completed").unwrap();
-        assert_eq!(updated.status, "completed");
+        let updated = TaskStore::update_status(&db, &task.id, &ws, "done").unwrap();
+        assert_eq!(updated.status, "done");
         assert_eq!(updated.id, task.id);
     }
 
     #[test]
     fn test_update_status_invalid() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
-        let result = TaskStore::update_status(&db, &task.id, TEST_WS, "invalid_status");
+        let result = TaskStore::update_status(&db, &task.id, &ws, "invalid_status");
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::Validation(msg) => {
@@ -476,8 +798,8 @@ mod tests {
     #[test]
     fn test_update_status_not_found() {
         let db = test_db();
-        seed_task_deps(&db);
-        let result = TaskStore::update_status(&db, "nonexistent", TEST_WS, "completed");
+        let (ws, _, _) = seed_workspace_with_board(&db);
+        let result = TaskStore::update_status(&db, "nonexistent", &ws, "done");
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::NotFound { resource, .. } => assert_eq!(resource, "task"),
@@ -488,10 +810,10 @@ mod tests {
     #[test]
     fn test_update_status_wrong_workspace() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
-        let result = TaskStore::update_status(&db, &task.id, "wrong-workspace", "completed");
+        let result = TaskStore::update_status(&db, &task.id, "wrong-workspace", "done");
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::NotFound { .. } => {}
@@ -502,15 +824,15 @@ mod tests {
     #[test]
     fn test_update_fields_completion_summary() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: Some("Did the thing".into()),
             verification_report: None,
         };
-        let updated = TaskStore::update_fields(&db, &task.id, TEST_WS, &fields).unwrap();
+        let updated = TaskStore::update_fields(&db, &task.id, &ws, &fields).unwrap();
         assert_eq!(updated.completion_summary.as_deref(), Some("Did the thing"));
         assert!(updated.verification_report.is_none());
     }
@@ -518,15 +840,15 @@ mod tests {
     #[test]
     fn test_update_fields_verification_report() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: Some("Tests pass".into()),
         };
-        let updated = TaskStore::update_fields(&db, &task.id, TEST_WS, &fields).unwrap();
+        let updated = TaskStore::update_fields(&db, &task.id, &ws, &fields).unwrap();
         assert_eq!(updated.verification_report.as_deref(), Some("Tests pass"));
         assert!(updated.completion_summary.is_none());
     }
@@ -534,15 +856,15 @@ mod tests {
     #[test]
     fn test_update_fields_both() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: Some("Did it".into()),
             verification_report: Some("Verified".into()),
         };
-        let updated = TaskStore::update_fields(&db, &task.id, TEST_WS, &fields).unwrap();
+        let updated = TaskStore::update_fields(&db, &task.id, &ws, &fields).unwrap();
         assert_eq!(updated.completion_summary.as_deref(), Some("Did it"));
         assert_eq!(updated.verification_report.as_deref(), Some("Verified"));
     }
@@ -550,16 +872,15 @@ mod tests {
     #[test]
     fn test_update_fields_no_fields() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
         };
-        // No-op: returns the task unchanged
-        let updated = TaskStore::update_fields(&db, &task.id, TEST_WS, &fields).unwrap();
+        let updated = TaskStore::update_fields(&db, &task.id, &ws, &fields).unwrap();
         assert_eq!(updated.id, task.id);
         assert_eq!(updated.title, "Test task");
     }
@@ -567,13 +888,13 @@ mod tests {
     #[test]
     fn test_update_fields_not_found() {
         let db = test_db();
-        seed_task_deps(&db);
+        let (ws, _, _) = seed_workspace_with_board(&db);
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: Some("test".into()),
             verification_report: None,
         };
-        let result = TaskStore::update_fields(&db, "nonexistent", TEST_WS, &fields);
+        let result = TaskStore::update_fields(&db, "nonexistent", &ws, &fields);
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::NotFound { resource, .. } => assert_eq!(resource, "task"),
@@ -584,8 +905,8 @@ mod tests {
     #[test]
     fn test_update_fields_wrong_workspace() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
         let fields = UpdateTaskFields {
             acceptance_criteria: None,
@@ -603,27 +924,200 @@ mod tests {
     #[test]
     fn test_update_fields_partial_does_not_clobber() {
         let db = test_db();
-        let (board_id, col_id) = seed_task_deps(&db);
-        let task = create_test_task(&db, &board_id, &col_id, "Test task", "in_progress");
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Test task", "active");
 
-        // First update: set completion_summary
         let fields1 = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: Some("Summary v1".into()),
             verification_report: None,
         };
-        TaskStore::update_fields(&db, &task.id, TEST_WS, &fields1).unwrap();
+        TaskStore::update_fields(&db, &task.id, &ws, &fields1).unwrap();
 
-        // Second update: set verification_report only
         let fields2 = UpdateTaskFields {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: Some("Report v1".into()),
         };
-        let updated = TaskStore::update_fields(&db, &task.id, TEST_WS, &fields2).unwrap();
-
-        // completion_summary should be unchanged
+        let updated = TaskStore::update_fields(&db, &task.id, &ws, &fields2).unwrap();
         assert_eq!(updated.completion_summary.as_deref(), Some("Summary v1"));
         assert_eq!(updated.verification_report.as_deref(), Some("Report v1"));
+    }
+
+    // ---- feat-024: new methods ----
+
+    #[test]
+    fn test_create_task_default_position() {
+        let db = test_db();
+        let (_, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = TaskStore::create(&db, &board_id, &col_id, "New", None, None, None).unwrap();
+        assert_eq!(task.title, "New");
+        assert_eq!(task.status, "active");
+        assert_eq!(task.position, 1000);
+    }
+
+    #[test]
+    fn test_create_task_with_description_and_explicit_position() {
+        let db = test_db();
+        let (_, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = TaskStore::create(
+            &db,
+            &board_id,
+            &col_id,
+            "X",
+            Some("desc"),
+            Some(5000),
+            Some("done"),
+        )
+        .unwrap();
+        assert_eq!(task.position, 5000);
+        assert_eq!(task.status, "done");
+        assert_eq!(task.description.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn test_create_task_invalid_status() {
+        let db = test_db();
+        let (_, board_id, col_id) = seed_workspace_with_board(&db);
+        let result = TaskStore::create(&db, &board_id, &col_id, "X", None, None, Some("bogus"));
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn test_delete_task() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "T", "active");
+        TaskStore::delete(&db, &task.id, &ws).unwrap();
+        let result = TaskStore::get_by_id(&db, &task.id, &ws);
+        assert!(matches!(result, Err(AppError::NotFound { .. })));
+    }
+
+    #[test]
+    fn test_delete_task_wrong_workspace() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "T", "active");
+        let result = TaskStore::delete(&db, &task.id, "other-ws");
+        assert!(matches!(result, Err(AppError::NotFound { .. })));
+    }
+
+    #[test]
+    fn test_move_to_column() {
+        let db = test_db();
+        let (ws, bid, c1, c2) = seed_workspace_with_two_columns(&db);
+        let task = create_test_task(&db, &ws, &bid, &c1, "Move me", "active");
+        let moved = TaskStore::move_to_column(&db, &task.id, &ws, &c2, Some(2000)).unwrap();
+        assert_eq!(moved.column_id, c2);
+        assert_eq!(moved.position, 2000);
+    }
+
+    #[test]
+    fn test_update_all_fields_via_patch() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Old", "active");
+
+        // column_id changes must go through move_to_column (which also
+        // updates position). After that, the rest of the fields are
+        // applied via the regular update path.
+        TaskStore::move_to_column(&db, &task.id, &ws, &col_id, Some(2048)).unwrap();
+
+        let update = UpdateTask {
+            title: Some("New title".into()),
+            description: Some(Some("New desc".into())),
+            column_id: None,
+            position: None,
+            status: Some("done".into()),
+            session_id: Some(None),
+            acceptance_criteria: Some(Some("AC".into())),
+            completion_summary: Some(Some("CS".into())),
+            verification_report: Some(Some("VR".into())),
+        };
+        let updated = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
+        assert_eq!(updated.title, "New title");
+        assert_eq!(updated.description.as_deref(), Some("New desc"));
+        assert_eq!(updated.position, 2048);
+        assert_eq!(updated.status, "done");
+        assert!(updated.session_id.is_none());
+        assert_eq!(updated.acceptance_criteria.as_deref(), Some("AC"));
+        assert_eq!(updated.completion_summary.as_deref(), Some("CS"));
+        assert_eq!(updated.verification_report.as_deref(), Some("VR"));
+    }
+
+    #[test]
+    fn test_update_no_fields_returns_unchanged() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "T", "active");
+        let update = UpdateTask {
+            title: None,
+            description: None,
+            column_id: None,
+            position: None,
+            status: None,
+            session_id: None,
+            acceptance_criteria: None,
+            completion_summary: None,
+            verification_report: None,
+        };
+        let unchanged = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
+        assert_eq!(unchanged.id, task.id);
+        assert_eq!(unchanged.title, "T");
+    }
+
+    #[test]
+    fn test_update_invalid_status_returns_validation() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "T", "active");
+        let update = UpdateTask {
+            title: None,
+            description: None,
+            column_id: None,
+            position: None,
+            status: Some("bogus".into()),
+            session_id: None,
+            acceptance_criteria: None,
+            completion_summary: None,
+            verification_report: None,
+        };
+        let result = TaskStore::update(&db, &task.id, &ws, &update);
+        assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn test_update_partial_does_not_clobber() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "Original", "active");
+        // First set description
+        let first = UpdateTask {
+            title: None,
+            description: Some(Some("first desc".into())),
+            column_id: None,
+            position: None,
+            status: None,
+            session_id: None,
+            acceptance_criteria: None,
+            completion_summary: None,
+            verification_report: None,
+        };
+        TaskStore::update(&db, &task.id, &ws, &first).unwrap();
+        // Now only change title
+        let second = UpdateTask {
+            title: Some("Renamed".into()),
+            description: None,
+            column_id: None,
+            position: None,
+            status: None,
+            session_id: None,
+            acceptance_criteria: None,
+            completion_summary: None,
+            verification_report: None,
+        };
+        let updated = TaskStore::update(&db, &task.id, &ws, &second).unwrap();
+        assert_eq!(updated.title, "Renamed");
+        assert_eq!(updated.description.as_deref(), Some("first desc"));
     }
 }

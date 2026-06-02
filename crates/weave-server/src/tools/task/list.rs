@@ -127,10 +127,7 @@ mod tests {
             .unwrap();
 
         // Create 3 tasks with different statuses
-        for (i, status) in ["in_progress", "completed", "in_progress"]
-            .iter()
-            .enumerate()
-        {
+        for (i, status) in ["active", "done", "active"].iter().enumerate() {
             let task_id = uuid::Uuid::new_v4().to_string();
             db.conn()
                 .execute(
@@ -174,7 +171,7 @@ mod tests {
         seed_tasks(&db);
 
         let tool = ListTasksTool { db };
-        let result = tool.execute(json!({"status": "completed"}), &ctx).await;
+        let result = tool.execute(json!({"status": "done"}), &ctx).await;
 
         assert!(result.success);
         assert_eq!(result.data["count"], 1);
