@@ -465,6 +465,58 @@ From the feat-022 code review (3 parallel agents), deferred for a follow-up sess
 
 **Files changed:** `web/src/app/pages/session.tsx` (+4/-2)
 
+### 2026-06-02 — UI cleanup: drop header "Journey" toggle button
+
+**Why:** The header had a "Journey" button alongside Cancel. With the rail toggle already present on the sidebar itself, the header button was redundant — every header click just opened/closed the same sidebar the rail could reach. The header now reads as a single Cancel action when relevant, and the sidebar is the only Journey entry point.
+
+**Change:** Removed the `<button>…Journey</button>` block in the session header (`web/src/app/pages/session.tsx`). State, layout, and the sidebar component are unchanged: `journeyOpen` is still driven by the sidebar's own rail/close buttons via the `onToggle` callback. Updated two adjacent comments to drop the "header toggle button" wording.
+
+**Verification:** `cd web && bun run test` — 8/8 test files, 59/59 tests passing (journey-view suite still 8/8 since it tests the sidebar in isolation, not the header). `bun run lint` clean. `cargo fmt --check` clean. `cargo clippy -p weave-server -- -D warnings` clean.
+
+**Files changed:** `web/src/app/pages/session.tsx` (+8/-24)
+
+### 2026-06-02 — Bug fix: Journey sidebar shows dozens of unreadable decision fragments
+
+**Symptom:** For session `2fd2cf02-…d0e4` (a 5-message chat), the Journey sidebar rendered **177 decision rows** — all 2-4 word fragments of one continuous chain-of-thought, all timestamped within the same minute. Concretely: "Hmm," / "the user" / "greeting" / "." / "This is a" / "neutral" / "starting" / "point with" / "no specific request" / … — and the same "user is asking about weather in Oslo" reasoning repeated 3+ times. The sidebar was unreadable; real decisions and errors were buried.
+
+**Root cause:** Three layers all amplified the fragmentation.
+
+1. **Provider** (`crates/weave-server/src/agent/anthropic/streaming.rs:194-197`) — every Anthropic `content_block_delta` of type `thinking_delta` became its own `StreamEvent::Thinking { text }`. Anthropic streams extended thinking in small chunks (2-4 words), so 30-50 deltas per turn.
+2. **Session loop** (`crates/weave-server/src/service/sessions.rs`) — each `Thinking` was converted 1:1 into a `TraceEvent { Decision { text } }` with no buffering.
+3. **Store** (`crates/weave-server/src/store/traces.rs:158-165`) — each `Decision` was its own row with `summary` = first 200 chars of the text. No coalescing, no dedup.
+
+The "decision" label itself is a misnomer: a decision is a discrete choice the agent made ("use Tailwind for the new component"), but what we were capturing was the agent's chain-of-thought fragments.
+
+**Fix (option B — provider-agnostic, in the session loop):**
+
+- Buffer `StreamEvent::Thinking` text in a `String` per turn.
+- Flush the buffer as a single `Decision` event at the next non-thinking boundary (`TextDelta`, `ToolUseStart`, `ToolResult`, `Done`, `Error`).
+- One final flush after the loop covers the stream-ended-without-Done paths (provider error, channel close, cancel token).
+- Whitespace-only buffers are dropped without emitting (a row with no readable text is just as useless as the fragmented rows it replaces).
+- The SSE wire is unchanged: every `thinking` delta is still forwarded to subscribers in real-time. Only the **trace persistence** is coalesced.
+
+**Why option B over A or C:**
+
+- **A** (provider-side buffer at `ContentBlockStop`) is provider-specific; the same problem would re-appear if a future provider also streams deltas. B works for any provider emitting the shared `StreamEvent::Thinking` shape.
+- **C** (frontend coalesce on render) leaves the bad data in the DB and the JSON for `/api/sessions/:sid/trace/journey` still 177 rows long, so every other consumer (CLI tools, future features) inherits the problem. B fixes the source of truth.
+
+**Implementation:**
+
+- `crates/weave-server/src/service/sessions.rs` — added `let mut thinking_buffer = String::new();` near the existing `accumulated` buffer. New `fn flush_thinking(trace_collector, session_id, &mut buf)` near `drain_pending_tools`. Free function (not `FnMut` closure) because a closure capturing `&mut thinking_buffer` would lock the buffer for the closure's lifetime, blocking the direct `push_str` in the `Thinking` arm.
+- Match arms changed: `Thinking` now `push_str`s to the buffer instead of emitting. Every other arm (`TextDelta`, `ToolUseStart`, `ToolResult`, `Done`, `Error`) calls `flush_thinking` first.
+- One post-loop `flush_thinking` call for the stream-error / channel-close / cancel paths.
+
+**Verification:**
+
+- New unit test `test_thinking_deltas_coalesce_into_single_decision` at `sessions.rs:2289-2427` — registers a mock agent that streams 5 Thinking deltas → TextDelta → Done, asserts the trace table has exactly 1 Decision row with the concatenated text "Hmm, the user said \"hi\" — a greeting" (both `summary` and `data_json.text`).
+- `cargo test -p weave-server` — **334 passed** (was 333, +1 from the new test).
+- `cargo clippy -p weave-server -- -D warnings` — clean (the project's actual lint gate).
+- `cargo fmt --check` — clean.
+- Frontend `bun run test` — 59/59 still passing (the journey-view suite tests the sidebar in isolation, unaffected by backend coalescing).
+- Expected user-visible effect: 177 rows → ~5 rows per turn, one per actual reasoning pass, each readable on its own. Existing sessions in the DB still have the fragmented data; only new turns get the new behavior.
+
+**Files changed:** `crates/weave-server/src/service/sessions.rs` (+150/-13)
+
 ## Out-of-Scope Items Noticed
 
 - **Cancel button in session header** (`session.tsx:582-593`) is visible whenever status is `"connecting"` or `"ready"`, including between turns. Clicking it with no active stream hits the backend's `cancel_session` validation. Visible-but-no-op is a UX wart. Defer to a follow-up: hide based on `liveBuffer.isStreaming` rather than just status.
