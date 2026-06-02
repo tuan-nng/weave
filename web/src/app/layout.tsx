@@ -42,7 +42,7 @@ const NAV_ITEMS = [
   },
   {
     label: "Kanban",
-    href: ROUTES.home,
+    href: ROUTES.boards,
     icon: (
       <svg
         className="w-[18px] h-[18px]"

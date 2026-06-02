@@ -1,4 +1,10 @@
 import type {
+  Board,
+  BoardDetail,
+  Column,
+  CreateBoardRequest,
+  CreateCardRequest,
+  CreateColumnRequest,
   CreateProviderRequest,
   CreateSessionRequest,
   CreateWorkspaceRequest,
@@ -11,7 +17,11 @@ import type {
   Session,
   Message,
   SpecialistInfo,
+  Task,
   TraceRow,
+  UpdateBoardRequest,
+  UpdateColumnRequest,
+  UpdateTaskRequest,
   UpdateWorkspaceRequest,
   Workspace,
 } from "./types";
@@ -166,5 +176,58 @@ export const api = {
       apiFetch<TraceRow[]>(`/api/sessions/${sessionId}/trace/journey`),
     fileChanges: (sessionId: string) =>
       apiFetch<FileChangeSummary[]>(`/api/sessions/${sessionId}/trace/files`),
+  },
+
+  // Kanban (feat-026). Boards are workspace-scoped; the composite GET
+  // returns BoardDetail `{board, columns[], tasks[]}`. Column and task
+  // mutation paths drop the workspace id (the server resolves it from the
+  // row); boards.get keeps it for the cross-workspace 404 guard.
+  kanban: {
+    boards: {
+      list: (workspaceId: string) => apiFetch<Board[]>(`/api/workspaces/${workspaceId}/boards`),
+      get: (workspaceId: string, boardId: string) =>
+        apiFetch<BoardDetail>(`/api/workspaces/${workspaceId}/boards/${boardId}`),
+      create: (workspaceId: string, data: CreateBoardRequest) =>
+        apiFetch<Board>(`/api/workspaces/${workspaceId}/boards`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (workspaceId: string, boardId: string, data: UpdateBoardRequest) =>
+        apiFetch<Board>(`/api/workspaces/${workspaceId}/boards/${boardId}`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        }),
+      delete: (workspaceId: string, boardId: string) =>
+        apiFetch<null>(`/api/workspaces/${workspaceId}/boards/${boardId}`, {
+          method: "DELETE",
+        }),
+    },
+    columns: {
+      create: (workspaceId: string, boardId: string, data: CreateColumnRequest) =>
+        apiFetch<Column>(`/api/workspaces/${workspaceId}/boards/${boardId}/columns`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      update: (columnId: string, data: UpdateColumnRequest) =>
+        apiFetch<Column>(`/api/columns/${columnId}`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        }),
+    },
+    cards: {
+      create: (workspaceId: string, boardId: string, data: CreateCardRequest) =>
+        apiFetch<Task>(`/api/workspaces/${workspaceId}/boards/${boardId}/cards`, {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+    },
+    tasks: {
+      update: (taskId: string, data: UpdateTaskRequest) =>
+        apiFetch<Task>(`/api/tasks/${taskId}`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        }),
+      delete: (taskId: string) => apiFetch<null>(`/api/tasks/${taskId}`, { method: "DELETE" }),
+    },
   },
 };

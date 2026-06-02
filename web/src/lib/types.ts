@@ -85,6 +85,49 @@ export interface ModelInfo {
   context_window: number;
 }
 
+// ---------------------------------------------------------------------------
+// Kanban (feat-026) — domain models matching `store::boards`, `store::columns`,
+// `store::tasks` in `crates/weave-server/src/store/`. JSON field names mirror
+// the Rust `Serialize` derives 1:1.
+// ---------------------------------------------------------------------------
+
+export interface Board {
+  id: string;
+  workspace_id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface Column {
+  id: string;
+  board_id: string;
+  name: string;
+  position: number;
+  specialist_id: string | null;
+  auto_trigger: boolean;
+  created_at: string;
+}
+
+/// Returned by `GET /api/workspaces/{wid}/boards/{id}`. Flat shape — the
+/// client groups `tasks` by `column_id` (the API does not pre-nest).
+export interface BoardDetail {
+  board: Board;
+  columns: Column[];
+  tasks: Task[];
+}
+
+export type TaskStatus = "active" | "done" | "archived";
+
+/// One column spec used when creating a board with an inline template.
+/// Mirrors `CreateColumnRequest` but the API accepts this shape on
+/// `POST /api/workspaces/{wid}/boards` (see `api/kanban.rs:CreateBoardRequest`).
+export interface NewColumnSpec {
+  name: string;
+  position?: number;
+  specialist_id?: string;
+  auto_trigger?: boolean;
+}
+
 // API envelopes
 
 export interface ApiErrorResponse {
@@ -130,6 +173,62 @@ export interface CreateSessionRequest {
   model?: string;
   cwd?: string;
   parent_session_id?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Kanban request DTOs (feat-026). Tri-state semantics for nullable fields:
+//   `undefined` (key absent) = "don't change"
+//   `null`                  = "clear"
+//   string value            = "set to this value"
+// See `crates/weave-server/src/api/kanban.rs:47-119` for the source of truth.
+// ---------------------------------------------------------------------------
+
+export interface CreateBoardRequest {
+  name: string;
+  columns?: NewColumnSpec[];
+}
+
+export interface UpdateBoardRequest {
+  name: string;
+}
+
+export interface CreateColumnRequest {
+  name: string;
+  position?: number;
+  specialist_id?: string;
+  auto_trigger?: boolean;
+}
+
+export interface UpdateColumnRequest {
+  name?: string;
+  position?: number;
+  /// Tri-state: `undefined` = leave alone, `null` = clear, `string` = set.
+  specialist_id?: string | null;
+  auto_trigger?: boolean;
+}
+
+export interface CreateCardRequest {
+  column_id: string;
+  title: string;
+  description?: string;
+  position?: number;
+  status?: TaskStatus;
+}
+
+export interface UpdateTaskRequest {
+  title?: string;
+  /// Tri-state: `undefined` = leave alone, `null` = clear, `string` = set.
+  description?: string | null;
+  /// Changing `column_id` routes through `TaskStore::move_to_column` and
+  /// triggers a position rebalance. Sending `column_id` via this DTO is
+  /// allowed; the API handler intercepts it before the regular update.
+  column_id?: string;
+  position?: number;
+  status?: TaskStatus;
+  session_id?: string | null;
+  acceptance_criteria?: string | null;
+  completion_summary?: string | null;
+  verification_report?: string | null;
 }
 
 // SSE event types — match backend SseWireEvent
@@ -221,6 +320,82 @@ export type SseEvent =
   | SseMessagePersistedEvent
   | SseConnectedEvent
   | SseGapEvent;
+
+// ---------------------------------------------------------------------------
+// Board-scoped SSE events (feat-026). The backend broadcasts these on entity
+// `board:{bid}` via `GET /api/boards/{bid}/stream`. Field names match
+// `crates/weave-server/src/sse/mod.rs:225-247` exactly.
+// ---------------------------------------------------------------------------
+
+export interface SseBoardTaskCreatedEvent {
+  type: "task_created";
+  task: Task;
+}
+
+export interface SseBoardTaskMovedEvent {
+  type: "task_moved";
+  task: Task;
+  from_column_id: string;
+  to_column_id: string;
+}
+
+export interface SseBoardTaskUpdatedEvent {
+  type: "task_updated";
+  task: Task;
+}
+
+export interface SseBoardTaskDeletedEvent {
+  type: "task_deleted";
+  task_id: string;
+  column_id: string;
+}
+
+export interface SseBoardColumnAddedEvent {
+  type: "column_added";
+  column: Column;
+}
+
+/// Emitted by `try_automate_lane` when a task is moved into a column with
+/// `auto_trigger=true` and a bound `specialist_id`. The frontend patches
+/// `task.session_id` so the agent indicator pill appears on the card.
+export interface SseBoardSessionStartedEvent {
+  type: "session_started";
+  session_id: string;
+  task_id: string;
+  specialist_id: string;
+  board_id: string;
+}
+
+export interface SseBoardHeartbeatEvent {
+  type: "heartbeat";
+}
+
+/// `connected` from the board stream carries `session_id: ""` (board id is
+/// in the URL, not the payload). Treated as a no-op lifecycle marker.
+export interface SseBoardConnectedEvent {
+  type: "connected";
+  session_id: string;
+}
+
+/// Protocol error event — emitted once when the requested board id
+/// does not exist (the server can't open a stream for a missing board).
+/// Subsequent errors during a live stream are surfaced via `es.onerror`
+/// and re-triggered as `EventSource` auto-reconnects.
+export interface SseBoardErrorEvent {
+  type: "error";
+  message: string;
+}
+
+export type SseBoardEvent =
+  | SseBoardTaskCreatedEvent
+  | SseBoardTaskMovedEvent
+  | SseBoardTaskUpdatedEvent
+  | SseBoardTaskDeletedEvent
+  | SseBoardColumnAddedEvent
+  | SseBoardSessionStartedEvent
+  | SseBoardHeartbeatEvent
+  | SseBoardConnectedEvent
+  | SseBoardErrorEvent;
 
 /// Parsed shape of `messages.metadata` (TEXT NULL in the database).
 /// Currently a single optional `stop_reason` tag, but the JSON shape

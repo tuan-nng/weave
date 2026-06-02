@@ -38,4 +38,13 @@ export const queryKeys = {
     fileChanges: (sessionId: string) =>
       [...queryKeys.traces.all(), "fileChanges", sessionId] as const,
   },
+
+  // Kanban boards (feat-026). Boards are workspace-scoped; the detail key
+  // includes `workspaceId` so cross-workspace 404s don't collide in the cache.
+  boards: {
+    all: () => [...queryKeys.all, "boards"] as const,
+    list: (workspaceId: string) => [...queryKeys.boards.all(), "list", workspaceId] as const,
+    detail: (workspaceId: string, boardId: string) =>
+      [...queryKeys.boards.all(), "detail", workspaceId, boardId] as const,
+  },
 } as const;
