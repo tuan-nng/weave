@@ -641,9 +641,11 @@ export default function SessionPage() {
   // flight). Clicking the pill scrolls to the bottom and clears the
   // pill. Auto-hide when the user scrolls back near the bottom.
   const [showJumpPill, setShowJumpPill] = useState(false);
-  // Journey sidebar — collapsed by default. The same state drives
-  // the header toggle button and the sidebar's own rail/close
-  // buttons (via the `onToggle` callback passed into `JourneySidebar`).
+  // Journey sidebar — collapsed by default. The sidebar's own
+  // rail/close buttons drive this state via the `onToggle` callback
+  // passed into `JourneySidebar`. There is no header toggle: the
+  // sidebar can only be opened/closed from its 40px rail on the
+  // right edge of the page.
   const [journeyOpen, setJourneyOpen] = useState<boolean>(false);
 
   // Reset the sidebar when navigating between sessions. React Router
@@ -834,23 +836,6 @@ export default function SessionPage() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {/* Journey sidebar toggle — sits before Cancel so the
-                primary action stays at the far right. The same
-                callback is wired into the sidebar's own rail/close
-                buttons, so all three entry points stay in sync. */}
-            <button
-              type="button"
-              onClick={() => setJourneyOpen((o) => !o)}
-              aria-pressed={journeyOpen}
-              title="Toggle Journey sidebar"
-              className={`h-8 px-3 text-xs font-medium rounded-lg border transition-all duration-150 ${
-                journeyOpen
-                  ? "bg-brand-blue-50 text-brand-blue-700 border-brand-blue-200/60"
-                  : "text-slate-600 bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300"
-              }`}
-            >
-              Journey
-            </button>
             {(session?.status === "connecting" || session?.status === "ready") && (
               <button
                 type="button"
@@ -948,10 +933,9 @@ export default function SessionPage() {
 
       {/* Journey sidebar — flex sibling. The rail is always
           rendered (so the user can re-open after collapsing); the
-          panel only renders when `isOpen`. The header's Journey
-          button and the sidebar's own rail/close buttons all
-          share the same `journeyOpen` state via the toggle
-          callback. */}
+          panel only renders when `isOpen`. The sidebar's own
+          rail/close buttons drive `journeyOpen` via the toggle
+          callback — there is no header entry point. */}
       <JourneySidebar
         sessionId={sessionId}
         isOpen={journeyOpen}
