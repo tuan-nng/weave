@@ -19,8 +19,7 @@ pub async fn get_session_trace(
 
 /// GET /api/sessions/:sid/trace/journey
 ///
-/// Returns journey events (decision + milestone + review + error) for a session,
-/// ordered by timestamp.
+/// Returns journey events (decision + error) for a session, ordered by timestamp.
 pub async fn get_session_journey(
     axum::Extension(state): axum::Extension<AppState>,
     Path(session_id): Path<String>,

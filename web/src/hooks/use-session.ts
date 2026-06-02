@@ -358,6 +358,24 @@ export function useSession(sessionId: string): UseSessionResult {
             persistedId: mp.id,
             stopReason: mp.stop_reason,
           });
+          // The journey sidebar (`useJourney` + `useFileChanges`)
+          // depends on the trace events that the server has just
+          // emitted. Invalidate here — at the exact moment the
+          // assistant message is committed — so the sidebar's
+          // timeline and file list refresh together with the chat.
+          //
+          // The backend awaits the trace flush task before
+          // broadcasting `message_persisted` (see
+          // `run_prompt_task` in `service/sessions.rs`), so by the
+          // time the client sees this event every new trace row is
+          // already in SQLite. The refetch is guaranteed to see
+          // them; there is no race.
+          qcRef.current.invalidateQueries({
+            queryKey: queryKeys.traces.journey(sessionId),
+          });
+          qcRef.current.invalidateQueries({
+            queryKey: queryKeys.traces.fileChanges(sessionId),
+          });
           break;
         }
 

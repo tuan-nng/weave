@@ -207,13 +207,17 @@ impl TraceStore {
         Ok(traces)
     }
 
-    /// Get journey events (decision + milestone + review + error), ordered by timestamp.
+    /// Get journey events (decision + error), ordered by timestamp.
+    ///
+    /// Other event types (milestone, review) are listed in the journey
+    /// spec but not yet produced by `TraceEventKind`. Keep the filter
+    /// honest to current producers; extend it when those variants land.
     pub fn list_journey(db: &Db, session_id: &str) -> Result<Vec<TraceRow>, AppError> {
         let conn = db.conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {TRACE_COLS} FROM traces
                  WHERE session_id = ?1
-                   AND event_type IN ('decision', 'milestone', 'review', 'error')
+                   AND event_type IN ('decision', 'error')
                  ORDER BY timestamp"
         ))?;
 

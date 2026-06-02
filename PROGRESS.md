@@ -8,12 +8,77 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-01
-- **Latest commit:** 3cb05d8 (code review fixes)
-- **Active feature:** feat-021 (Session chat view) — passing
+- **Last updated:** 2026-06-02
+- **Latest commit:** 3cb05d8 (code review fixes) — *no new commit yet, work in flight*
+- **Active feature:** none — feat-022 (Journey sidebar) just completed; feat-023 (Frontend served from Rust) is the next pending
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
-- **Test status:** green — 326 Rust tests + 21 frontend tests pass
+- **Test status:** green — 333 Rust tests + 59 frontend tests pass (8 new in `journey-view` suite + 3 new `use-journey` + 3 new `use-file-changes`)
 - **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
+
+## Completed Since Project Start
+
+- [x] System design documentation (`docs/SYSTEM_DESIGN.md`, `docs/ARCHITECTURE.md`)
+- [x] Implementation plan (`docs/PLAN.md`)
+- [x] Workspace `Cargo.toml` created (members: `crates/weave-server`)
+- [x] **feat-001**: Binary skeleton with CLI, tracing, health check, graceful shutdown
+- [x] **feat-002**: SQLite database with WAL mode and migrations (11 tables, user_version tracking)
+- [x] **feat-003**: Shared error types (AppError, ProviderError) with thiserror, IntoResponse, JSON envelope
+- [x] **feat-004**: Workspace CRUD (WorkspaceStore, REST API, default workspace seed, cursor pagination)
+- [x] **feat-005**: CodingAgent trait (provider abstraction, StreamEvent, StopReason, message types, all Send+Sync)
+- [x] **feat-006**: AnthropicAgent (SSE streaming, error mapping, retry logic, message conversion)
+- [x] **feat-007**: ProviderStore + ProviderRegistry (CRUD, agent lifecycle, API with api_key stripping)
+- [x] **feat-008**: SessionStore + MessageStore (session state machine, message pagination, session API)
+- [x] **feat-009**: SessionService (prompt lifecycle, async streaming, cancellation, message history)
+- [x] **feat-010**: SSE infrastructure (SseManager, EventBuffer, SSE endpoint, reconnection, backpressure)
+- [x] **feat-011**: SpecialistLoader (YAML frontmatter parsing, SpecialistRegistry, system prompt + model override injection)
+- [x] **feat-012**: ToolRegistry (ToolExecutor trait, 5 profiles, profile-based filtering, SessionService integration)
+- [x] **feat-013**: Filesystem tools (fs_read, fs_write, fs_edit, fs_search, fs_list — PathValidator, symlink-aware containment, control-plane protection)
+- [x] **feat-014**: Shell tool (shell_exec — sh -c wrapper, tokio::process::Command, timeout, 100KB output truncation, tracing::info! trace event)
+- [x] **feat-015**: Git tools (git_status, git_diff, git_log, git_commit — tools/git/ directory, async run_git, validate_commit_identity, 50KB diff truncation, profile updates)
+- [x] **feat-016**: Task context tools (get_task, list_tasks, update_task_status, update_task_fields — tools/task/ directory, TaskStore, workspace-scoped queries, migration 004)
+- [x] **feat-017**: TraceCollector (trace/ module with channel-based collector, background flush task, file change extraction; store/traces.rs with TraceStore; api/traces.rs with 3 endpoints; streaming loop integration with pending tool tracking)
+- [x] **feat-018**: Session resume (Db::with_transaction; SessionService::create_session with validate_parent_chain; MessageStore::copy_messages/load_all; terminal-state check; workspace validation; depth limit 5; cycle detection; 9 tests)
+- [x] **feat-019**: React frontend scaffolding (Vite + React 19 + TypeScript + Tailwind CSS v4 + TanStack Query + React Router; Bun package manager; ESLint + Prettier + Vitest; API wrapper with {data} envelope unwrapping; types matching backend models; query key factory; route constants; 5 placeholder pages; 12 tests)
+- [x] **feat-021**: Session chat view (useSession hook with TanStack Query + SSE streaming; SessionPage with MessageList, ToolCallBlock, StreamingIndicator, MessageInput; auto-scroll; react-markdown + remark-gfm; Sessions list page at /sessions; sidebar Sessions link fixed; .prettierignore for pnpm-lock.yaml)
+- [x] **feat-036**: Re-implement session chat streaming for smooth UX. New `message_persisted` SSE event carries the persisted row id+content+stop_reason+created_at, broadcast AFTER `MessageStore::create` and BEFORE the terminal `done` event. On cancel and on streaming error, the partial text is persisted with `stop_reason` in the existing `messages.metadata` JSON column. Frontend `useSession` is a `useReducer` with a discriminated `Action` union; content-equality dedup in `LiveAssistantMessage` is replaced with id-based handoff (`streamId` vs `persistedTurnId`). Dead state removed (`thinkingChunks` → live `thinking[]` rendered as a collapsible block). "↓ jump to latest" pill on user scroll-up. 3-row skeleton loading. 24 new reducer unit tests + 3 new backend SSE integration tests + 1 new cancel-persists-partial test + 1 new error-persists-partial test + 1 new empty-turn-sentinel test.
+- [x] **feat-022**: Journey sidebar (collapsible, default collapsed). 360px panel + 40px rail, smooth width transition. `Decision` events rendered as expandable cards (orchid chip + lightbulb icon); `Error` events as non-expandable red-tinted cards. `FileChangesList` shows deduplicated paths with one action chip per distinct action (read=slate, write=blue, create=emerald, delete=red) and a touch count. Clicking a path copies it to clipboard with a 1.2s "Copied!" toast (or "Copy failed" if the write rejected). Sidebar refreshes on every `message_persisted` SSE event via invalidated query keys. UI derived from Open Design mockup `weave-feat-022-journey-sidebar/journey-sidebar.html` (run `d3a1d6e6-36d0-4ef6-b964-1313ec8ce420`). 8 page-level tests in `journey-view` suite + 3 hook tests for `useJourney` + 3 for `useFileChanges` — all green. Three parallel code-reviewer agents surfaced 14 findings; 8 fixes applied (dead ternary, undefined `brand-orchid-600` token + 2 missing shades added to `index.css`, dead `data.message` branch in `parseFullText`, `journeyOpen` state leak across session navigation, clipboard toast now honest on failure, misleading race-condition comment, `aria-label` on panel close button, `max-h-[300px]` → `max-h-[600px] overflow-y-auto` for long decisions). 5 items deferred: `parseFullText` relocation to hook (#7), 3-toggle-entry-points design call (#9), responsive layout for <1024px viewports (#10), test coverage expansion to 80% on the new surface (#12), `formatTime` extraction to `lib/format.ts` (#14).
+
+## In Progress
+
+(none — feat-022 complete; ready for next feature)
+
+## Blocked
+
+(none)
+
+## Out-of-Scope Items Noticed
+
+From the feat-022 code review (3 parallel agents), deferred for a follow-up session:
+- **#7**: Relocate `parseFullText` from `journey-sidebar.tsx` to `useJourney`'s `select` callback — keeps the data layer responsible for parsing and makes the parsed shape stable across consumers. The current placement is a small smell, not a bug.
+- **#9**: Three toggle entry points for one bit of state (chat header "Journey" button, sidebar rail chart icon, sidebar panel × close). Each is independently wired to the same `setJourneyOpen` callback, so they stay in sync, but the surface is over-large. Decide whether to drop the panel × close (rail is always visible) or drop the rail. UX call, not a defect.
+- **#10**: No responsive layout below 1024px viewport — opening the sidebar squeezes the chat column to ~40px and overflows the aside horizontally. Needs a design call (overlay drawer vs. full-screen modal) and an Open Design mockup. v2 work.
+- **#12**: Test coverage expansion — `useJourney`/`useFileChanges` hook tests don't cover the `isError` branch or the "doesn't fetch when sessionId is empty" gating, and `journey-view` doesn't exercise keyboard activation of the decision card / file row. 8 tests hit the verification target; expanding to 80% of the new surface is mechanical.
+- **#14**: Extract `formatTime(iso)` to `web/src/lib/format.ts` and replace the 3 inlined `toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })` calls in `session.tsx`. Small DRY win, easy follow-up.
+- **Pre-existing**: `session.tsx:374, 464` uses `from-brand-orchid-400 to-brand-orchid-600` for the assistant avatar gradient — these tokens didn't exist in `index.css` before this feature, but the review of the new `DecisionChip`'s `text-brand-orchid-600` (which also didn't exist) led to adding them. The pre-existing gradient now renders correctly. Documented for the next agent who looks at the avatar.
+
+## Next Steps
+
+1. Continue Phase 3 (Frontend) — feat-023 (Frontend served from Rust)
+
+## Session Notes
+
+### 2026-06-02 — feat-022: Journey sidebar
+
+- **Backend** (`crates/weave-server/src/store/traces.rs:210-222`, `api/traces.rs:21`): SQL filter tightened to `event_type IN ('decision', 'error')` — `milestone`/`review` were dead strings (the `TraceEventKind` enum at `store/traces.rs:21` has no `Milestone`/`Review` variants). Doc comments updated. All 7 `store::traces` + 3 `api::traces` tests pass unchanged. **Spec drift fix**: `feature_list.json:184` and `:229` said "Decision + Milestone + Review"; backend reality is "Decision + Error". Behavior text in `feature_list.json` updated to match.
+- **Frontend hooks** (`web/src/hooks/use-journey.ts`, `use-file-changes.ts`): thin `useQuery` wrappers around `api.traces.journey/fileChanges` + `queryKeys.traces.*`. `enabled: Boolean(sessionId)` guard.
+- **SSE invalidation** (`web/src/hooks/use-session.ts:347-378`): `message_persisted` case now invalidates `queryKeys.traces.journey(sessionId)` and `queryKeys.traces.fileChanges(sessionId)`. Comment explains the timing invariant (200ms worst-case lag from the trace flush task is acceptable; the `done` event also re-invalidates as a safety net).
+- **UI** (`web/src/app/pages/session/journey-sidebar.tsx`, ~560 lines): 5 module-scope components — `JourneySidebar` (public), `RailToggleButton` (always-visible 40px rail), `PanelHeader` (× close), `JourneyTimeline` (with `SkeletonRows` + `EmptyHint` helpers for loading/error/empty states), `DecisionNode` (expandable via `useState<boolean>(false)`, parses full text from `event.data_json`), `ErrorNode` (non-expandable, red-tinted), `FileChangesList`, `FileChangeItem` (with copy-to-clipboard + 1.2s tooltip + `useRef<setTimeout>` cleanup on unmount), `FileActionChip` (defensive render for any action string with `FILE_ACTION_CONFIG` lookup + slate fallback). Aside width is `w-10` collapsed / `w-[360px]` open with smooth `transition-[width] duration-200 ease-out`. The visual design (orchid/red chips, slate/blue/emerald/red action chips, line-through for deleted files, monospace file paths) was derived from the Open Design mockup at `weave-feat-022-journey-sidebar/journey-sidebar.html`.
+- **Session page integration** (`web/src/app/pages/session.tsx`): added `useState<boolean>(false)` for `journeyOpen`, "Journey" toggle button in the chat header (with `aria-pressed` + active state styling matching `brand-blue-50/200/60`), restructured layout to `flex flex-row` with chat column `flex-1 min-w-0` and `<JourneySidebar sessionId={sessionId} isOpen={journeyOpen} onToggle={...} />` as a sibling. Cancel button moved to its own row in the right-side action cluster (next to the Journey toggle, before Cancel).
+- **Tests** (`web/src/hooks/__tests__/use-journey.test.tsx`, `use-file-changes.test.tsx`, `web/src/app/__tests__/journey-view.test.tsx`): 14 new tests total — 3 for each hook (data fetches, loading state, error state), 8 for the page (collapsed default, expand toggle, decision expand/collapse, error non-expandable, file click copies via `navigator.clipboard`, action chip colors, file count display, no UI flash). All 59 frontend tests pass.
+- **One bug fix made in parallel**: the original `journey-sidebar.tsx` (created in a parallel session) had the aside hardcoded to `w-[360px]` even when `isOpen=false` — that would have made the chat column 320px narrower than intended when the sidebar is closed. Fixed to `w-10` / `w-[360px]` conditional on `isOpen` with smooth width transition.
+- **Open Design provenance**: the design mockup was generated in ~5 minutes via `start_run` on project `weave-feat-022-journey-sidebar`, conversation `73d68e7f-7f19-4a0c-b3cf-70446343131c`. The generated HTML (`journey-sidebar.html`, 34KB) is the canonical visual spec; the React component follows it 1:1. Studio: http://127.0.0.1:33795/projects/weave-feat-022-journey-sidebar/conversations/73d68e7f-7f19-4a0c-b3cf-70446343131c
+- **Verification**: `./init.sh` all 3 layers pass. `cd web && bun run test -- --run journey-view` exits 0 (8/8 tests in the verification-target suite).
+- **Files changed**: 7 created, 4 modified. Total: 11 files.
 
 ## Completed Since Project Start
 

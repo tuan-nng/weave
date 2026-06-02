@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { useSession } from "../../hooks/use-session";
 import { ROUTES } from "../../lib/routes";
 import { StatusBadge } from "../../components/status-badge";
+import { JourneySidebar } from "./session/journey-sidebar";
 import type { LiveBuffer, LiveThinkingBlock } from "../../hooks/use-session";
 import type { Message, MessageMetadata, TraceRow } from "../../lib/types";
 
@@ -640,6 +641,20 @@ export default function SessionPage() {
   // flight). Clicking the pill scrolls to the bottom and clears the
   // pill. Auto-hide when the user scrolls back near the bottom.
   const [showJumpPill, setShowJumpPill] = useState(false);
+  // Journey sidebar — collapsed by default. The same state drives
+  // the header toggle button and the sidebar's own rail/close
+  // buttons (via the `onToggle` callback passed into `JourneySidebar`).
+  const [journeyOpen, setJourneyOpen] = useState<boolean>(false);
+
+  // Reset the sidebar when navigating between sessions. React Router
+  // re-uses this component across `/sessions/:id` routes — the
+  // component instance is the same, only `useParams()` re-emits.
+  // Without this reset, opening the sidebar in session A would leave
+  // it open when the user navigates to session B, violating the
+  // "collapsed by default" contract.
+  useEffect(() => {
+    setJourneyOpen(false);
+  }, [sessionId]);
 
   const scrollToBottom = useCallback(() => {
     scrollTargetRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -789,124 +804,159 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[#fafafa]">
-      {/* Chat Header */}
-      <header className="flex-shrink-0 h-14 flex items-center justify-between px-5 bg-white/80 backdrop-blur-sm border-b border-slate-200/80">
-        <div className="flex items-center gap-3">
-          <Link
-            to={session ? ROUTES.workspace(session.workspace_id) : ROUTES.home}
-            className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all duration-150 group"
-          >
-            <svg
-              className="w-[18px] h-[18px] group-hover:-translate-x-0.5 transition-transform"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+    <div className="flex flex-row h-full bg-[#fafafa]">
+      {/* Chat column — wraps the header, message scroll area, and
+          input. `flex-1 min-w-0` lets it shrink to make room for
+          the journey sidebar without overflowing the flex parent.
+          `flex flex-col` preserves the previous vertical stack. */}
+      <div className="flex-1 min-w-0 flex flex-col">
+        {/* Chat Header */}
+        <header className="flex-shrink-0 h-14 flex items-center justify-between px-5 bg-white/80 backdrop-blur-sm border-b border-slate-200/80">
+          <div className="flex items-center gap-3">
+            <Link
+              to={session ? ROUTES.workspace(session.workspace_id) : ROUTES.home}
+              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all duration-150 group"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-            </svg>
-          </Link>
-          <h1 className="text-sm font-semibold text-slate-900">Session</h1>
-          {session && <StatusBadge status={session.status} />}
-          {session?.model && (
-            <span className="text-xs font-mono text-slate-400 ml-1">{session.model}</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {(session?.status === "connecting" || session?.status === "ready") && (
+              <svg
+                className="w-[18px] h-[18px] group-hover:-translate-x-0.5 transition-transform"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+              </svg>
+            </Link>
+            <h1 className="text-sm font-semibold text-slate-900">Session</h1>
+            {session && <StatusBadge status={session.status} />}
+            {session?.model && (
+              <span className="text-xs font-mono text-slate-400 ml-1">{session.model}</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Journey sidebar toggle — sits before Cancel so the
+                primary action stays at the far right. The same
+                callback is wired into the sidebar's own rail/close
+                buttons, so all three entry points stay in sync. */}
             <button
               type="button"
-              onClick={() => cancelSession()}
-              disabled={isCancelling}
-              className="h-8 px-3.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-all duration-150 disabled:opacity-50"
+              onClick={() => setJourneyOpen((o) => !o)}
+              aria-pressed={journeyOpen}
+              title="Toggle Journey sidebar"
+              className={`h-8 px-3 text-xs font-medium rounded-lg border transition-all duration-150 ${
+                journeyOpen
+                  ? "bg-brand-blue-50 text-brand-blue-700 border-brand-blue-200/60"
+                  : "text-slate-600 bg-white border-slate-200 hover:bg-slate-50 hover:border-slate-300"
+              }`}
             >
-              Cancel
+              Journey
+            </button>
+            {(session?.status === "connecting" || session?.status === "ready") && (
+              <button
+                type="button"
+                onClick={() => cancelSession()}
+                disabled={isCancelling}
+                className="h-8 px-3.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-all duration-150 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </header>
+
+        {/* Messages Area */}
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+          <div className="max-w-3xl mx-auto px-5 py-6 space-y-6">
+            {messages.length === 0 && !liveBuffer.isStreaming && (
+              <div className="flex items-center justify-center py-20">
+                <p className="text-sm text-slate-400">Send a message to start the session</p>
+              </div>
+            )}
+
+            {messages.map((msg) =>
+              msg.role === "user" ? (
+                <UserMessage key={msg.id} message={msg} />
+              ) : (
+                <AssistantMessage
+                  key={msg.id}
+                  message={msg}
+                  traces={traceMap.get(msg.id) ?? []}
+                  // The message that just replaced the live bubble
+                  // appears with the same content the user has been
+                  // watching. The fade-in animation is a 300ms
+                  // upward slide that, in this specific case, reads
+                  // as a "reload" of the same content. Suppress it
+                  // only for that one message; every other mount
+                  // (initial page load, navigating to a session)
+                  // still gets the fade-in.
+                  skipAnimate={msg.id === liveBuffer.persistedTurnId}
+                />
+              ),
+            )}
+
+            {/* Optimistic user prompts: sent but not yet in the persisted
+                history. Rendered above the streaming assistant bubble so the
+                user always sees their own message immediately on submit. The
+                useSession hook drops a pending prompt from this list once the
+                history query returns a message with the same id. */}
+            {pendingPrompts.map((p) => (
+              <UserMessage
+                key={p.id}
+                message={{
+                  id: p.id,
+                  session_id: sessionId,
+                  role: "user",
+                  content: p.content,
+                  metadata: null,
+                  created_at: p.createdAt,
+                }}
+              />
+            ))}
+
+            <LiveAssistantMessage liveBuffer={liveBuffer} persistedMessage={livePersistedMessage} />
+
+            {/* Scroll target */}
+            <div ref={scrollTargetRef} className="h-1" />
+          </div>
+        </div>
+
+        {/* Input Area — wrapped in a relative container so the
+            "↓ jump to latest" pill can float above it on the right. */}
+        <div className="relative flex-shrink-0">
+          {showJumpPill && (
+            <button
+              type="button"
+              onClick={scrollToBottom}
+              aria-label="Jump to latest message"
+              className="absolute right-5 -top-9 z-10 inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white border border-slate-200 shadow-md text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors animate-fade-in"
+            >
+              <svg
+                className="w-3 h-3"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+              </svg>
+              <span>Jump to latest</span>
             </button>
           )}
-        </div>
-      </header>
-
-      {/* Messages Area */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-5 py-6 space-y-6">
-          {messages.length === 0 && !liveBuffer.isStreaming && (
-            <div className="flex items-center justify-center py-20">
-              <p className="text-sm text-slate-400">Send a message to start the session</p>
-            </div>
-          )}
-
-          {messages.map((msg) =>
-            msg.role === "user" ? (
-              <UserMessage key={msg.id} message={msg} />
-            ) : (
-              <AssistantMessage
-                key={msg.id}
-                message={msg}
-                traces={traceMap.get(msg.id) ?? []}
-                // The message that just replaced the live bubble
-                // appears with the same content the user has been
-                // watching. The fade-in animation is a 300ms
-                // upward slide that, in this specific case, reads
-                // as a "reload" of the same content. Suppress it
-                // only for that one message; every other mount
-                // (initial page load, navigating to a session)
-                // still gets the fade-in.
-                skipAnimate={msg.id === liveBuffer.persistedTurnId}
-              />
-            ),
-          )}
-
-          {/* Optimistic user prompts: sent but not yet in the persisted
-              history. Rendered above the streaming assistant bubble so the
-              user always sees their own message immediately on submit. The
-              useSession hook drops a pending prompt from this list once the
-              history query returns a message with the same id. */}
-          {pendingPrompts.map((p) => (
-            <UserMessage
-              key={p.id}
-              message={{
-                id: p.id,
-                session_id: sessionId,
-                role: "user",
-                content: p.content,
-                metadata: null,
-                created_at: p.createdAt,
-              }}
-            />
-          ))}
-
-          <LiveAssistantMessage liveBuffer={liveBuffer} persistedMessage={livePersistedMessage} />
-
-          {/* Scroll target */}
-          <div ref={scrollTargetRef} className="h-1" />
+          <MessageInput onSend={handleSend} disabled={isTerminal} isSending={isSending} />
         </div>
       </div>
 
-      {/* Input Area — wrapped in a relative container so the
-          "↓ jump to latest" pill can float above it on the right. */}
-      <div className="relative flex-shrink-0">
-        {showJumpPill && (
-          <button
-            type="button"
-            onClick={scrollToBottom}
-            aria-label="Jump to latest message"
-            className="absolute right-5 -top-9 z-10 inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-white border border-slate-200 shadow-md text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors animate-fade-in"
-          >
-            <svg
-              className="w-3 h-3"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-            </svg>
-            <span>Jump to latest</span>
-          </button>
-        )}
-        <MessageInput onSend={handleSend} disabled={isTerminal} isSending={isSending} />
-      </div>
+      {/* Journey sidebar — flex sibling. The rail is always
+          rendered (so the user can re-open after collapsing); the
+          panel only renders when `isOpen`. The header's Journey
+          button and the sidebar's own rail/close buttons all
+          share the same `journeyOpen` state via the toggle
+          callback. */}
+      <JourneySidebar
+        sessionId={sessionId}
+        isOpen={journeyOpen}
+        onToggle={() => setJourneyOpen((o) => !o)}
+      />
     </div>
   );
 }
