@@ -29,6 +29,15 @@ build:
 build-debug:
     cargo build -p weave-server
 
+# Build only the frontend bundle (skip cargo). Use when iterating on
+# UI without touching Rust, to avoid the slow `cargo build` cycle.
+# Build.rs runs the same on every cargo build; this recipe is the
+# out-of-band equivalent. We invoke `vite build` directly (not
+# `bun run build`) because the production build only needs the
+# bundle — type-check is handled by `just lint` and `just test`.
+build-frontend:
+    cd web && bunx vite build
+
 # ── Verification ─────────────────────────────────────────────────────────────
 # Fast verification (lint + tests, no build)
 check: lint test

@@ -3,6 +3,7 @@ pub mod providers;
 pub mod responses;
 pub mod sessions;
 pub mod specialists;
+pub mod static_assets;
 pub mod traces;
 pub mod workspaces;
 
@@ -81,4 +82,5 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
         )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))
+        .fallback_service(static_assets::spa_service())
 }

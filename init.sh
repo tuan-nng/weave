@@ -57,6 +57,12 @@ if [ -f "target/debug/weave-server" ]; then
     kill $SERVER_PID 2>/dev/null || true
     fail 3 "Smoke test failed: server started but /api/health did not respond within 2s. Check startup logs."
   fi
+  if curl -sf http://localhost:19876/ | grep -q 'id="root"'; then
+    echo "Smoke test passed: GET / served index.html (found id=\"root\")"
+  else
+    kill $SERVER_PID 2>/dev/null || true
+    fail 3 "Smoke test failed: GET / did not return index.html with id=\"root\". Check that crates/weave-server/build.rs ran (it invokes 'bunx vite build') and that crates/weave-server/src/api/mod.rs has the .fallback_service(static_assets::spa_service()) chain."
+  fi
   kill $SERVER_PID 2>/dev/null || true
 else
   echo "SKIP: binary not found at target/debug/weave-server — build may have produced it in a different location"
