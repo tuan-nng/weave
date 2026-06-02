@@ -9,8 +9,8 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-02
-- **Latest commit:** 3cb05d8 (code review fixes) — *no new commit yet, work in flight*
-- **Active feature:** none — feat-022 (Journey sidebar) just completed; feat-023 (Frontend served from Rust) is the next pending
+- **Latest commit:** 55885b2 (feat-022: Journey sidebar) — merged to main via fast-forward
+- **Active feature:** none — feat-022 (Journey sidebar) shipped to main; feat-023 (Frontend served from Rust) is the next pending
 - **Build status:** green — `cargo build -p weave-server` succeeds; `bun run build` in web/ succeeds
 - **Test status:** green — 333 Rust tests + 59 frontend tests pass (8 new in `journey-view` suite + 3 new `use-journey` + 3 new `use-file-changes`)
 - **Lint status:** green — clippy clean, fmt clean; ESLint + Prettier clean
