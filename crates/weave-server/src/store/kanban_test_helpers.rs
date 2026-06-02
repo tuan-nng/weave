@@ -125,3 +125,62 @@ pub fn seed_workspace_with_two_columns(db: &Db) -> (String, String, String, Stri
 
     (workspace_id, board_id, col1_id, col2_id)
 }
+
+/// Seed an Anthropic provider in the given DB. Returns the provider id.
+///
+/// Mirrors the config shape used by `store::sessions::tests::seed_deps`
+/// so tests that call both can share an AppState. Used by lane-automation
+/// tests (feat-025) which require at least one provider to fire
+/// `create_session`.
+pub fn seed_provider(db: &Db) -> String {
+    let config = serde_json::json!({
+        "base_url": "https://api.anthropic.com",
+        "api_key": "sk-test",
+        "default_model": "claude-sonnet-4-20250514"
+    })
+    .to_string();
+    let provider = crate::store::providers::ProviderStore::create(db, "anthropic", "Test", &config)
+        .expect("seed provider");
+    provider.id
+}
+
+/// Insert a specialist into the registry at `specialists`.
+///
+/// `SpecialistRegistry::insert` takes `&mut self`, but the test `AppState`
+/// holds `Arc<SpecialistRegistry>`. We use `Arc::get_mut`, which only
+/// succeeds when the strong count is 1 — true immediately after
+/// `make_test_state()` (the Arc is moved into AppState once). Callers
+/// that need to seed a specialist on a shared `Arc` must use
+/// `Arc::make_mut` (which clones on conflict) or refactor to a different
+/// injection point.
+pub fn seed_specialist(
+    specialists: &mut crate::specialist::SpecialistRegistry,
+    name: &str,
+    system_prompt: &str,
+) {
+    use crate::specialist::Specialist;
+    specialists.insert(Specialist {
+        name: name.to_string(),
+        description: format!("Test specialist {}", name),
+        model: None,
+        tool_profile: None,
+        tags: vec![],
+        system_prompt: system_prompt.to_string(),
+    });
+}
+
+/// Convenience: seed both a provider (in DB) and a specialist (in registry).
+///
+/// Returns `(provider_id, specialist_name)`. This is the common shape
+/// for lane-automation tests in feat-025.
+pub fn seed_provider_and_specialist(
+    state: &mut AppState,
+    specialist_name: &str,
+) -> (String, String) {
+    let provider_id = seed_provider(&state.db);
+    // Arc::get_mut only works when the strong count is 1; make_test_state
+    // gives us a fresh Arc per call so this is safe.
+    let specialists = Arc::get_mut(&mut state.specialists).expect("specialists Arc is unique");
+    seed_specialist(specialists, specialist_name, "You are a test specialist.");
+    (provider_id, specialist_name.to_string())
+}

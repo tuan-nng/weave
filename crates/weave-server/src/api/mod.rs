@@ -105,6 +105,7 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             "/api/tasks/{id}",
             axum::routing::patch(kanban::update_task).delete(kanban::delete_task),
         )
+        .route("/api/boards/{bid}/stream", get(kanban::board_stream))
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))
         .fallback_service(static_assets::spa_service())

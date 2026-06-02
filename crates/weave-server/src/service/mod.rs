@@ -1,3 +1,4 @@
+pub mod kanban;
 pub mod sessions;
 
 use std::collections::HashMap;

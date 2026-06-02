@@ -11,6 +11,7 @@
 //! - `POST   /api/workspaces/{wid}/boards/{bid}/cards`  create_card
 //! - `PATCH  /api/tasks/{tid}`                          update_task
 //! - `DELETE /api/tasks/{tid}`                          delete_task
+//! - `GET    /api/boards/{bid}/stream`                  board_stream (SSE)
 //!
 //! All board-scoped routes take `wid` in the URL and the handler
 //! verifies the board's `workspace_id` matches before proceeding.
@@ -18,13 +19,20 @@
 
 use axum::extract::Path;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::Json;
+use futures_util::stream;
 use serde::Deserialize;
+use std::convert::Infallible;
+use std::time::Duration;
 
 use crate::api::responses::DataResponse;
 use crate::error::AppError;
+use crate::service::kanban::try_automate_lane;
+use crate::sse::SseWireEvent;
 use crate::store::boards::{BoardStore, NewColumnSpec};
-use crate::store::columns::ColumnStore;
+use crate::store::columns::{Column, ColumnStore};
+use crate::store::providers::ProviderStore;
 use crate::store::tasks::{Task, TaskStore, UpdateTask};
 use crate::AppState;
 
@@ -256,6 +264,15 @@ pub async fn create_column(
         body.specialist_id.as_deref(),
         body.auto_trigger.unwrap_or(false),
     )?;
+    let column_json = serde_json::to_value(&column).map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("failed to serialize column for SSE: {e}"))
+    })?;
+    state.sse_manager.broadcast(
+        &format!("board:{}", board_id),
+        SseWireEvent::ColumnAdded {
+            column: column_json,
+        },
+    );
     Ok((StatusCode::CREATED, Json(DataResponse { data: column })))
 }
 
@@ -325,6 +342,13 @@ pub async fn create_card(
         body.position,
         body.status.as_deref(),
     )?;
+    let task_json = serde_json::to_value(&task).map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("failed to serialize task for SSE: {e}"))
+    })?;
+    state.sse_manager.broadcast(
+        &format!("board:{}", board_id),
+        SseWireEvent::TaskCreated { task: task_json },
+    );
     Ok((StatusCode::CREATED, Json(DataResponse { data: task })))
 }
 
@@ -332,17 +356,81 @@ pub async fn create_card(
 ///
 /// Supports any subset of the editable fields. Use `column_id` to
 /// move a task between columns; the move triggers an automatic
-/// position rebalance in the target column.
+/// position rebalance in the target column, then runs lane automation
+/// if the destination column has `auto_trigger=true`.
 pub async fn update_task(
     axum::Extension(state): axum::Extension<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateTaskRequest>,
 ) -> Result<Json<DataResponse<Task>>, AppError> {
-    // Workspace scoping: the workspace comes from the board, which
-    // comes from the task. Fetch the task first to find its workspace.
-    // (No workspace_id on the URL; the API must derive it from the task.)
     let fields = UpdateTask::from(body);
-    let updated = apply_task_update(&state.db, &id, &fields)?;
+    let column_changed = fields.column_id.is_some();
+    let old_column_id = if column_changed {
+        // Capture the pre-move column so we can broadcast `task_moved`
+        // with the right `from_column_id`. The task lookup is one extra
+        // SQL hit per move, but moves are infrequent.
+        Some(lookup_task_column_id(&state.db, &id)?)
+    } else {
+        None
+    };
+    // Cache the destination column for the auto-trigger path. We fetch
+    // it once and reuse for the precheck AND the post-move automation —
+    // the previous version fetched it twice (one extra SQL roundtrip per
+    // move) and had a small TOCTOU window where auto_trigger could
+    // toggle between the two reads.
+    let dest_column: Option<Column> = fields
+        .column_id
+        .as_deref()
+        .map(|dest_id| ColumnStore::get_by_id(&state.db, dest_id))
+        .transpose()?;
+
+    // Pre-check: if the move targets an auto-trigger column, validate
+    // provider + specialist BEFORE the move commits. A 4xx here leaves
+    // the task in its current column — recoverable, no orphan state.
+    if let Some(ref col) = dest_column {
+        if col.auto_trigger {
+            try_automate_lane_precheck(&state, col)?;
+        }
+    }
+    let mut updated = apply_task_update(&state.db, &id, &fields)?;
+
+    // Lane automation (after the move, when targeting an auto-trigger
+    // column). Errors propagate as 4xx/5xx.
+    if let Some(ref col) = dest_column {
+        if col.auto_trigger {
+            try_automate_lane(&state, &updated, col).await?;
+            // Re-fetch: try_automate_lane sets `session_id` on the task.
+            let workspace_id = lookup_workspace_for_task(&state.db, &id)?;
+            updated = TaskStore::get_by_id(&state.db, &id, &workspace_id)?;
+        }
+    }
+
+    // Broadcast the board-scoped lifecycle event. Use `task_moved` for
+    // column changes (carries from/to), `task_updated` otherwise.
+    let board_id = updated.board_id.clone();
+    if column_changed {
+        let from_column_id = old_column_id.unwrap_or_default();
+        let to_column_id = updated.column_id.clone();
+        let task_json = serde_json::to_value(&updated).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to serialize task for SSE: {e}"))
+        })?;
+        state.sse_manager.broadcast(
+            &format!("board:{}", board_id),
+            SseWireEvent::TaskMoved {
+                task: task_json,
+                from_column_id,
+                to_column_id,
+            },
+        );
+    } else {
+        let task_json = serde_json::to_value(&updated).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("failed to serialize task for SSE: {e}"))
+        })?;
+        state.sse_manager.broadcast(
+            &format!("board:{}", board_id),
+            SseWireEvent::TaskUpdated { task: task_json },
+        );
+    }
     Ok(Json(DataResponse { data: updated }))
 }
 
@@ -351,11 +439,281 @@ pub async fn delete_task(
     axum::Extension(state): axum::Extension<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<DataResponse<()>>, AppError> {
-    // Find the task's workspace for scoping. This is a 2-query
-    // overhead (find workspace, then delete scoped). Acceptable.
+    // Find the task's workspace + board + column for scoping and
+    // for the SSE broadcast payload. 2-query overhead.
     let workspace_id = lookup_workspace_for_task(&state.db, &id)?;
+    let column_id = lookup_task_column_id(&state.db, &id)?;
+    let board_id: String = state
+        .db
+        .conn()
+        .query_row("SELECT board_id FROM tasks WHERE id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                resource: "task".into(),
+                id: id.clone(),
+            },
+            other => other.into(),
+        })?;
     TaskStore::delete(&state.db, &id, &workspace_id)?;
+    state.sse_manager.broadcast(
+        &format!("board:{}", board_id),
+        SseWireEvent::TaskDeleted {
+            task_id: id,
+            column_id,
+        },
+    );
     Ok(Json(DataResponse { data: () }))
+}
+
+// ---------------------------------------------------------------------------
+// SSE handler
+// ---------------------------------------------------------------------------
+
+/// Cadence of the explicit JSON heartbeat emitted on the board stream.
+///
+/// 15s matches the spec (`feature_list.json:256`). The comment-style
+/// keep-alive from axum's `KeepAlive::default()` is invisible to JS;
+/// the spec wants an observable `{"type":"heartbeat"}` event.
+const BOARD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Build the `{"type":"heartbeat"}` SSE event for the board stream.
+///
+/// Factored out so the shape can be tested without sleeping 15s.
+fn build_heartbeat_event() -> Event {
+    let data = serde_json::to_string(&SseWireEvent::Heartbeat {})
+        .unwrap_or_else(|_| "{\"type\":\"heartbeat\"}".to_string());
+    Event::default().event("heartbeat").data(data)
+}
+
+/// GET /api/boards/{bid}/stream
+///
+/// SSE stream of board-scoped events (`task_created`, `task_moved`,
+/// `task_updated`, `task_deleted`, `column_added`, `session_started`).
+/// Emits a `connected` event on mount, replays buffered events on
+/// reconnect with `Last-Event-ID`, then transitions to live. A JSON
+/// `{"type":"heartbeat"}` event is emitted every 15s.
+pub async fn board_stream(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(board_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let board_exists = BoardStore::get_by_id(&state.db, &board_id).is_ok();
+    let last_event_id: Option<u64> = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let sse_manager = state.sse_manager.clone();
+    let bid = board_id.clone();
+
+    // State machine for the board stream. Mirrors `session_stream`'s
+    // shape but uses `board:{bid}` as the entity id and races the
+    // live receiver against a 15s heartbeat.
+    enum BoardSseState {
+        Initial,
+        Buffered(
+            Vec<crate::sse::BufferedEvent>,
+            usize,
+            tokio::sync::broadcast::Receiver<SseWireEvent>,
+            u64,
+        ),
+        /// `next_heartbeat` is the absolute `Instant` of the next heartbeat
+        /// emission. The deadline is preserved across loop iterations so a
+        /// flood of live events cannot reset the cadence.
+        Live(
+            tokio::sync::broadcast::Receiver<SseWireEvent>,
+            u64,
+            tokio::time::Instant,
+        ),
+        Done,
+    }
+
+    let sse_stream = stream::unfold(
+        (
+            sse_manager,
+            bid,
+            last_event_id,
+            BoardSseState::Initial,
+            board_exists,
+        ),
+        |(mgr, bid, last_id, state, board_exists)| async move {
+            match state {
+                BoardSseState::Initial => {
+                    if !board_exists {
+                        let error_data = serde_json::to_string(&SseWireEvent::Error {
+                            message: "board not found".into(),
+                        })
+                        .unwrap_or_default();
+                        let err = Event::default().event("error").data(error_data);
+                        return Some((Ok(err), (mgr, bid, last_id, BoardSseState::Done, false)));
+                    }
+
+                    // Connected event (no ID — protocol marker, not replayed).
+                    // The `session_id` field is empty for board streams; the
+                    // board id is in the URL.
+                    let connected_data = serde_json::to_string(&SseWireEvent::Connected {
+                        session_id: String::new(),
+                    })
+                    .unwrap_or_default();
+                    let connected = Event::default().event("connected").data(connected_data);
+
+                    let entity = format!("board:{}", bid);
+                    let rx = mgr.subscribe(&entity);
+
+                    // Skip replay on a fresh mount (no Last-Event-ID) so
+                    // the frontend doesn't re-apply stale events from a
+                    // prior session. Reconnects WITH Last-Event-ID
+                    // receive buffered events.
+                    let buffered = match last_id {
+                        Some(after_id) => mgr.get_after(&entity, after_id),
+                        None => Vec::new(),
+                    };
+                    let max_id = buffered.last().map(|e| e.id).unwrap_or(0);
+                    if !buffered.is_empty() {
+                        Some((
+                            Ok(connected),
+                            (
+                                mgr,
+                                bid,
+                                last_id,
+                                BoardSseState::Buffered(buffered, 0, rx, max_id),
+                                true,
+                            ),
+                        ))
+                    } else {
+                        let first_heartbeat =
+                            tokio::time::Instant::now() + BOARD_HEARTBEAT_INTERVAL;
+                        Some((
+                            Ok(connected),
+                            (
+                                mgr,
+                                bid,
+                                last_id,
+                                BoardSseState::Live(rx, max_id, first_heartbeat),
+                                true,
+                            ),
+                        ))
+                    }
+                }
+                BoardSseState::Buffered(buffered, idx, rx, max_id) => {
+                    if idx < buffered.len() {
+                        let entry = &buffered[idx];
+                        let event = Event::default()
+                            .id(entry.id.to_string())
+                            .event(&entry.event_type)
+                            .data(&entry.data);
+                        Some((
+                            Ok(event),
+                            (
+                                mgr,
+                                bid,
+                                last_id,
+                                BoardSseState::Buffered(buffered, idx + 1, rx, max_id),
+                                true,
+                            ),
+                        ))
+                    } else {
+                        // Buffered done — transition to live.
+                        let complete = Event::default().event("buffered_complete").data("{}");
+                        let first_heartbeat =
+                            tokio::time::Instant::now() + BOARD_HEARTBEAT_INTERVAL;
+                        Some((
+                            Ok(complete),
+                            (
+                                mgr,
+                                bid,
+                                last_id,
+                                BoardSseState::Live(rx, max_id, first_heartbeat),
+                                true,
+                            ),
+                        ))
+                    }
+                }
+                BoardSseState::Live(mut rx, max_buffered_id, next_heartbeat) => loop {
+                    // Track the next heartbeat deadline across iterations.
+                    // The sleep is created from the absolute deadline so a
+                    // flood of live events does not reset the cadence — the
+                    // `select!` only re-arms the future, never the deadline.
+                    // The `biased` ordering polls the heartbeat first so a
+                    // long burst of events can't starve it.
+                    if tokio::time::Instant::now() >= next_heartbeat {
+                        let next = next_heartbeat + BOARD_HEARTBEAT_INTERVAL;
+                        return Some((
+                            Ok(build_heartbeat_event()),
+                            (
+                                mgr,
+                                bid,
+                                last_id,
+                                BoardSseState::Live(rx, max_buffered_id, next),
+                                true,
+                            ),
+                        ));
+                    }
+                    let heartbeat = tokio::time::sleep_until(next_heartbeat);
+                    tokio::select! {
+                        biased;
+                        _ = heartbeat => {
+                            let next = next_heartbeat + BOARD_HEARTBEAT_INTERVAL;
+                            return Some((
+                                Ok(build_heartbeat_event()),
+                                (mgr, bid, last_id, BoardSseState::Live(rx, max_buffered_id, next), true),
+                            ));
+                        }
+                        recv = rx.recv() => {
+                            match recv {
+                                Ok(wire_event) => {
+                                    let current_id = mgr.get_current_id(&format!("board:{}", bid));
+                                    let event_id = current_id.saturating_sub(1);
+                                    if event_id <= max_buffered_id {
+                                        continue;
+                                    }
+                                    let event_type = wire_event.event_type().to_string();
+                                    let data = crate::sse::sse_data(&wire_event);
+                                    let event = Event::default()
+                                        .id(event_id.to_string())
+                                        .event(&event_type)
+                                        .data(&data);
+                                    return Some((
+                                        Ok(event),
+                                        (
+                                            mgr,
+                                            bid,
+                                            last_id,
+                                            BoardSseState::Live(rx, max_buffered_id, next_heartbeat),
+                                            true,
+                                        ),
+                                    ));
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    let gap_data = serde_json::to_string(&SseWireEvent::Gap { missed: n })
+                                        .unwrap_or_default();
+                                    let gap = Event::default().event("gap").data(gap_data);
+                                    return Some((
+                                        Ok(gap),
+                                        (
+                                            mgr,
+                                            bid,
+                                            last_id,
+                                            BoardSseState::Live(rx, max_buffered_id, next_heartbeat),
+                                            true,
+                                        ),
+                                    ));
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return None;
+                                }
+                            }
+                        }
+                    }
+                },
+                BoardSseState::Done => None,
+            }
+        },
+    );
+
+    Sse::new(sse_stream)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +786,60 @@ fn lookup_workspace_for_task(
         })
 }
 
+/// Look up the current column id for a task. Used to capture
+/// `from_column_id` for the `task_moved` SSE broadcast.
+fn lookup_task_column_id(
+    db: &std::sync::Arc<crate::db::Db>,
+    task_id: &str,
+) -> Result<String, AppError> {
+    db.conn()
+        .query_row(
+            "SELECT column_id FROM tasks WHERE id = ?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                resource: "task".into(),
+                id: task_id.into(),
+            },
+            other => other.into(),
+        })
+}
+
+/// Pre-check the destination column for an auto-trigger move.
+///
+/// Runs BEFORE the move commits so a setup failure (no provider,
+/// specialist not loaded) leaves the task in its current column.
+/// Returns the `AppError` that would otherwise surface from
+/// `try_automate_lane` so the user sees a 400 before any state changes.
+fn try_automate_lane_precheck(state: &AppState, column: &Column) -> Result<(), AppError> {
+    // The precheck mirrors the early-bail logic in `try_automate_lane`:
+    // if either invariant fails we surface the same 400 the user would
+    // have gotten post-move, but with the task still in the old column.
+    let specialist_id = match column.specialist_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        // Defensive: validate_auto_trigger enforces this at column create/update.
+        _ => return Ok(()),
+    };
+    if state.specialists.get_by_name(specialist_id).is_none() {
+        return Err(AppError::Validation(format!(
+            "specialist '{specialist_id}' is not loaded; check resources/specialists/ \
+             for a markdown file with `name: {specialist_id}` in its frontmatter"
+        )));
+    }
+    // Provider check is cheap; do it here too so the user sees the
+    // clearer "no provider" error before the move.
+    if ProviderStore::list(&state.db)?.is_empty() {
+        return Err(AppError::Validation(
+            "no provider configured in workspace; add one via POST /api/providers \
+             before moving tasks to auto-trigger columns"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -467,6 +879,7 @@ mod tests {
                 "/api/tasks/{id}",
                 axum::routing::patch(update_task).delete(delete_task),
             )
+            .route("/api/boards/{bid}/stream", axum::routing::get(board_stream))
             .layer(axum::Extension(state))
     }
 
@@ -1340,5 +1753,388 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // --- feat-025: lane automation + board SSE tests ---
+
+    /// End-to-end lane automation. Subscribes to the board's SSE channel,
+    /// moves a card into an auto-trigger column, and asserts that:
+    /// (a) the move returns 200, (b) the task's `session_id` is set,
+    /// (c) a session row exists with the right specialist_id, (d) a
+    /// `task_moved` event was broadcast, (e) a `session_started` event
+    /// was broadcast. This is the verification target for feat-025.
+    #[tokio::test]
+    async fn test_lane_automation() {
+        use crate::store::kanban_test_helpers::seed_provider_and_specialist;
+
+        let mut state = make_test_state();
+        let (_provider_id, specialist_name) = seed_provider_and_specialist(&mut state, "dev");
+
+        let ws_id: String = state
+            .db
+            .conn()
+            .query_row("SELECT id FROM workspaces WHERE name='default'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        // Subscribe to the board channel BEFORE performing the move,
+        // otherwise we'd miss the broadcast.
+        let board_id = "test-board-id".to_string();
+        let mut rx = state.sse_manager.subscribe(&format!("board:{}", board_id));
+
+        // Insert a board with two columns; col-2 has auto_trigger=true.
+        let now = chrono::Utc::now().to_rfc3339();
+        let col1_id = "col-1".to_string();
+        let col2_id = "col-2".to_string();
+        state
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO boards (id, workspace_id, name, created_at) VALUES (?1, ?2, 'b', ?3)",
+                rusqlite::params![board_id, ws_id, now],
+            )
+            .unwrap();
+        state.db.conn().execute(
+            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
+             VALUES (?1, ?2, 'plain', 0, NULL, 0, ?3)",
+            rusqlite::params![col1_id, board_id, now],
+        ).unwrap();
+        state.db.conn().execute(
+            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
+             VALUES (?1, ?2, 'auto', 1024, ?3, 1, ?4)",
+            rusqlite::params![col2_id, board_id, specialist_name, now],
+        ).unwrap();
+
+        // Create a card in col-1 via the API.
+        let app = test_app(state.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/cards",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"column_id":"{}","title":"Implement auth","description":"use JWT"}}"#,
+                        col1_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let task_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Move the card to col-2 (auto-trigger).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/tasks/{}", task_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"column_id":"{}"}}"#, col2_id)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        let task_json = extract_json(&body)["data"].clone();
+        let session_id = task_json["session_id"].as_str();
+        assert!(
+            session_id.is_some(),
+            "task.session_id should be set after lane automation"
+        );
+
+        // Assert a session row exists with the right specialist.
+        let session =
+            crate::store::sessions::SessionStore::get_by_id(&state.db, session_id.unwrap())
+                .unwrap();
+        assert_eq!(
+            session.specialist_id.as_deref(),
+            Some(specialist_name.as_str())
+        );
+
+        // Assert the user message was persisted with the expected prompt.
+        let msgs = crate::store::sessions::MessageStore::list_by_session(
+            &state.db,
+            session_id.unwrap(),
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(msgs.data.len(), 1);
+        assert_eq!(msgs.data[0].role, "user");
+        assert_eq!(
+            msgs.data[0].content,
+            "Process task: Implement auth\nuse JWT"
+        );
+
+        // Drain the SSE receiver and assert task_moved + session_started arrived.
+        // Skip TaskCreated (the card creation also broadcast one) and other
+        // non-target events with `continue` so we don't break on the first
+        // non-matching variant.
+        let mut got_moved = false;
+        let mut got_started = false;
+        for _ in 0..10 {
+            if got_moved && got_started {
+                break;
+            }
+            match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+                Ok(Ok(SseWireEvent::TaskMoved {
+                    task,
+                    from_column_id,
+                    to_column_id,
+                })) => {
+                    assert_eq!(task["id"].as_str().unwrap(), task_id);
+                    assert_eq!(from_column_id, col1_id);
+                    assert_eq!(to_column_id, col2_id);
+                    got_moved = true;
+                }
+                Ok(Ok(SseWireEvent::SessionStarted {
+                    session_id: sid,
+                    task_id: tid,
+                    specialist_id,
+                    board_id: bid,
+                })) => {
+                    assert_eq!(sid, session_id.unwrap());
+                    assert_eq!(tid, task_id);
+                    assert_eq!(specialist_id, specialist_name);
+                    assert_eq!(bid, board_id);
+                    got_started = true;
+                }
+                Ok(Ok(_)) => continue, // skip TaskCreated, etc.
+                _ => break,
+            }
+        }
+        assert!(got_moved, "expected task_moved SSE event");
+        assert!(got_started, "expected session_started SSE event");
+    }
+
+    /// Defense-in-depth: no provider seeded → 400 before move.
+    #[tokio::test]
+    async fn test_lane_automation_no_provider_returns_400() {
+        let state = make_test_state();
+        let ws_id: String = state
+            .db
+            .conn()
+            .query_row("SELECT id FROM workspaces WHERE name='default'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let board_id = "b1".to_string();
+        let col1_id = "c1".to_string();
+        let col2_id = "c2".to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        state
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO boards (id, workspace_id, name, created_at) VALUES (?1, ?2, 'b', ?3)",
+                rusqlite::params![board_id, ws_id, now],
+            )
+            .unwrap();
+        state.db.conn().execute(
+            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
+             VALUES (?1, ?2, 'plain', 0, NULL, 0, ?3)",
+            rusqlite::params![col1_id, board_id, now],
+        ).unwrap();
+        state.db.conn().execute(
+            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
+             VALUES (?1, ?2, 'auto', 1024, 'dev', 1, ?3)",
+            rusqlite::params![col2_id, board_id, now],
+        ).unwrap();
+
+        let app = test_app(state.clone());
+        // Create a card in col-1
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/cards",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"column_id":"{}","title":"T"}}"#,
+                        col1_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let task_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Move to col-2 (no provider, no specialist) → 400
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/tasks/{}", task_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"column_id":"{}"}}"#, col2_id)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// All 5 kanban SSE events broadcast on their respective CRUD calls.
+    #[tokio::test]
+    async fn test_kanban_sse_events() {
+        let state = make_test_state();
+        let ws_id: String = state
+            .db
+            .conn()
+            .query_row("SELECT id FROM workspaces WHERE name='default'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let board_id = "b-sse".to_string();
+        let mut rx = state.sse_manager.subscribe(&format!("board:{}", board_id));
+        let now = chrono::Utc::now().to_rfc3339();
+        let col1_id = "c-sse-1".to_string();
+        state
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO boards (id, workspace_id, name, created_at) VALUES (?1, ?2, 'b', ?3)",
+                rusqlite::params![board_id, ws_id, now],
+            )
+            .unwrap();
+        state.db.conn().execute(
+            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
+             VALUES (?1, ?2, 'plain', 0, NULL, 0, ?3)",
+            rusqlite::params![col1_id, board_id, now],
+        ).unwrap();
+
+        let app = test_app(state.clone());
+        // CREATE card → task_created
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/cards",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"column_id":"{}","title":"T"}}"#,
+                        col1_id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let task_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // PATCH title only → task_updated
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/tasks/{}", task_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"Renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // DELETE task → task_deleted
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/tasks/{}", task_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // CREATE column → column_added
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/columns",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"another"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Drain and assert each variant was received.
+        let mut got_created = false;
+        let mut got_updated = false;
+        let mut got_deleted = false;
+        let mut got_column_added = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+                Ok(Ok(SseWireEvent::TaskCreated { .. })) => got_created = true,
+                Ok(Ok(SseWireEvent::TaskUpdated { .. })) => got_updated = true,
+                Ok(Ok(SseWireEvent::TaskDeleted { .. })) => got_deleted = true,
+                Ok(Ok(SseWireEvent::ColumnAdded { .. })) => got_column_added = true,
+                Ok(Ok(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(got_created, "expected task_created event");
+        assert!(got_updated, "expected task_updated event");
+        assert!(got_deleted, "expected task_deleted event");
+        assert!(got_column_added, "expected column_added event");
+    }
+
+    /// The heartbeat event builder produces the spec-mandated shape.
+    #[test]
+    fn test_heartbeat_event_shape() {
+        // We can't easily inspect an axum Event's internals; assert the
+        // call doesn't panic and the JSON wire shape is right.
+        let _event = build_heartbeat_event();
+        let data = serde_json::to_string(&SseWireEvent::Heartbeat {}).unwrap();
+        assert_eq!(data, "{\"type\":\"heartbeat\"}");
     }
 }

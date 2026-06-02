@@ -217,6 +217,35 @@ pub enum SseWireEvent {
     Gap {
         missed: u64,
     },
+    // Kanban board events (feat-025). Broadcast on entity_id `board:{bid}`.
+    // Task and column payloads use `serde_json::Value` so this enum stays
+    // decoupled from the `store::*` types — the kanban API serializes the
+    // full struct once and passes the JSON.
+    TaskCreated {
+        task: serde_json::Value,
+    },
+    TaskMoved {
+        task: serde_json::Value,
+        from_column_id: String,
+        to_column_id: String,
+    },
+    TaskUpdated {
+        task: serde_json::Value,
+    },
+    TaskDeleted {
+        task_id: String,
+        column_id: String,
+    },
+    ColumnAdded {
+        column: serde_json::Value,
+    },
+    SessionStarted {
+        session_id: String,
+        task_id: String,
+        specialist_id: String,
+        board_id: String,
+    },
+    Heartbeat {},
 }
 
 impl SseWireEvent {
@@ -233,6 +262,13 @@ impl SseWireEvent {
             Self::MessagePersisted { .. } => "message_persisted",
             Self::Connected { .. } => "connected",
             Self::Gap { .. } => "gap",
+            Self::TaskCreated { .. } => "task_created",
+            Self::TaskMoved { .. } => "task_moved",
+            Self::TaskUpdated { .. } => "task_updated",
+            Self::TaskDeleted { .. } => "task_deleted",
+            Self::ColumnAdded { .. } => "column_added",
+            Self::SessionStarted { .. } => "session_started",
+            Self::Heartbeat { .. } => "heartbeat",
         }
     }
 }
@@ -504,6 +540,159 @@ mod tests {
                 assert_eq!(stop_reason, agent::StopReason::EndTurn)
             }
             _ => panic!("expected Done"),
+        }
+    }
+
+    // --- feat-025: kanban board event tests ---
+
+    #[test]
+    fn test_kanban_event_types() {
+        let task_json = serde_json::json!({"id": "t-1", "title": "T"});
+        let col_json = serde_json::json!({"id": "c-1", "name": "C"});
+        assert_eq!(
+            SseWireEvent::TaskCreated {
+                task: task_json.clone()
+            }
+            .event_type(),
+            "task_created"
+        );
+        assert_eq!(
+            SseWireEvent::TaskMoved {
+                task: task_json.clone(),
+                from_column_id: "c1".into(),
+                to_column_id: "c2".into(),
+            }
+            .event_type(),
+            "task_moved"
+        );
+        assert_eq!(
+            SseWireEvent::TaskUpdated {
+                task: task_json.clone()
+            }
+            .event_type(),
+            "task_updated"
+        );
+        assert_eq!(
+            SseWireEvent::TaskDeleted {
+                task_id: "t".into(),
+                column_id: "c".into(),
+            }
+            .event_type(),
+            "task_deleted"
+        );
+        assert_eq!(
+            SseWireEvent::ColumnAdded { column: col_json }.event_type(),
+            "column_added"
+        );
+        assert_eq!(
+            SseWireEvent::SessionStarted {
+                session_id: "s".into(),
+                task_id: "t".into(),
+                specialist_id: "dev".into(),
+                board_id: "b".into(),
+            }
+            .event_type(),
+            "session_started"
+        );
+        assert_eq!(SseWireEvent::Heartbeat {}.event_type(), "heartbeat");
+    }
+
+    #[test]
+    fn test_kanban_event_serde_shapes() {
+        // Each variant serializes to {"type":"<name>", ...} with the
+        // expected payload fields. Frontend distinguishes by `type`.
+        let task_json = serde_json::json!({"id": "t-1", "title": "T"});
+        let col_json = serde_json::json!({"id": "c-1", "name": "C"});
+
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::TaskCreated {
+            task: task_json.clone(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "task_created");
+        assert_eq!(v["task"]["id"], "t-1");
+
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::TaskMoved {
+            task: task_json.clone(),
+            from_column_id: "c1".into(),
+            to_column_id: "c2".into(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "task_moved");
+        assert_eq!(v["from_column_id"], "c1");
+        assert_eq!(v["to_column_id"], "c2");
+
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::TaskUpdated {
+            task: task_json.clone(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "task_updated");
+        assert_eq!(v["task"]["title"], "T");
+
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::TaskDeleted {
+            task_id: "t-1".into(),
+            column_id: "c-1".into(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "task_deleted");
+        assert_eq!(v["task_id"], "t-1");
+        assert_eq!(v["column_id"], "c-1");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&sse_data(&SseWireEvent::ColumnAdded { column: col_json }))
+                .unwrap();
+        assert_eq!(v["type"], "column_added");
+        assert_eq!(v["column"]["name"], "C");
+
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::SessionStarted {
+            session_id: "s-1".into(),
+            task_id: "t-1".into(),
+            specialist_id: "dev".into(),
+            board_id: "b-1".into(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "session_started");
+        assert_eq!(v["session_id"], "s-1");
+        assert_eq!(v["task_id"], "t-1");
+        assert_eq!(v["specialist_id"], "dev");
+        assert_eq!(v["board_id"], "b-1");
+
+        // Heartbeat is the empty-payload sentinel — the data line is
+        // exactly `{"type":"heartbeat"}`.
+        let v: serde_json::Value =
+            serde_json::from_str(&sse_data(&SseWireEvent::Heartbeat {})).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "heartbeat"}));
+    }
+
+    #[tokio::test]
+    async fn test_session_started_broadcast_and_receive() {
+        let manager = SseManager::new();
+        let mut rx = manager.subscribe("board:b-1");
+
+        let id = manager.broadcast(
+            "board:b-1",
+            SseWireEvent::SessionStarted {
+                session_id: "s-1".into(),
+                task_id: "t-1".into(),
+                specialist_id: "dev".into(),
+                board_id: "b-1".into(),
+            },
+        );
+        assert_eq!(id, 1);
+
+        let received = rx.recv().await.unwrap();
+        match received {
+            SseWireEvent::SessionStarted {
+                session_id,
+                task_id,
+                specialist_id,
+                board_id,
+            } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(task_id, "t-1");
+                assert_eq!(specialist_id, "dev");
+                assert_eq!(board_id, "b-1");
+            }
+            _ => panic!("expected SessionStarted"),
         }
     }
 }
