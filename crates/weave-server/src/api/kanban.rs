@@ -56,6 +56,12 @@ pub struct CreateColumnInline {
     pub position: Option<i64>,
     pub specialist_id: Option<String>,
     pub auto_trigger: Option<bool>,
+    // Transition-gate fields (feat-028, migration 006). The HTTP API does
+    // not yet expose these to clients — defaults to `None` / no-op. A
+    // future feature can add setters without changing the DTO shape.
+    pub freeze_description: Option<bool>,
+    pub required_fields: Option<Vec<String>>,
+    pub required_artifact_types: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +75,9 @@ pub struct CreateColumnRequest {
     pub position: Option<i64>,
     pub specialist_id: Option<String>,
     pub auto_trigger: Option<bool>,
+    pub freeze_description: Option<bool>,
+    pub required_fields: Option<Vec<String>>,
+    pub required_artifact_types: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +87,9 @@ pub struct UpdateColumnRequest {
     /// `Some(None)` clears the specialist binding. `None` leaves it unchanged.
     pub specialist_id: Option<Option<String>>,
     pub auto_trigger: Option<bool>,
+    pub freeze_description: Option<bool>,
+    pub required_fields: Option<Vec<String>>,
+    pub required_artifact_types: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -152,6 +164,9 @@ pub async fn create_board(
                 position: c.position,
                 specialist_id: c.specialist_id.as_deref(),
                 auto_trigger: c.auto_trigger.unwrap_or(false),
+                freeze_description: c.freeze_description.unwrap_or(false),
+                required_fields: c.required_fields.clone().unwrap_or_default(),
+                required_artifact_types: c.required_artifact_types.clone().unwrap_or_default(),
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -263,6 +278,9 @@ pub async fn create_column(
         body.position,
         body.specialist_id.as_deref(),
         body.auto_trigger.unwrap_or(false),
+        body.freeze_description,
+        body.required_fields.as_deref(),
+        body.required_artifact_types.as_deref(),
     )?;
     let column_json = serde_json::to_value(&column).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to serialize column for SSE: {e}"))
@@ -301,6 +319,9 @@ pub async fn update_column(
         body.position,
         body.specialist_id.as_ref().map(|s| s.as_deref()),
         body.auto_trigger,
+        body.freeze_description,
+        body.required_fields.as_deref(),
+        body.required_artifact_types.as_deref(),
     )?;
     Ok(Json(DataResponse { data: column }))
 }

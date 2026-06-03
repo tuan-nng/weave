@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod fs;
 pub mod git;
+pub mod kanban;
 pub mod shell;
 pub mod task;
 
@@ -141,7 +142,10 @@ impl ToolRegistry {
                 "get_task".to_string(),
                 "list_tasks".to_string(),
                 "update_task_fields".to_string(),
-                "kanban".to_string(),
+                "get_board".to_string(),
+                "create_card".to_string(),
+                "move_card".to_string(),
+                "search_cards".to_string(),
                 "notes".to_string(),
             ],
         );
@@ -311,10 +315,22 @@ pub(crate) mod test_support {
 
     /// Create a `ToolContext` for testing with the given root path.
     pub(crate) fn make_context(root: &std::path::Path) -> super::ToolContext {
+        make_context_for_workspace(root, "test-workspace")
+    }
+
+    /// Create a `ToolContext` for testing with a specific workspace id.
+    ///
+    /// Used by tests that seed data via `kanban_test_helpers::seed_workspace_with_board`,
+    /// which uses the default workspace UUID — those tests need a context
+    /// whose `workspace_id` matches the seeded workspace.
+    pub(crate) fn make_context_for_workspace(
+        root: &std::path::Path,
+        workspace_id: &str,
+    ) -> super::ToolContext {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         super::ToolContext {
             session_id: "test-session".to_string(),
-            workspace_id: "test-workspace".to_string(),
+            workspace_id: workspace_id.to_string(),
             cwd: root.to_path_buf(),
             codebase_root: root.to_path_buf(),
             trace_collector: std::sync::Arc::new(super::TraceCollector::new(tx)),

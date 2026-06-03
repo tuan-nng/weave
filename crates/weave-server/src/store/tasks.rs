@@ -13,6 +13,20 @@ use crate::store::columns::rebalance_column;
 /// both the HTTP PATCH endpoint and the agent tool `update_task_status`.
 pub(crate) const VALID_TASK_STATUSES: &[&str] = &["active", "done", "archived"];
 
+/// Validate a user-supplied task status. Returns the same
+/// `AppError::Validation` message the HTTP API uses; canonical for
+/// every call site (HTTP handlers, agent tools, store methods).
+pub(crate) fn validate_status(s: &str) -> Result<(), AppError> {
+    if !VALID_TASK_STATUSES.contains(&s) {
+        return Err(AppError::Validation(format!(
+            "invalid task status '{}'; valid values: {}",
+            s,
+            VALID_TASK_STATUSES.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Default maximum number of tasks returned by `list`.
 const DEFAULT_LIST_LIMIT: u32 = 500;
 
@@ -94,13 +108,7 @@ impl TaskStore {
         status: Option<&str>,
     ) -> Result<Task, AppError> {
         let status = status.unwrap_or("active");
-        if !VALID_TASK_STATUSES.contains(&status) {
-            return Err(AppError::Validation(format!(
-                "invalid task status '{}'; valid values: {}",
-                status,
-                VALID_TASK_STATUSES.join(", ")
-            )));
-        }
+        validate_status(status)?;
         if !column_belongs_to_board(db, column_id, board_id)? {
             return Err(AppError::Validation(format!(
                 "column '{}' does not belong to board '{}'",
@@ -177,12 +185,20 @@ impl TaskStore {
     ///
     /// All filters are AND-ed. Returns matching tasks ordered by position ASC, id ASC.
     /// Results are capped at `DEFAULT_LIST_LIMIT` rows.
+    ///
+    /// `query` is a free-text substring matched against `title` and
+    /// `description` (case-insensitive via SQLite's default `LIKE`
+    /// collation for ASCII). Empty/whitespace `query` is treated as `None`.
+    /// The query is bound as a parameter — `LIKE` wildcards (`%`, `_`) in
+    /// the user input are treated as wildcards (intentional, matches `grep` UX).
+    #[allow(clippy::too_many_arguments)]
     pub fn list(
         db: &Db,
         workspace_id: &str,
         board_id: Option<&str>,
         column_id: Option<&str>,
         status: Option<&str>,
+        query: Option<&str>,
     ) -> Result<Vec<Task>, AppError> {
         let mut sql = format!(
             "SELECT {SELECT_COLS}
@@ -207,6 +223,13 @@ impl TaskStore {
         if let Some(s) = status {
             sql.push_str(&format!(" AND t.status = ?{idx}"));
             params.push(Box::new(s.to_string()));
+            idx += 1;
+        }
+        if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+            sql.push_str(&format!(
+                " AND (t.title LIKE ?{idx} OR t.description LIKE ?{idx})"
+            ));
+            params.push(Box::new(format!("%{}%", q)));
         }
 
         sql.push_str(&format!(
@@ -233,7 +256,7 @@ impl TaskStore {
         workspace_id: &str,
         board_id: &str,
     ) -> Result<Vec<Task>, AppError> {
-        Self::list(db, workspace_id, Some(board_id), None, None)
+        Self::list(db, workspace_id, Some(board_id), None, None, None)
     }
 
     /// Update task status with validation, scoped to a workspace.
@@ -245,13 +268,7 @@ impl TaskStore {
         workspace_id: &str,
         new_status: &str,
     ) -> Result<Task, AppError> {
-        if !VALID_TASK_STATUSES.contains(&new_status) {
-            return Err(AppError::Validation(format!(
-                "invalid task status '{}'; valid values: {}",
-                new_status,
-                VALID_TASK_STATUSES.join(", ")
-            )));
-        }
+        validate_status(new_status)?;
 
         let now = Utc::now().to_rfc3339();
 
@@ -382,13 +399,7 @@ impl TaskStore {
         }
 
         if let Some(s) = fields.status.as_deref() {
-            if !VALID_TASK_STATUSES.contains(&s) {
-                return Err(AppError::Validation(format!(
-                    "invalid task status '{}'; valid values: {}",
-                    s,
-                    VALID_TASK_STATUSES.join(", ")
-                )));
-            }
+            validate_status(s)?;
         }
 
         let now = Utc::now().to_rfc3339();
@@ -699,7 +710,7 @@ mod tests {
         create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
         create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
 
-        let tasks = TaskStore::list(&db, &ws, None, None, None).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, None, None, None).unwrap();
         assert_eq!(tasks.len(), 2);
     }
 
@@ -711,7 +722,7 @@ mod tests {
         create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
         create_test_task(&db, &ws, &board_id, &col_id, "Task 3", "active");
 
-        let tasks = TaskStore::list(&db, &ws, None, None, Some("active")).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, None, Some("active"), None).unwrap();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|t| t.status == "active"));
     }
@@ -722,7 +733,7 @@ mod tests {
         let (ws, board_id, col_id) = seed_workspace_with_board(&db);
         create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
 
-        let tasks = TaskStore::list(&db, &ws, None, Some(&col_id), None).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, Some(&col_id), None, None).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].column_id, col_id);
     }
@@ -734,8 +745,15 @@ mod tests {
         create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
         create_test_task(&db, &ws, &board_id, &col_id, "Task 2", "done");
 
-        let tasks =
-            TaskStore::list(&db, &ws, Some(&board_id), Some(&col_id), Some("active")).unwrap();
+        let tasks = TaskStore::list(
+            &db,
+            &ws,
+            Some(&board_id),
+            Some(&col_id),
+            Some("active"),
+            None,
+        )
+        .unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Task 1");
     }
@@ -744,7 +762,7 @@ mod tests {
     fn test_list_empty() {
         let db = test_db();
         let (ws, _, _) = seed_workspace_with_board(&db);
-        let tasks = TaskStore::list(&db, &ws, None, None, None).unwrap();
+        let tasks = TaskStore::list(&db, &ws, None, None, None, None).unwrap();
         assert!(tasks.is_empty());
     }
 
@@ -754,7 +772,7 @@ mod tests {
         let (ws, board_id, col_id) = seed_workspace_with_board(&db);
         create_test_task(&db, &ws, &board_id, &col_id, "Task 1", "active");
 
-        let tasks = TaskStore::list(&db, "other-ws", None, None, None).unwrap();
+        let tasks = TaskStore::list(&db, "other-ws", None, None, None, None).unwrap();
         assert!(tasks.is_empty());
     }
 

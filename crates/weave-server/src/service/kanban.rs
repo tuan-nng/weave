@@ -197,6 +197,99 @@ fn empty_update() -> UpdateTask {
 }
 
 // ---------------------------------------------------------------------------
+// Transition gates (feat-028)
+// ---------------------------------------------------------------------------
+
+/// Enforce the three transition gates (feat-028) on a cross-column move.
+///
+/// 1. **Description frozen on exit** — if `current_column.freeze_description`,
+///    the task must already have a non-empty `description`. The freeze
+///    means "by the time you leave this column, the description is
+///    captured".
+///
+/// 2. **Required fields on entry** — for each name in
+///    `dest_column.required_fields`, the task's corresponding field must
+///    be non-empty. Unknown field names are silently ignored (logged
+///    at debug level).
+///
+/// 3. **Required artifact types on entry** — STUB for feat-028. The
+///    schema ships on `columns` (migration 006) but the artifacts table
+///    is feat-031. The stub always passes. When feat-031 lands, replace
+///    the body of this branch with a query against `artifacts` and the
+///    `?` of `&dest_column.required_artifact_types` will resolve.
+///
+/// Pure function (read-only on the inputs, no I/O). Caller is expected
+/// to have already loaded the source and destination columns.
+///
+/// A same-column move (source.id == dest.id) is not a transition and
+/// short-circuits to `Ok(())` so callers don't have to special-case it.
+/// A no-policy default template (no freeze, no required fields, no
+/// required artifacts) also short-circuits before the per-field loop.
+pub fn check_transition_gates(
+    task: &Task,
+    current_column: &Column,
+    dest_column: &Column,
+) -> Result<(), AppError> {
+    // Same-column "move" is not a transition.
+    if current_column.id == dest_column.id {
+        return Ok(());
+    }
+
+    // Fast-path: no policies on either end of the move.
+    if !current_column.freeze_description
+        && dest_column.required_fields.is_empty()
+        && dest_column.required_artifact_types.is_empty()
+    {
+        return Ok(());
+    }
+
+    // Gate 1: description frozen on exit.
+    if current_column.freeze_description && is_blank(&task.description) {
+        return Err(AppError::Validation(format!(
+            "column '{}' freezes descriptions on exit; \
+             set task.description before moving out",
+            current_column.name
+        )));
+    }
+
+    // Gate 2: required fields on entry. Each name maps to a known
+    // `Task` field; unknown names are logged and skipped (column
+    // config may be stale relative to the schema).
+    for field_name in &dest_column.required_fields {
+        let value: &Option<String> = match field_name.as_str() {
+            "acceptance_criteria" => &task.acceptance_criteria,
+            "completion_summary" => &task.completion_summary,
+            "verification_report" => &task.verification_report,
+            _ => {
+                tracing::debug!(
+                    field = %field_name,
+                    "unknown required_field name; ignoring"
+                );
+                continue;
+            }
+        };
+        if is_blank(value) {
+            return Err(AppError::Validation(format!(
+                "column '{}' requires '{}' to be non-empty before entry",
+                dest_column.name, field_name
+            )));
+        }
+    }
+
+    // Gate 3: required artifact types on entry.
+    // STUB: always passes. feat-031 (artifacts) replaces this body.
+    // Touch the field so clippy doesn't flag it as unused.
+    let _stub_acknowledged = &dest_column.required_artifact_types;
+
+    Ok(())
+}
+
+/// `true` when the value is `None` or only whitespace.
+fn is_blank(s: &Option<String>) -> bool {
+    s.as_deref().map(str::trim).map_or(true, str::is_empty)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -205,14 +298,17 @@ mod tests {
     use super::*;
     use crate::store::kanban_test_helpers::{make_test_state, seed_provider_and_specialist};
 
-    fn default_column(auto_trigger: bool, specialist_id: Option<&str>) -> Column {
+    fn default_column(id: &str, auto_trigger: bool, specialist_id: Option<&str>) -> Column {
         Column {
-            id: "col-test".into(),
+            id: id.into(),
             board_id: "board-test".into(),
             name: "Test".into(),
             position: 0,
             specialist_id: specialist_id.map(String::from),
             auto_trigger,
+            freeze_description: false,
+            required_fields: vec![],
+            required_artifact_types: vec![],
             created_at: "2026-06-02T00:00:00Z".into(),
         }
     }
@@ -252,7 +348,7 @@ mod tests {
     #[tokio::test]
     async fn test_try_automate_lane_no_auto_trigger_is_noop() {
         let state = make_test_state();
-        let column = default_column(false, Some("dev"));
+        let column = default_column("col-test", false, Some("dev"));
         let task = task_with("T", None);
         let result = try_automate_lane(&state, &task, &column).await.unwrap();
         assert_eq!(result, None);
@@ -264,7 +360,7 @@ mod tests {
         // Defensive: if a column somehow has auto_trigger=true with no
         // specialist (the store's `validate_auto_trigger` should prevent
         // this), treat as non-auto.
-        let column = default_column(true, None);
+        let column = default_column("col-test", true, None);
         let task = task_with("T", None);
         let result = try_automate_lane(&state, &task, &column).await.unwrap();
         assert_eq!(result, None);
@@ -274,7 +370,7 @@ mod tests {
     async fn test_try_automate_lane_no_provider_returns_400_equivalent() {
         let state = make_test_state();
         // No `seed_provider` call — registry is empty.
-        let column = default_column(true, Some("dev"));
+        let column = default_column("col-test", true, Some("dev"));
         let task = task_with("T", None);
         let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
         match err {
@@ -288,13 +384,160 @@ mod tests {
         let mut state = make_test_state();
         let (_provider_id, _specialist_name) = seed_provider_and_specialist(&mut state, "loaded");
         // Column references a different specialist that isn't loaded.
-        let column = default_column(true, Some("ghost"));
+        let column = default_column("col-test", true, Some("ghost"));
         let task = task_with("T", None);
         let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
         match err {
             AppError::Validation(msg) => {
                 assert!(msg.contains("ghost"), "got: {msg}");
                 assert!(msg.contains("not loaded"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // check_transition_gates tests (feat-028)
+    // -----------------------------------------------------------------------
+
+    fn gate_column(
+        id: &str,
+        freeze: bool,
+        req_fields: Vec<&str>,
+        req_artifacts: Vec<&str>,
+    ) -> Column {
+        let mut c = default_column(id, false, None);
+        c.name = "Gate".into();
+        c.freeze_description = freeze;
+        c.required_fields = req_fields.into_iter().map(String::from).collect();
+        c.required_artifact_types = req_artifacts.into_iter().map(String::from).collect();
+        c
+    }
+
+    #[test]
+    fn test_check_transition_gates_no_policies_passes() {
+        let task = task_with("T", None);
+        let src = default_column("col-src", false, None);
+        let dst = default_column("col-dst", false, None);
+        check_transition_gates(&task, &src, &dst).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_freeze_blocks_empty_description() {
+        let task = task_with("T", None); // no description
+        let src = gate_column("col-src", true, vec![], vec![]);
+        let dst = default_column("col-dst", false, None);
+        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("freezes descriptions"), "got: {msg}");
+                assert!(msg.contains("set task.description"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_transition_gates_freeze_allows_non_empty_description() {
+        let task = task_with("T", Some("body"));
+        let src = gate_column("col-src", true, vec![], vec![]);
+        let dst = default_column("col-dst", false, None);
+        check_transition_gates(&task, &src, &dst).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_freeze_allows_whitespace_only_as_blank() {
+        // Whitespace-only description is treated as blank — the gate rejects it.
+        let task = task_with("T", Some("   \n  "));
+        let src = gate_column("col-src", true, vec![], vec![]);
+        let dst = default_column("col-dst", false, None);
+        assert!(check_transition_gates(&task, &src, &dst).is_err());
+    }
+
+    #[test]
+    fn test_check_transition_gates_required_field_blocks_when_missing() {
+        let mut task = task_with("T", None);
+        task.description = Some("body".into()); // bypass freeze
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
+        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("acceptance_criteria"), "got: {msg}");
+                assert!(msg.contains("non-empty"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_transition_gates_required_field_passes_when_set() {
+        let mut task = task_with("T", None);
+        task.description = Some("body".into());
+        task.acceptance_criteria = Some("AC".into());
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
+        check_transition_gates(&task, &src, &dst).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_multiple_required_fields_all_must_be_set() {
+        let mut task = task_with("T", None);
+        task.description = Some("body".into());
+        task.acceptance_criteria = Some("AC".into());
+        // verification_report still missing
+        let src = default_column("col-src", false, None);
+        let dst = gate_column(
+            "col-dst",
+            false,
+            vec!["acceptance_criteria", "verification_report"],
+            vec![],
+        );
+        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("verification_report"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_transition_gates_unknown_required_field_name_silently_ignored() {
+        // Backwards-compat: a column with a stale field name must not
+        // brick every move. Unknown names are dropped (logged at debug).
+        let mut task = task_with("T", None);
+        task.description = Some("body".into());
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec!["made_up_field"], vec![]);
+        check_transition_gates(&task, &src, &dst).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_required_artifact_types_is_stub_passes() {
+        // STUB: feat-031 will replace this with a real artifacts check.
+        // For feat-028, the gate always passes regardless of the column's
+        // declared artifact requirements.
+        let mut task = task_with("T", None);
+        task.description = Some("body".into());
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec![], vec!["test_results", "screenshot"]);
+        check_transition_gates(&task, &src, &dst).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_freeze_and_required_combined() {
+        // A "Review" column with both freeze and required fields.
+        let mut task = task_with("T", None);
+        task.description = Some("body".into());
+        // acceptance_criteria still missing.
+        let src = gate_column("col-src", true, vec![], vec![]);
+        let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
+        // src freeze passes (description is set); dst required fails first.
+        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("acceptance_criteria"), "got: {msg}");
             }
             other => panic!("expected Validation, got {other:?}"),
         }

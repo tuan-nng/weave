@@ -11,6 +11,17 @@
 //! The `rebalance_column` free function renumbers all task positions
 //! within a column to `i64 * 1024` spacing when the column's positions
 //! have drifted too close together.
+//!
+//! Transition gate policy (added in feat-028, see migration 006):
+//!   - `freeze_description`: when true, tasks in this column must have a
+//!     non-empty `description` before they can be moved out. Enforced
+//!     in `service::kanban::check_transition_gates`.
+//!   - `required_fields`: JSON array of `tasks` field names that must be
+//!     non-empty on tasks entering this column. Valid names:
+//!     `acceptance_criteria`, `completion_summary`, `verification_report`.
+//!   - `required_artifact_types`: JSON array of artifact type names that
+//!     must be present on tasks entering this column. Schema-only for
+//!     feat-028 (the real artifacts table is feat-031).
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -29,6 +40,17 @@ pub struct Column {
     pub position: i64,
     pub specialist_id: Option<String>,
     pub auto_trigger: bool,
+    /// When true, a task in this column must have a non-empty `description`
+    /// before it can be moved out. Enforced in the move path
+    /// (`service::kanban::check_transition_gates`).
+    pub freeze_description: bool,
+    /// JSON-decoded list of `tasks` field names that must be non-empty on
+    /// tasks entering this column. Empty by default (no requirement).
+    pub required_fields: Vec<String>,
+    /// JSON-decoded list of artifact type names that must be present on
+    /// tasks entering this column. Empty by default. Schema-only for
+    /// feat-028 — the artifacts table (feat-031) is the source of truth.
+    pub required_artifact_types: Vec<String>,
     pub created_at: String,
 }
 
@@ -47,6 +69,11 @@ impl ColumnStore {
     ///
     /// Returns the created row, including its server-assigned `position`
     /// when `position` was `None` (uses `max(position) + POSITION_STEP`).
+    ///
+    /// The three transition-gate fields default to `false`/`[]`/`[]` when
+    /// `None` is passed. Existing callers (HTTP API, default board
+    /// template) can ignore them.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         db: &Db,
         board_id: &str,
@@ -54,17 +81,32 @@ impl ColumnStore {
         position: Option<i64>,
         specialist_id: Option<&str>,
         auto_trigger: bool,
+        freeze_description: Option<bool>,
+        required_fields: Option<&[String]>,
+        required_artifact_types: Option<&[String]>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         db.with_transaction(|conn| {
-            Self::create_tx(conn, board_id, name, position, specialist_id, auto_trigger)
+            Self::create_tx(
+                conn,
+                board_id,
+                name,
+                position,
+                specialist_id,
+                auto_trigger,
+                freeze_description,
+                required_fields,
+                required_artifact_types,
+            )
         })
     }
 
     /// Insert a column inside an existing transaction.
     ///
     /// Used by `BoardStore::create` to atomically insert template columns.
-    /// Auto-trigger guard is also enforced here.
+    /// Auto-trigger guard is also enforced here. The three transition-gate
+    /// fields default to `false`/`[]`/`[]` when `None` is passed.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_tx(
         conn: &Connection,
         board_id: &str,
@@ -72,16 +114,25 @@ impl ColumnStore {
         position: Option<i64>,
         specialist_id: Option<&str>,
         auto_trigger: bool,
+        freeze_description: Option<bool>,
+        required_fields: Option<&[String]>,
+        required_artifact_types: Option<&[String]>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         let resolved_position = match position {
             Some(p) => p,
             None => next_position_in_column(conn, board_id)?,
         };
+        let freeze = freeze_description.unwrap_or(false);
+        let req_fields_json = json_string_vec(required_fields.unwrap_or(&[]))?;
+        let req_artifacts_json = json_string_vec(required_artifact_types.unwrap_or(&[]))?;
         conn.query_row(
-            "INSERT INTO columns (id, board_id, name, position, specialist_id, auto_trigger, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             RETURNING id, board_id, name, position, specialist_id, auto_trigger, created_at",
+            "INSERT INTO columns
+                (id, board_id, name, position, specialist_id, auto_trigger,
+                 freeze_description, required_fields, required_artifact_types, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             RETURNING id, board_id, name, position, specialist_id, auto_trigger,
+                       freeze_description, required_fields, required_artifact_types, created_at",
             rusqlite::params![
                 Uuid::new_v4().to_string(),
                 board_id,
@@ -89,6 +140,9 @@ impl ColumnStore {
                 resolved_position,
                 specialist_id,
                 auto_trigger as i64,
+                freeze as i64,
+                req_fields_json,
+                req_artifacts_json,
                 Utc::now().to_rfc3339(),
             ],
             Self::map_row,
@@ -97,6 +151,12 @@ impl ColumnStore {
     }
 
     /// Update a column's editable fields.
+    ///
+    /// The three transition-gate fields are `Option`-wrapped: `None` means
+    /// "no change", `Some(_)` means "set to this value". The
+    /// `required_fields` / `required_artifact_types` lists replace the
+    /// stored list wholesale (no merge).
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         db: &Db,
         column_id: &str,
@@ -104,6 +164,9 @@ impl ColumnStore {
         position: Option<i64>,
         specialist_id: Option<Option<&str>>,
         auto_trigger: Option<bool>,
+        freeze_description: Option<bool>,
+        required_fields: Option<&[String]>,
+        required_artifact_types: Option<&[String]>,
     ) -> Result<Column, AppError> {
         // Resolve the effective auto_trigger/specialist_id for validation.
         // The `Option<Option<T>>` pattern lets the caller pass:
@@ -142,6 +205,23 @@ impl ColumnStore {
             params.push(Box::new(at as i64));
             idx += 1;
         }
+        if let Some(f) = freeze_description {
+            sets.push(format!("freeze_description = ?{idx}"));
+            params.push(Box::new(f as i64));
+            idx += 1;
+        }
+        if let Some(rf) = required_fields {
+            let json = json_string_vec(rf)?;
+            sets.push(format!("required_fields = ?{idx}"));
+            params.push(Box::new(json));
+            idx += 1;
+        }
+        if let Some(ra) = required_artifact_types {
+            let json = json_string_vec(ra)?;
+            sets.push(format!("required_artifact_types = ?{idx}"));
+            params.push(Box::new(json));
+            idx += 1;
+        }
 
         // No-op when nothing to update — return current state.
         if sets.is_empty() {
@@ -151,7 +231,8 @@ impl ColumnStore {
         let cid_idx = idx;
         let sql = format!(
             "UPDATE columns SET {} WHERE id = ?{cid_idx}
-             RETURNING id, board_id, name, position, specialist_id, auto_trigger, created_at",
+             RETURNING id, board_id, name, position, specialist_id, auto_trigger,
+                       freeze_description, required_fields, required_artifact_types, created_at",
             sets.join(", ")
         );
         params.push(Box::new(column_id.to_string()));
@@ -173,7 +254,8 @@ impl ColumnStore {
     pub fn get_by_id(db: &Db, column_id: &str) -> Result<Column, AppError> {
         db.conn()
             .query_row(
-                "SELECT id, board_id, name, position, specialist_id, auto_trigger, created_at
+                "SELECT id, board_id, name, position, specialist_id, auto_trigger,
+                        freeze_description, required_fields, required_artifact_types, created_at
                  FROM columns WHERE id = ?1",
                 [column_id],
                 Self::map_row,
@@ -191,7 +273,8 @@ impl ColumnStore {
     pub fn list_by_board(db: &Db, board_id: &str) -> Result<Vec<Column>, AppError> {
         let conn = db.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, board_id, name, position, specialist_id, auto_trigger, created_at
+            "SELECT id, board_id, name, position, specialist_id, auto_trigger,
+                    freeze_description, required_fields, required_artifact_types, created_at
              FROM columns WHERE board_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
@@ -224,6 +307,13 @@ impl ColumnStore {
 
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Column> {
         let auto_trigger_i: i64 = row.get(5)?;
+        let freeze_i: i64 = row.get(6)?;
+        let req_fields_json: String = row.get(7)?;
+        let req_artifacts_json: String = row.get(8)?;
+        let required_fields =
+            parse_string_vec("required_fields", &req_fields_json).unwrap_or_default();
+        let required_artifact_types =
+            parse_string_vec("required_artifact_types", &req_artifacts_json).unwrap_or_default();
         Ok(Column {
             id: row.get(0)?,
             board_id: row.get(1)?,
@@ -231,9 +321,41 @@ impl ColumnStore {
             position: row.get(3)?,
             specialist_id: row.get(4)?,
             auto_trigger: auto_trigger_i != 0,
-            created_at: row.get(6)?,
+            freeze_description: freeze_i != 0,
+            required_fields,
+            required_artifact_types,
+            created_at: row.get(9)?,
         })
     }
+}
+
+/// Parse a JSON array of strings. Returns `None` for invalid JSON so
+/// the caller can fall back to the default (`Vec::new()`). A `warn!`
+/// is emitted on failure so corrupted rows don't silently disable
+/// policy enforcement (e.g. a bad `required_fields` payload would
+/// otherwise turn the column into a no-gate column without any
+/// operator signal).
+fn parse_string_vec(field: &'static str, json: &str) -> Option<Vec<String>> {
+    match serde_json::from_str::<Vec<String>>(json) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                field,
+                error = %e,
+                "malformed JSON in column field; treating as empty \
+                 (transition gates will not enforce this policy)"
+            );
+            None
+        }
+    }
+}
+
+/// Serialize a `&[String]` to a JSON array string. Wraps the
+/// `serde_json::Error` in `AppError::Internal` so the four call sites
+/// (create_tx + update × 2 fields) share one error-message wording.
+fn json_string_vec(slice: &[String]) -> Result<String, AppError> {
+    serde_json::to_string(slice)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize required fields array: {e}")))
 }
 
 /// Validate that `auto_trigger=true` requires `specialist_id`.
@@ -306,18 +428,23 @@ mod tests {
         let (_, bid, _) = seed_workspace_with_board(&db);
         // Seed inserts 'test-col' at position 0, so the next default
         // position is 0 + POSITION_STEP (1000).
-        let col = ColumnStore::create(&db, &bid, "To Do", None, None, false).unwrap();
+        let col =
+            ColumnStore::create(&db, &bid, "To Do", None, None, false, None, None, None).unwrap();
         assert_eq!(col.name, "To Do");
         assert_eq!(col.position, 1000);
         assert!(!col.auto_trigger);
         assert!(col.specialist_id.is_none());
+        assert!(!col.freeze_description);
+        assert!(col.required_fields.is_empty());
+        assert!(col.required_artifact_types.is_empty());
     }
 
     #[test]
     fn test_create_column_explicit_position() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
-        let col = ColumnStore::create(&db, &bid, "Done", Some(2048), None, false).unwrap();
+        let col = ColumnStore::create(&db, &bid, "Done", Some(2048), None, false, None, None, None)
+            .unwrap();
         assert_eq!(col.position, 2048);
     }
 
@@ -325,7 +452,7 @@ mod tests {
     fn test_create_column_auto_trigger_requires_specialist() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
-        let result = ColumnStore::create(&db, &bid, "Broken", None, None, true);
+        let result = ColumnStore::create(&db, &bid, "Broken", None, None, true, None, None, None);
         assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
@@ -333,16 +460,61 @@ mod tests {
     fn test_create_column_auto_trigger_with_specialist() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
-        let col = ColumnStore::create(&db, &bid, "Auto", None, Some("crafter"), true).unwrap();
+        let col = ColumnStore::create(
+            &db,
+            &bid,
+            "Auto",
+            None,
+            Some("crafter"),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(col.auto_trigger);
         assert_eq!(col.specialist_id.as_deref(), Some("crafter"));
+    }
+
+    #[test]
+    fn test_create_column_with_gate_fields() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let (_, bid, _) = seed_workspace_with_board(&db);
+        let req_fields = vec!["acceptance_criteria".to_string()];
+        let req_artifacts = vec!["test_results".to_string()];
+        let col = ColumnStore::create(
+            &db,
+            &bid,
+            "Review",
+            None,
+            None,
+            false,
+            Some(true),
+            Some(&req_fields),
+            Some(&req_artifacts),
+        )
+        .unwrap();
+        assert!(col.freeze_description);
+        assert_eq!(col.required_fields, req_fields);
+        assert_eq!(col.required_artifact_types, req_artifacts);
     }
 
     #[test]
     fn test_update_column_name() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, _bid, cid) = seed_workspace_with_board(&db);
-        let updated = ColumnStore::update(&db, &cid, Some("Renamed"), None, None, None).unwrap();
+        let updated = ColumnStore::update(
+            &db,
+            &cid,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(updated.name, "Renamed");
         assert_eq!(updated.id, cid);
     }
@@ -352,12 +524,23 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, _bid, cid) = seed_workspace_with_board(&db);
         // Turn on with specialist
-        let updated =
-            ColumnStore::update(&db, &cid, None, None, Some(Some("dev-crafter")), Some(true))
-                .unwrap();
+        let updated = ColumnStore::update(
+            &db,
+            &cid,
+            None,
+            None,
+            Some(Some("dev-crafter")),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(updated.auto_trigger);
         // Turn off
-        let updated = ColumnStore::update(&db, &cid, None, None, None, Some(false)).unwrap();
+        let updated =
+            ColumnStore::update(&db, &cid, None, None, None, Some(false), None, None, None)
+                .unwrap();
         assert!(!updated.auto_trigger);
     }
 
@@ -366,10 +549,45 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, _bid, cid) = seed_workspace_with_board(&db);
         // First turn on with specialist
-        ColumnStore::update(&db, &cid, None, None, Some(Some("crafter")), Some(true)).unwrap();
+        ColumnStore::update(
+            &db,
+            &cid,
+            None,
+            None,
+            Some(Some("crafter")),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         // Now try to clear specialist while auto_trigger is still on
-        let result = ColumnStore::update(&db, &cid, None, None, Some(None), None);
+        let result = ColumnStore::update(&db, &cid, None, None, Some(None), None, None, None, None);
         assert!(matches!(result, Err(AppError::Validation(_))));
+    }
+
+    #[test]
+    fn test_update_column_gate_fields() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let (_, _bid, cid) = seed_workspace_with_board(&db);
+        let req_fields = vec![
+            "completion_summary".to_string(),
+            "verification_report".to_string(),
+        ];
+        let updated = ColumnStore::update(
+            &db,
+            &cid,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(&req_fields),
+            None,
+        )
+        .unwrap();
+        assert!(updated.freeze_description);
+        assert_eq!(updated.required_fields, req_fields);
     }
 
     #[test]
@@ -377,9 +595,9 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
         // Seed inserts 'test-col' at position 0. Add 3 more at distinct positions.
-        ColumnStore::create(&db, &bid, "C", Some(3_072), None, false).unwrap();
-        ColumnStore::create(&db, &bid, "A", Some(1_024), None, false).unwrap();
-        ColumnStore::create(&db, &bid, "B", Some(2_048), None, false).unwrap();
+        ColumnStore::create(&db, &bid, "C", Some(3_072), None, false, None, None, None).unwrap();
+        ColumnStore::create(&db, &bid, "A", Some(1_024), None, false, None, None, None).unwrap();
+        ColumnStore::create(&db, &bid, "B", Some(2_048), None, false, None, None, None).unwrap();
 
         let cols = ColumnStore::list_by_board(&db, &bid).unwrap();
         assert_eq!(cols.len(), 4);

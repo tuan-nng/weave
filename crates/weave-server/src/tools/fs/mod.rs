@@ -279,6 +279,37 @@ pub fn error(message: impl Into<String>) -> ToolResult {
     }
 }
 
+/// Validate an optional task status. Returns `Err(ToolResult)` when the
+/// status is non-empty and not in the canonical list. `Ok(())` for `None`
+/// or a valid status. Delegates to the canonical `store::tasks::validate_status`.
+pub fn check_optional_status(s: Option<&str>) -> Result<(), ToolResult> {
+    if let Some(s) = s {
+        crate::store::tasks::validate_status(s).map_err(|e| error(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Max length for a card/task title. Mirrors the HTTP API's
+/// `MAX_TASK_TITLE_LEN` in `api/kanban.rs:41`. Kept as a tool-layer
+/// constant so the tool and the HTTP handler stay in sync; if the
+/// value is changed, update both.
+pub const MAX_TASK_TITLE_LEN: usize = 500;
+
+/// Validate a user-supplied card title. Returns the canonical error
+/// message shape (matching the HTTP handler at `api/kanban.rs::create_card`).
+pub fn validate_task_title(raw: &str) -> Result<&str, ToolResult> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(error("task title must not be empty"));
+    }
+    if trimmed.chars().count() > MAX_TASK_TITLE_LEN {
+        return Err(error(format!(
+            "task title must be at most {MAX_TASK_TITLE_LEN} characters"
+        )));
+    }
+    Ok(trimmed)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

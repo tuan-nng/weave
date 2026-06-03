@@ -36,12 +36,21 @@ pub struct BoardDetail {
 }
 
 /// Spec for a column created as part of a board template.
-#[derive(Debug, Clone)]
+///
+/// The three transition-gate fields (`freeze_description`,
+/// `required_fields`, `required_artifact_types`) default to no-op so
+/// existing callers (HTTP API, default board template) can ignore
+/// them. `Default` is derived so test fixtures can use
+/// `..Default::default()` to leave them unset.
+#[derive(Debug, Clone, Default)]
 pub struct NewColumnSpec<'a> {
     pub name: &'a str,
     pub position: Option<i64>,
     pub specialist_id: Option<&'a str>,
     pub auto_trigger: bool,
+    pub freeze_description: bool,
+    pub required_fields: Vec<String>,
+    pub required_artifact_types: Vec<String>,
 }
 
 /// Stateless store for board persistence.
@@ -70,6 +79,9 @@ impl BoardStore {
                     spec.position,
                     spec.specialist_id,
                     spec.auto_trigger,
+                    Some(spec.freeze_description),
+                    Some(&spec.required_fields),
+                    Some(&spec.required_artifact_types),
                 )?;
             }
             Ok(board)
@@ -112,6 +124,26 @@ impl BoardStore {
                 },
                 other => other.into(),
             })
+    }
+
+    /// Fetch a board by ID, but reject (as NotFound, to match the
+    /// cross-workspace defense at `api/kanban.rs:179-186` and
+    /// `tools/kanban/*`) when the board's workspace doesn't match
+    /// the caller's. Returns the same `NotFound` shape as a missing
+    /// board so an agent cannot enumerate boards across workspaces.
+    pub fn get_in_workspace(
+        db: &Db,
+        board_id: &str,
+        workspace_id: &str,
+    ) -> Result<Board, AppError> {
+        let board = Self::get_by_id(db, board_id)?;
+        if board.workspace_id != workspace_id {
+            return Err(AppError::NotFound {
+                resource: "board".into(),
+                id: board_id.into(),
+            });
+        }
+        Ok(board)
     }
 
     /// Composite fetch: board + its columns + its tasks.
@@ -214,14 +246,12 @@ mod tests {
             NewColumnSpec {
                 name: "To Do",
                 position: Some(0),
-                specialist_id: None,
-                auto_trigger: false,
+                ..Default::default()
             },
             NewColumnSpec {
                 name: "Done",
                 position: Some(1024),
-                specialist_id: None,
-                auto_trigger: false,
+                ..Default::default()
             },
         ];
         let board = BoardStore::create(&db, &ws_id, "Project", &template).unwrap();
@@ -241,8 +271,8 @@ mod tests {
         let template = [NewColumnSpec {
             name: "Broken",
             position: Some(0),
-            specialist_id: None,
             auto_trigger: true,
+            ..Default::default()
         }];
         let result = BoardStore::create(&db, &ws_id, "Should Roll Back", &template);
         assert!(result.is_err());
@@ -377,30 +407,35 @@ mod tests {
                 position: Some(0),
                 specialist_id: Some("backlog-refiner"),
                 auto_trigger: true,
+                ..Default::default()
             },
             NewColumnSpec {
                 name: "To Do",
                 position: Some(1000),
                 specialist_id: Some("todo-orchestrator"),
                 auto_trigger: true,
+                ..Default::default()
             },
             NewColumnSpec {
                 name: "In Progress",
                 position: Some(2000),
                 specialist_id: Some("dev-crafter"),
                 auto_trigger: true,
+                ..Default::default()
             },
             NewColumnSpec {
                 name: "Review",
                 position: Some(3000),
                 specialist_id: Some("review-guard"),
                 auto_trigger: true,
+                ..Default::default()
             },
             NewColumnSpec {
                 name: "Done",
                 position: Some(4000),
                 specialist_id: Some("done-reporter"),
                 auto_trigger: false,
+                ..Default::default()
             },
         ];
 
@@ -430,6 +465,19 @@ mod tests {
             assert_eq!(
                 columns[i].auto_trigger, *auto_trigger,
                 "column[{i}] auto_trigger"
+            );
+            // feat-028 transition-gate fields default to no-op for all 5 columns.
+            assert!(
+                !columns[i].freeze_description,
+                "column[{i}] freeze_description should default to false"
+            );
+            assert!(
+                columns[i].required_fields.is_empty(),
+                "column[{i}] required_fields should default to []"
+            );
+            assert!(
+                columns[i].required_artifact_types.is_empty(),
+                "column[{i}] required_artifact_types should default to []"
             );
         }
 

@@ -2125,7 +2125,10 @@ You are a senior Rust engineer."#,
         tool_registry.register(Arc::new(MockTool::new("get_task")));
         tool_registry.register(Arc::new(MockTool::new("list_tasks")));
         tool_registry.register(Arc::new(MockTool::new("update_task_fields")));
-        tool_registry.register(Arc::new(MockTool::new("kanban")));
+        tool_registry.register(Arc::new(MockTool::new("get_board")));
+        tool_registry.register(Arc::new(MockTool::new("create_card")));
+        tool_registry.register(Arc::new(MockTool::new("move_card")));
+        tool_registry.register(Arc::new(MockTool::new("search_cards")));
         tool_registry.register(Arc::new(MockTool::new("notes")));
         let tools = Arc::new(tool_registry);
 
@@ -2207,10 +2210,13 @@ You are a planning specialist."#,
         assert_eq!(
             tool_names,
             vec![
+                "create_card",
+                "get_board",
                 "get_task",
-                "kanban",
                 "list_tasks",
+                "move_card",
                 "notes",
+                "search_cards",
                 "update_task_fields"
             ]
         );

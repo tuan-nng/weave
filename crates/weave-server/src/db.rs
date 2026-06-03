@@ -26,6 +26,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "005",
         include_str!("migrations/005_task_column_cascade.sql"),
     ),
+    (
+        "006",
+        include_str!("migrations/006_column_transition_gates.sql"),
+    ),
 ];
 
 impl Db {
@@ -195,6 +199,6 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 5, "user_version should be 5 after all migrations");
+        assert_eq!(v1, 6, "user_version should be 6 after all migrations");
     }
 }

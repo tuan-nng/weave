@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::store::tasks::{TaskStore, VALID_TASK_STATUSES};
-use crate::tools::fs::{error, optional_string, success};
+use crate::tools::fs::{check_optional_status, error, optional_string, success};
 use crate::tools::{ToolContext, ToolExecutor, ToolResult};
 
 pub struct ListTasksTool {
@@ -55,14 +55,8 @@ impl ToolExecutor for ListTasksTool {
         let status = optional_string(&input, "status");
 
         // Validate status if provided
-        if let Some(ref s) = status {
-            if !VALID_TASK_STATUSES.contains(&s.as_str()) {
-                return error(format!(
-                    "invalid task status '{}'; valid values: {}",
-                    s,
-                    VALID_TASK_STATUSES.join(", ")
-                ));
-            }
+        if let Err(e) = check_optional_status(status.as_deref()) {
+            return e;
         }
 
         match TaskStore::list(
@@ -71,6 +65,7 @@ impl ToolExecutor for ListTasksTool {
             board_id.as_deref(),
             column_id.as_deref(),
             status.as_deref(),
+            None,
         ) {
             Ok(tasks) => {
                 let count = tasks.len();

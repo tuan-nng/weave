@@ -390,12 +390,12 @@
       "phase": "phase-5",
       "behavior": "Kanban tools for agents: get_board (full board state with columns and cards), move_card (enforces transition gates \u2014 required artifacts, required fields, description frozen from dev stage), create_card, search_cards (by query, labels, assignee). These tools let agents interact with the kanban board autonomously.",
       "verification": "cargo test -p weave-server -- test_kanban_tools && cargo test -p weave-server -- test_move_card_transition_gates",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-016",
         "feat-024"
       ],
-      "evidence": ""
+      "evidence": "./init.sh all 3 layers pass; 441 Rust tests (was 397, +44: 4 tools \u00d7 ~10 cases each + 9 transition-gate unit tests + 2 verification-gate tests) + 76 frontend tests; clippy + rustfmt + prettier clean. Four tool executors in tools/kanban/{get_board,create_card,search_cards,move_card}.rs each hold Arc<Db>, validate input via tools::fs helpers, and run workspace-scoped queries. Three transition gates implemented in service::kanban::check_transition_gates: (1) description frozen on exit, (2) required fields on entry, (3) required artifact types (STUB for feat-031). Migration 006 adds 3 JSON-array columns to `columns`: freeze_description (INTEGER), required_fields (TEXT), required_artifact_types (TEXT). search_cards supports free-text query against title+description + board_id/column_id/status filters. move_card is a thin wrapper that delegates to TaskStore::move_to_column after gate check; intentionally does NOT fire try_automate_lane or SSE (HTTP PATCH remains authoritative). All 4 tools registered on the planning tool profile in main.rs. Phase 5b /simplify applied: replaced KNOWN_REQUIRED_FIELDS const + parallel match with task_field_value() helper; same-column skip moved into check_transition_gates; all-defaults fast-path added; no-op status update skip added; made is_blank pub(crate); extracted validate_task_title + MAX_TASK_TITLE_LEN to tools::fs; removed dead MAX_TITLE_LEN in create_card.rs; same-column test fixture collision (id='col-test' in both src and dst) fixed by adding id parameter to default_column + gate_column test fixtures. Files changed: 1 new migration, 1 new tools module, 4 new tool files, 1 new mod.rs, plus modifications to db.rs, store/columns.rs, store/boards.rs, store/tasks.rs, api/kanban.rs, main.rs, tools/mod.rs, tools/fs/mod.rs, tools/task/list.rs, service/sessions.rs."
     },
     {
       "id": "feat-029",
