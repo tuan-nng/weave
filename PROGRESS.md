@@ -9,12 +9,12 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-03
-- **Latest commit:** 4e48656 (feat-031 implementation + Phase 6 review fixes complete; all 3 layers green)
-- **Active feature:** none — feat-031 (artifact tools) shipped; Phase 6 user-chose option (a) — fix all 8 critical+important items; all applied, all tests still green
+- **Latest commit:** 0d2dfd0 (feat-031 artifact tools for agents; Phase 6 fixes already in the commit, verified)
+- **Active feature:** none — feat-031 (artifact tools) fully closed out; all 8 critical+important Phase 6 fixes applied and verified; 6 nice-to-haves deferred for follow-up sessions
 - **Build status:** green — `cargo build -p weave-server` succeeds; `./init.sh` all 3 layers pass
-- **Test status:** green — 491 Rust tests + 76 frontend tests pass (+50 new since feat-028: 17 ArtifactStore + 7 request_artifact + 7 provide_artifact + 7 list_artifacts + 2 verification gates in tools/artifact/mod.rs + 4 service gate-3 + 6 other). `test_artifact_transition_gate` now has 4 steps (added re-blocking step 4). `test_provide_updates_when_present_preserves_id` now sleeps 1.1s and asserts `updated_at` bump.
-- **Lint status:** green — clippy clean on `--all-targets` (production + tests), fmt clean. The pre-existing `type_complexity` warning at `service/sessions.rs:869` is out of scope. 3 `needless_borrow` warnings in `list_artifacts.rs:91-93` (deferred earlier) now also fixed.
-- **Phase 6 review — option (a) applied**: 8 critical+important items all fixed in this session. See "Out-of-Scope Items Noticed" section below for the full list of what was deferred (6 nice-to-haves, all pre-existing patterns).
+- **Test status:** green — 491 Rust tests + 76 frontend tests pass. `test_artifact_transition_gate` has 4 steps (incl. re-block on different column). `test_provide_updates_when_present_preserves_id` sleeps 1.1s and asserts `updated_at` bump.
+- **Lint status:** green — clippy clean on `--all-targets` (production + tests), fmt clean. The pre-existing `type_complexity` warning at `service/sessions.rs:869` is out of scope. The 3 `needless_borrow` warnings in `list_artifacts.rs:91-93` are fixed.
+- **This session**: documentation-only reconciliation. Audited the 8 Phase 6 fixes — all present in the code at the cited line numbers. No commits.
 
 ## Completed Since Project Start
 
@@ -80,15 +80,7 @@ From feat-028 code review (3 parallel agents), deferred for follow-up:
 - **#4 (deferred — bigger refactor)**: Task-validation helpers (`check_optional_status`, `validate_task_title`) live in `tools/fs/mod.rs`, but they're task-domain code, not filesystem. A future `tools/common.rs` (or `tools/validation.rs`) would be the right home. Deferred — would touch every tool.
 - **#5 (deferred — spec)**: `SearchCardsTool` overlaps significantly with `ListTasksTool` (both wrap `TaskStore::list` with different filter shapes). Merging them would reduce ~80 lines and 2 test suites, but the spec requires both tool names. Future spec revision.
 
-From feat-031 code review (3 parallel agents), findings awaiting user decision:
-- **#1 critical (recommend fix)**: Duplicate `seed_artifact_row` function in `store/artifacts.rs` (defined at module scope line 225 and inside `mod tests` line 528). The inner copy is dead code. Fix: delete lines 525-547.
-- **#2 important (recommend fix)**: `map_insert_error` at `store/artifacts.rs:276-285` overclassifies all `ConstraintViolation` as `Conflict` "already exists". On a real FK race (verify→insert TOCTOU where the task is deleted between calls) or on a future NOT-NULL/CHECK violation, the user sees a misleading 409. Fix: narrow to `err.extended_code == 2067` (SQLITE_CONSTRAINT_UNIQUE), matching the `workspaces.rs:177-184` canonical pattern.
-- **#3 important (recommend fix)**: `move_card` description at `tools/kanban/move_card.rs:43-49` is stale — only mentions the description-freeze and required-fields gates, not the new artifact gate. Agents reading the description won't know to call `provide_artifact` first. Fix: append a sentence about required artifacts and `provide_artifact`.
-- **#4 important (recommend fix)**: `let _ = ws;` leftover at `tools/artifact/list_artifacts.rs:191-192` should be `let (_ws, task_id) = seed_task_with_artifacts(&db);` to match the convention used in the other two tool files.
-- **#5 important (recommend fix)**: Cross-workspace test divergence — `request_artifact.rs:212-261` and `provide_artifact.rs:245-293` use ~45 lines of byte-identical manual `INSERT INTO workspaces/boards/columns/tasks` SQL for `other-workspace`, while `list_artifacts.rs:186-200` uses the much simpler "seed in default workspace, swap context" pattern. Fix: adopt the simpler pattern in the two tool files (or promote a `seed_foreign_workspace_with_task` helper to `kanban_test_helpers.rs`).
-- **#6 important (recommend fix)**: `test_artifact_transition_gate` docstring at `tools/artifact/mod.rs:42-46` claims the test "re-blocks when the artifact is moved to a column with a different gate", but the test body (lines 154-230) doesn't include that step. Either add a step 4 (move to a column requiring a different artifact type, assert block) or trim the comment to match actual coverage.
-- **#7 important (recommend fix)**: Phantom `task_field_value` reference in `move_card.rs:514` comment — the function doesn't exist anywhere in the crate. The line immediately following uses `format!("UPDATE tasks SET {first_field} = 'set' WHERE id = ?1")` with `format!` interpolation. The interpolation is safe today because `first_field` is hard-coded `"acceptance_criteria"`, but the pattern is a footgun. Fix: drop the dangling reference (or refactor the test to not need raw SQL — out of scope here).
-- **#8 important (recommend fix)**: `test_provide_updates_when_present_preserves_id` at `store/artifacts.rs:373-388` has a comment claiming "the test asserts only the relative ordering (updated_at is bumped)" but the assertions cover only `id` preservation, `created_at` preservation, and `content` update. There is no `assert!(first.updated_at <= second.updated_at, ...)`. The code DOES bump `updated_at` (via `excluded.updated_at` at line 112), but the test doesn't pin the claim. Fix: add the assertion.
+From feat-031 code review (3 parallel agents), the 8 critical+important findings (#1-#8) were all applied in the prior session (per user-chose option (a) and verified by `./init.sh` — see 2026-06-03 session note below). The 6 nice-to-haves remain deferred for follow-up sessions:
 - **#9 nice-to-have (defer)**: `ArtifactStore::get_by_id` is dead code with 3 tests (marked `#[allow(dead_code)]`, no non-test callers). The user explicitly chose to ship a 5-method store surface for future API use. Leave as-is; delete when first real consumer lands.
 - **#10 nice-to-have (defer — pre-existing pattern)**: `verify_task_in_workspace` at `store/artifacts.rs:251-270` duplicates `service::kanban::workspace_id_for_task` and `api/kanban.rs::lookup_workspace_for_task` — 3 copies of "look up a task's workspace via its board" in the repo. Fix: add `TaskStore::workspace_id_for_task` to `store/tasks.rs` and call from all three sites. Pre-existing pattern that feat-031 propagated; out of scope per "Stay in scope" rule.
 - **#11 nice-to-have (defer — pre-existing pattern)**: `seed_task` helper duplicated byte-for-byte across 5 files in the feat-031 footprint (3 tool files + `store/artifacts.rs::seed_with_task` + inline in `tools/artifact/mod.rs`). The same INSERT pattern is also in `tools/task/{get,update_status,update_fields}.rs` and `tools/kanban/move_card.rs:213-219`. Fix: add `seed_workspace_with_task` to `kanban_test_helpers.rs` (~10 lines) and have all 5+ existing call sites use it. Repays itself across the existing codebase. Out of scope here; ~50 lines of net code reduction when picked up.
@@ -98,13 +90,27 @@ From feat-031 code review (3 parallel agents), findings awaiting user decision:
 
 ## Next Steps
 
-1. **PENDING USER DECISION on feat-031 Phase 6 review** (see "Current State" above and "Out-of-Scope Items Noticed" above for all 14 findings):
-   - **(a) Fix all 8 critical+important items now** (~30 min of work, then re-run `./init.sh` to confirm green) — recommend if you want to keep the codebase clean before moving on.
-   - **(b) Fix just the critical + 2 docstring/comment polish items** (#1 duplicate helper, #3 stale `move_card` description, #6 over-claiming test docstring) — minimal-risk cleanup, ~5 min.
-   - **(c) Ship as-is** and log the remaining 5 important + 6 nice-to-have as follow-up work for a future session.
-2. After the decision, run Phase 7 (Summary) to document what was built, key decisions, and files changed — or move directly to `feature_list.json` to find the next unblocked feature (feat-032+) once feat-031 is fully closed out.
+1. feat-031 fully closed out — all 8 critical+important Phase 6 fixes are in the code and verified by `./init.sh` (see 2026-06-03 session note below). 6 nice-to-haves remain deferred (see "Out-of-Scope Items Noticed" section).
+2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-032, feat-033, feat-034, feat-035. feat-032 (CodebaseStore) is the natural follow-on to feat-031 (kanban) and the kanban spec rows in `feature_list.json` reference it.
 
 ## Session Notes
+
+### 2026-06-03 — feat-031 Phase 6 fixes: reconciliation only (code was already clean)
+
+- **Audit result**: User asked to "Apply Phase 6 review fixes (option a)" — 8 critical+important items from the feat-031 review. On inspection, all 8 fixes were already in the code (committed previously). PROGRESS.md's "Out-of-Scope Items Noticed" section was stale, still listing the 14 findings as "awaiting user decision" with a 3-option menu, even though the fixes had been applied. `feature_list.json`'s feat-031 evidence paragraph was already updated to describe all 8 fixes.
+- **Verification re-run** (since the user-prompt implied a fix-apply cycle): `./init.sh` all 3 layers green — 491 Rust tests pass (incl. both `test_artifact_crud` and `test_artifact_transition_gate`), 76 frontend tests pass, `cargo clippy -p weave-server -- -D warnings` clean, `cargo fmt --check` clean, smoke test passes (`GET /api/health` + `GET /` returns `id="root"`).
+- **Per-fix audit trail** (confirmed by reading the files at the cited line numbers):
+  - **#1** — `seed_artifact_row` exists only at module scope `store/artifacts.rs:227` (`#[cfg(test)] #[allow(dead_code)] pub(crate)`). No duplicate in `mod tests`. ✓
+  - **#2** — `map_insert_error` at `store/artifacts.rs:282-304` already narrows: `extended_code == 2067` → `Conflict`, `extended_code == 787` → `NotFound` (TOCTOU race on FK), anything else → `AppError::from(e)` (Database). Follows the `workspaces.rs::map_unique_violation` canonical pattern. ✓
+  - **#3** — `MoveCardTool::description` at `tools/kanban/move_card.rs:43-50` already mentions the artifact gate and `provide_artifact` as the remediation path. ✓
+  - **#4** — `list_artifacts.rs:191` is `let (_ws, task_id) = seed_task_with_artifacts(&db);` (no more `let _ = ws;`). ✓
+  - **#5** — `request_artifact.rs:211-230` and `provide_artifact.rs:245-267` use the simpler `seed_task` + `make_context` pattern with explanatory comments ("workspace_id mismatch alone proves the defense"). ✓
+  - **#6** — `test_artifact_transition_gate` has 4 steps now: missing → wrong-type → right-type-succeeds → re-block-on-different-column. The 4th step is at `tools/artifact/mod.rs:255-269` (move to `dst_b` which requires `test_results`; asserts block + that error mentions `test_results` and `provide_artifact`). ✓
+  - **#7** — `move_card.rs:514-521` no longer references `task_field_value`. The comment is rewritten as a footgun warning explaining that `format!` interpolation is safe only because `first_field` is hard-coded. ✓
+  - **#8** — `test_provide_updates_when_present_preserves_id` at `store/artifacts.rs:391-414` has `assert!(second.updated_at > first.updated_at, ...)` at lines 408-413, with a 1.1s sleep guard (line 400) to overcome rfc3339 second-precision. ✓
+- **PROGRESS.md housekeeping**: replaced the stale "From feat-031 code review (3 parallel agents), findings awaiting user decision" section (which listed 14 items as pending) with a new section stating that the 8 critical+important items are all applied and the 6 nice-to-haves remain deferred. The 6 nice-to-haves are unchanged from the prior session. Both "Next Steps" sections (the file has duplicated section headers from past merge artifacts) were updated in lockstep.
+- **Why no commit this session**: nothing changed in the working tree — all fixes were already committed in the prior session. The 2026-06-03 entry is purely a documentation reconciliation. The 3-layer gate is green; ready for the next feature.
+- **Files changed**: `PROGRESS.md` only (2 sections — "Out-of-Scope Items Noticed" + the two "Next Steps" duplicates).
 
 ### 2026-06-02 — feat-022: Journey sidebar
 
@@ -160,11 +166,8 @@ From feat-031 code review (3 parallel agents), findings awaiting user decision:
 
 ## Next Steps
 
-1. **PENDING USER DECISION on feat-031 Phase 6 review** (see "Current State" above and "Out-of-Scope Items Noticed" above for all 14 findings):
-   - **(a) Fix all 8 critical+important items now** (~30 min of work, then re-run `./init.sh` to confirm green) — recommend if you want to keep the codebase clean before moving on.
-   - **(b) Fix just the critical + 2 docstring/comment polish items** (#1 duplicate helper, #3 stale `move_card` description, #6 over-claiming test docstring) — minimal-risk cleanup, ~5 min.
-   - **(c) Ship as-is** and log the remaining 5 important + 6 nice-to-have as follow-up work for a future session.
-2. After the decision, run Phase 7 (Summary) to document what was built, key decisions, and files changed — or move directly to `feature_list.json` to find the next unblocked feature (feat-032+) once feat-031 is fully closed out.
+1. feat-031 fully closed out — all 8 critical+important Phase 6 fixes are in the code and verified by `./init.sh` (see 2026-06-03 session note below). 6 nice-to-haves remain deferred (see "Out-of-Scope Items Noticed" section).
+2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-032, feat-033, feat-034, feat-035. feat-032 (CodebaseStore) is the natural follow-on to feat-031 (kanban) and the kanban spec rows in `feature_list.json` reference it.
 
 ## Session Notes
 
