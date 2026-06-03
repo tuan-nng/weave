@@ -212,14 +212,16 @@ fn empty_update() -> UpdateTask {
 ///    be non-empty. Unknown field names are silently ignored (logged
 ///    at debug level).
 ///
-/// 3. **Required artifact types on entry** — STUB for feat-028. The
-///    schema ships on `columns` (migration 006) but the artifacts table
-///    is feat-031. The stub always passes. When feat-031 lands, replace
-///    the body of this branch with a query against `artifacts` and the
-///    `?` of `&dest_column.required_artifact_types` will resolve.
+/// 3. **Required artifact types on entry** (feat-031) — for each name
+///    in `dest_column.required_artifact_types`, the task must have a
+///    `provide_artifact` row of that type. The set of provided types
+///    is pre-loaded by the caller via
+///    `ArtifactStore::list_types_for_task` so the gate itself stays
+///    a pure function over its inputs.
 ///
 /// Pure function (read-only on the inputs, no I/O). Caller is expected
-/// to have already loaded the source and destination columns.
+/// to have already loaded the source and destination columns AND the
+/// set of artifact types present on the task.
 ///
 /// A same-column move (source.id == dest.id) is not a transition and
 /// short-circuits to `Ok(())` so callers don't have to special-case it.
@@ -229,6 +231,7 @@ pub fn check_transition_gates(
     task: &Task,
     current_column: &Column,
     dest_column: &Column,
+    present_artifact_types: &std::collections::HashSet<String>,
 ) -> Result<(), AppError> {
     // Same-column "move" is not a transition.
     if current_column.id == dest_column.id {
@@ -276,10 +279,20 @@ pub fn check_transition_gates(
         }
     }
 
-    // Gate 3: required artifact types on entry.
-    // STUB: always passes. feat-031 (artifacts) replaces this body.
-    // Touch the field so clippy doesn't flag it as unused.
-    let _stub_acknowledged = &dest_column.required_artifact_types;
+    // Gate 3: required artifact types on entry (feat-031). The
+    // caller pre-loaded the set of types present on the task via
+    // `ArtifactStore::list_types_for_task`. A missing required type
+    // rejects the move; the error message names the missing type
+    // and points the agent at `provide_artifact` for remediation.
+    for required in &dest_column.required_artifact_types {
+        if !present_artifact_types.contains(required) {
+            return Err(AppError::Validation(format!(
+                "column '{}' requires artifact of type '{}' before entry; \
+                 use the provide_artifact tool to attach it",
+                dest_column.name, required
+            )));
+        }
+    }
 
     Ok(())
 }
@@ -296,7 +309,13 @@ fn is_blank(s: &Option<String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::kanban_test_helpers::{make_test_state, seed_provider_and_specialist};
+    use crate::db::Db;
+    use crate::store::artifacts::seed_artifact_row;
+    use crate::store::kanban_test_helpers::{
+        make_test_db, make_test_state, seed_provider_and_specialist,
+    };
+    use chrono::Utc;
+    use std::collections::HashSet;
 
     fn default_column(id: &str, auto_trigger: bool, specialist_id: Option<&str>) -> Column {
         Column {
@@ -419,7 +438,7 @@ mod tests {
         let task = task_with("T", None);
         let src = default_column("col-src", false, None);
         let dst = default_column("col-dst", false, None);
-        check_transition_gates(&task, &src, &dst).unwrap();
+        check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap();
     }
 
     #[test]
@@ -427,7 +446,7 @@ mod tests {
         let task = task_with("T", None); // no description
         let src = gate_column("col-src", true, vec![], vec![]);
         let dst = default_column("col-dst", false, None);
-        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
             AppError::Validation(msg) => {
                 assert!(msg.contains("freezes descriptions"), "got: {msg}");
@@ -442,7 +461,7 @@ mod tests {
         let task = task_with("T", Some("body"));
         let src = gate_column("col-src", true, vec![], vec![]);
         let dst = default_column("col-dst", false, None);
-        check_transition_gates(&task, &src, &dst).unwrap();
+        check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap();
     }
 
     #[test]
@@ -451,7 +470,7 @@ mod tests {
         let task = task_with("T", Some("   \n  "));
         let src = gate_column("col-src", true, vec![], vec![]);
         let dst = default_column("col-dst", false, None);
-        assert!(check_transition_gates(&task, &src, &dst).is_err());
+        assert!(check_transition_gates(&task, &src, &dst, &HashSet::new()).is_err());
     }
 
     #[test]
@@ -460,7 +479,7 @@ mod tests {
         task.description = Some("body".into()); // bypass freeze
         let src = default_column("col-src", false, None);
         let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
-        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
             AppError::Validation(msg) => {
                 assert!(msg.contains("acceptance_criteria"), "got: {msg}");
@@ -477,7 +496,7 @@ mod tests {
         task.acceptance_criteria = Some("AC".into());
         let src = default_column("col-src", false, None);
         let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
-        check_transition_gates(&task, &src, &dst).unwrap();
+        check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap();
     }
 
     #[test]
@@ -493,7 +512,7 @@ mod tests {
             vec!["acceptance_criteria", "verification_report"],
             vec![],
         );
-        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
             AppError::Validation(msg) => {
                 assert!(msg.contains("verification_report"), "got: {msg}");
@@ -510,19 +529,117 @@ mod tests {
         task.description = Some("body".into());
         let src = default_column("col-src", false, None);
         let dst = gate_column("col-dst", false, vec!["made_up_field"], vec![]);
-        check_transition_gates(&task, &src, &dst).unwrap();
+        check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Gate 3 — required artifact types (feat-031)
+    // -----------------------------------------------------------------------
+
+    /// Build a `Task` whose id matches a real `tasks` row in `db`.
+    /// Required by the gate-3 tests because `ArtifactStore` resolves
+    /// task ownership via the row, not the test fixture. Seeds a
+    /// minimal `workspace → board → column → task` chain under fixed
+    /// ids so the artifact FK (`artifacts.task_id → tasks.id`) is
+    /// satisfied.
+    fn task_with_real_id(db: &Db, task_id: &str) -> Task {
+        let now = Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO workspaces (id, name, status, created_at, updated_at)
+                 VALUES ('ws-real', 'real', 'active', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO boards (id, workspace_id, name, created_at)
+                 VALUES ('board-real', 'ws-real', 'real', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO columns (id, board_id, name, position, created_at)
+                 VALUES ('col-real', 'board-real', 'real', 0, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT OR REPLACE INTO tasks (id, board_id, column_id, title, position, status, created_at, updated_at)
+                 VALUES (?1, 'board-real', 'col-real', 'T', 0, 'active', ?2, ?2)",
+                rusqlite::params![task_id, now],
+            )
+            .unwrap();
+        let mut t = task_with("T", Some("body"));
+        t.id = task_id.into();
+        t
     }
 
     #[test]
-    fn test_check_transition_gates_required_artifact_types_is_stub_passes() {
-        // STUB: feat-031 will replace this with a real artifacts check.
-        // For feat-028, the gate always passes regardless of the column's
-        // declared artifact requirements.
-        let mut task = task_with("T", None);
-        task.description = Some("body".into());
+    fn test_check_transition_gates_required_artifact_blocks_when_missing() {
+        let db = make_test_db();
+        let task_id = "task-arti-1";
+        let task = task_with_real_id(&db, task_id);
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec![], vec!["test_results"]);
+        let present: HashSet<String> = HashSet::new();
+        let err = check_transition_gates(&task, &src, &dst, &present).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("test_results"), "got: {msg}");
+                assert!(msg.contains("provide_artifact"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_transition_gates_required_artifact_passes_when_present() {
+        let db = make_test_db();
+        let task_id = "task-arti-2";
+        let task = task_with_real_id(&db, task_id);
+        seed_artifact_row(&db.conn(), task_id, "test_results", "ok");
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec![], vec!["test_results"]);
+        let mut present = HashSet::new();
+        present.insert("test_results".to_string());
+        check_transition_gates(&task, &src, &dst, &present).unwrap();
+    }
+
+    #[test]
+    fn test_check_transition_gates_required_artifact_partial_present_still_blocks() {
+        let db = make_test_db();
+        let task_id = "task-arti-3";
+        let task = task_with_real_id(&db, task_id);
+        // One of two required types is present.
+        seed_artifact_row(&db.conn(), task_id, "test_results", "ok");
         let src = default_column("col-src", false, None);
         let dst = gate_column("col-dst", false, vec![], vec!["test_results", "screenshot"]);
-        check_transition_gates(&task, &src, &dst).unwrap();
+        let mut present = HashSet::new();
+        present.insert("test_results".to_string());
+        let err = check_transition_gates(&task, &src, &dst, &present).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("screenshot"), "got: {msg}");
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_check_transition_gates_no_required_artifacts_with_present_set_passes() {
+        // Empty requirement, non-empty present set, no other policies.
+        let db = make_test_db();
+        let task_id = "task-arti-4";
+        let task = task_with_real_id(&db, task_id);
+        seed_artifact_row(&db.conn(), task_id, "log", "trace");
+        let src = default_column("col-src", false, None);
+        let dst = gate_column("col-dst", false, vec![], vec![]);
+        let mut present = HashSet::new();
+        present.insert("log".to_string());
+        check_transition_gates(&task, &src, &dst, &present).unwrap();
     }
 
     #[test]
@@ -534,7 +651,7 @@ mod tests {
         let src = gate_column("col-src", true, vec![], vec![]);
         let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
         // src freeze passes (description is set); dst required fails first.
-        let err = check_transition_gates(&task, &src, &dst).unwrap_err();
+        let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
             AppError::Validation(msg) => {
                 assert!(msg.contains("acceptance_criteria"), "got: {msg}");

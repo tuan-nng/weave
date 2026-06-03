@@ -95,6 +95,16 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(tools::kanban::CreateCardTool { db: db.clone() }));
     tool_registry.register(Arc::new(tools::kanban::SearchCardsTool { db: db.clone() }));
     tool_registry.register(Arc::new(tools::kanban::MoveCardTool { db: db.clone() }));
+    // Artifact tools (feat-031) — see tools/artifact/ for the per-tool bodies.
+    tool_registry.register(Arc::new(tools::artifact::RequestArtifactTool {
+        db: db.clone(),
+    }));
+    tool_registry.register(Arc::new(tools::artifact::ProvideArtifactTool {
+        db: db.clone(),
+    }));
+    tool_registry.register(Arc::new(tools::artifact::ListArtifactsTool {
+        db: db.clone(),
+    }));
     let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding

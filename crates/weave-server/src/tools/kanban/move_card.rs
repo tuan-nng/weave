@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::service::kanban::check_transition_gates;
+use crate::store::artifacts::ArtifactStore;
 use crate::store::columns::ColumnStore;
 use crate::store::tasks::{TaskStore, VALID_TASK_STATUSES};
 use crate::tools::fs::{check_optional_status, error, optional_string, require_string, success};
@@ -44,7 +45,9 @@ impl ToolExecutor for MoveCardTool {
          Enforces transition gates: if the source column freezes \
          descriptions, the task must have a non-empty description; \
          if the destination column requires specific fields, they must \
-         be set on the task. Returns the moved card."
+         be set on the task; if the destination column requires specific \
+         artifact types, they must be attached via the `provide_artifact` \
+         tool first. Returns the moved card."
     }
 
     fn input_schema(&self) -> Value {
@@ -126,8 +129,17 @@ impl ToolExecutor for MoveCardTool {
 
         // 3. Transition gates. `check_transition_gates` itself short-circuits
         //    on same-column moves and the all-defaults case, so this is
-        //    a no-op for the common path.
-        if let Err(e) = check_transition_gates(&task, &source_column, &dest_column) {
+        //    a no-op for the common path. The artifact-type set is
+        //    pre-loaded here (feat-031) so the gate stays a pure
+        //    function over its inputs.
+        let present_artifact_types =
+            match ArtifactStore::list_types_for_task(&self.db, &task.id, &ctx.workspace_id) {
+                Ok(set) => set,
+                Err(e) => return error(e.to_string()),
+            };
+        if let Err(e) =
+            check_transition_gates(&task, &source_column, &dest_column, &present_artifact_types)
+        {
             return error(e.to_string());
         }
 
@@ -500,8 +512,13 @@ mod tests {
         let db = make_test_db();
         let first_field = "acceptance_criteria".to_string();
         let (_bid, _src, dst, task_id) = seed_with_gates(&db, false, vec![first_field.clone()]);
-        // Set the required field on the task. The column name in SQL is
-        // the same as the field name (verified by `task_field_value`).
+        // Set the required field on the task via raw SQL. The
+        // `first_field` value is hard-coded to one of the three valid
+        // required-field column names (acceptance_criteria /
+        // completion_summary / verification_report), so the
+        // interpolation is safe — but the pattern is a footgun; if
+        // this test ever takes a user-controlled value, switch to a
+        // `match` over a fixed set of column names.
         db.conn()
             .execute(
                 &format!("UPDATE tasks SET {first_field} = 'set' WHERE id = ?1"),

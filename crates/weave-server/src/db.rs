@@ -30,6 +30,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "006",
         include_str!("migrations/006_column_transition_gates.sql"),
     ),
+    ("007", include_str!("migrations/007_artifacts.sql")),
 ];
 
 impl Db {
@@ -143,7 +144,7 @@ mod tests {
             .expect("failed to query busy_timeout");
         assert_eq!(timeout, 5000, "busy_timeout should be 5000");
 
-        // Verify all 11 tables exist
+        // Verify all 12 tables exist
         let expected_tables = [
             "workspaces",
             "sessions",
@@ -156,6 +157,7 @@ mod tests {
             "tasks",
             "traces",
             "file_changes",
+            "artifacts",
         ];
 
         {
@@ -199,6 +201,6 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 6, "user_version should be 6 after all migrations");
+        assert_eq!(v1, 7, "user_version should be 7 after all migrations");
     }
 }
