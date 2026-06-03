@@ -13,12 +13,17 @@ use axum::routing::get;
 use axum::Router;
 use health::ServerStartTime;
 
+use crate::a2a;
 use crate::AppState;
 
 /// Build the API router with all routes.
 pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
     Router::new()
         .route("/api/health", get(health::health_check))
+        // A2A Agent Card (public, no auth per A2A spec)
+        .route("/.well-known/agent.json", get(a2a::agent_card::agent_card))
+        // A2A protocol endpoints
+        .nest("/api/a2a", a2a::router())
         // Workspace routes
         .route(
             "/api/workspaces",

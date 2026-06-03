@@ -51,6 +51,7 @@ impl SessionService {
         model: Option<&str>,
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
+        context_id: Option<&str>,
     ) -> Result<crate::store::sessions::Session, AppError> {
         // Validate workspace exists
         crate::store::workspaces::WorkspaceStore::get_by_id(db, workspace_id)?;
@@ -83,6 +84,7 @@ impl SessionService {
                 model,
                 cwd,
                 parent_session_id,
+                context_id,
             )?;
 
             if !parent_messages.is_empty() {
@@ -945,6 +947,7 @@ mod tests {
             Some("claude-opus-4-20250514"),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -962,6 +965,7 @@ mod tests {
             &db,
             &ws_id,
             &provider_id,
+            None,
             None,
             None,
             None,
@@ -993,6 +997,7 @@ mod tests {
             &db,
             &ws.id,
             &provider.id,
+            None,
             None,
             None,
             None,
@@ -1030,6 +1035,7 @@ mod tests {
             &db,
             &ws_id,
             &provider_id,
+            None,
             None,
             None,
             None,
@@ -1083,6 +1089,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1124,6 +1131,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1154,6 +1162,7 @@ mod tests {
             &db,
             &ws_id,
             &provider_id,
+            None,
             None,
             None,
             None,
@@ -1280,6 +1289,7 @@ mod tests {
             &db,
             &ws.id,
             &provider.id,
+            None,
             None,
             None,
             None,
@@ -1413,6 +1423,7 @@ mod tests {
             &db,
             &ws.id,
             &provider.id,
+            None,
             None,
             None,
             None,
@@ -1609,6 +1620,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1762,6 +1774,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -1904,6 +1917,7 @@ mod tests {
             &db,
             &ws.id,
             &provider.id,
+            None,
             None,
             None,
             None,
@@ -2068,6 +2082,7 @@ You are a senior Rust engineer."#,
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2175,6 +2190,7 @@ You are a planning specialist."#,
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2260,6 +2276,7 @@ You are broken."#,
             &ws_id,
             &provider_id,
             Some("broken"),
+            None,
             None,
             None,
             None,
@@ -2393,6 +2410,7 @@ You are broken."#,
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2452,8 +2470,17 @@ You are broken."#,
         provider_id: &str,
         parent_session_id: Option<&str>,
     ) -> crate::store::sessions::Session {
-        SessionService::create_session(db, ws_id, provider_id, None, None, None, parent_session_id)
-            .unwrap()
+        SessionService::create_session(
+            db,
+            ws_id,
+            provider_id,
+            None,
+            None,
+            None,
+            parent_session_id,
+            None,
+        )
+        .unwrap()
     }
 
     /// Helper: transition a session to "completed" so it can be used as a resume parent.
@@ -2573,6 +2600,7 @@ You are broken."#,
             None,
             None,
             Some("nonexistent-session-id"),
+            None,
         );
 
         match result {
@@ -2604,6 +2632,7 @@ You are broken."#,
             None,
             None,
             Some(&parent.id),
+            None,
         );
 
         match result {
@@ -2649,6 +2678,7 @@ You are broken."#,
             None,
             None,
             Some(&deepest.id),
+            None,
         );
 
         match result {
@@ -2691,6 +2721,7 @@ You are broken."#,
             None,
             None,
             Some(&b.id),
+            None,
         );
 
         match result {
@@ -2739,6 +2770,7 @@ You are broken."#,
             None,
             None,
             Some(&parent.id),
+            None,
         );
 
         match result {

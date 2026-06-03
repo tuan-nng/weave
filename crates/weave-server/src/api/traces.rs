@@ -88,6 +88,7 @@ mod tests {
             sse_manager: std::sync::Arc::new(crate::sse::SseManager::new()),
             specialists: std::sync::Arc::new(crate::specialist::SpecialistRegistry::new()),
             tools: std::sync::Arc::new(crate::tools::ToolRegistry::new()),
+            a2a_token: None,
         };
 
         let app = axum::Router::new()

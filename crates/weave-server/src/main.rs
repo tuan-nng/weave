@@ -1,3 +1,4 @@
+mod a2a;
 mod agent;
 mod api;
 mod config;
@@ -26,6 +27,7 @@ pub struct AppState {
     pub sse_manager: Arc<sse::SseManager>,
     pub specialists: Arc<specialist::SpecialistRegistry>,
     pub tools: Arc<tools::ToolRegistry>,
+    pub a2a_token: Option<String>,
 }
 
 #[tokio::main]
@@ -122,6 +124,16 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // 4.5 Read A2A token from environment
+    let a2a_token = std::env::var("WEAVE_A2A_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    if a2a_token.is_some() {
+        info!("A2A token authentication enabled");
+    } else {
+        info!("A2A token authentication disabled (WEAVE_A2A_TOKEN not set)");
+    }
+
     // 5. Build the API router
     let active_sessions = Arc::new(service::ActiveSessions::new());
     let sse_manager = Arc::new(sse::SseManager::new());
@@ -132,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         sse_manager,
         specialists,
         tools,
+        a2a_token,
     };
     let start_time = api::health::ServerStartTime(Instant::now());
     let app = api::router(state, start_time);

@@ -74,6 +74,7 @@ pub async fn create_session(
         body.model.as_deref(),
         body.cwd.as_deref(),
         body.parent_session_id.as_deref(),
+        None, // context_id — not set via the standard session API
     )?;
 
     Ok((StatusCode::CREATED, Json(DataResponse { data: session })))
@@ -454,6 +455,7 @@ mod tests {
             sse_manager,
             specialists,
             tools,
+            a2a_token: None,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 

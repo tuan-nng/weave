@@ -160,6 +160,26 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// Return the ID of the default workspace.
+    ///
+    /// Returns `NotFound` if the default workspace doesn't exist
+    /// (shouldn't happen — `ensure_default` is called at startup).
+    pub fn get_default_id(db: &Db) -> Result<String, AppError> {
+        db.conn()
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = 'default'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "workspace".into(),
+                    id: "default".into(),
+                },
+                other => AppError::from(other),
+            })
+    }
+
     /// Map a result row to a `Workspace`.
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Workspace> {
         Ok(Workspace {

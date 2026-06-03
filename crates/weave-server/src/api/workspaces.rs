@@ -145,6 +145,7 @@ mod tests {
             sse_manager,
             specialists,
             tools,
+            a2a_token: None,
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 

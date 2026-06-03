@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
@@ -69,6 +72,9 @@ impl IntoResponse for AppError {
             ),
             AppError::Provider(_) => (StatusCode::BAD_GATEWAY, "provider_error", self.to_string()),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict", self.to_string()),
+            AppError::Unauthorized(_) => {
+                (StatusCode::UNAUTHORIZED, "unauthorized", self.to_string())
+            }
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
                 (

@@ -35,6 +35,7 @@ pub fn make_test_state() -> AppState {
         sse_manager: Arc::new(crate::sse::SseManager::new()),
         specialists: Arc::new(crate::specialist::SpecialistRegistry::new()),
         tools: Arc::new(crate::tools::ToolRegistry::new()),
+        a2a_token: None,
     }
 }
 

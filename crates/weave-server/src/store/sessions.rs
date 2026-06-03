@@ -22,6 +22,7 @@ pub struct Session {
     pub provider_id: String,
     pub specialist_id: Option<String>,
     pub parent_session_id: Option<String>,
+    pub context_id: Option<String>,
     pub status: String,
     pub model: Option<String>,
     pub cwd: Option<String>,
@@ -117,6 +118,7 @@ impl SessionStore {
         model: Option<&str>,
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
+        context_id: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -125,16 +127,17 @@ impl SessionStore {
             .query_row(
                 "INSERT INTO sessions
                      (id, workspace_id, provider_id, specialist_id,
-                      parent_session_id, status, model, cwd, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'connecting', ?6, ?7, ?8, ?8)
+                      parent_session_id, context_id, status, model, cwd, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?9)
                  RETURNING id, workspace_id, provider_id, specialist_id,
-                           parent_session_id, status, model, cwd, created_at, updated_at",
+                           parent_session_id, context_id, status, model, cwd, created_at, updated_at",
                 rusqlite::params![
                     id,
                     workspace_id,
                     provider_id,
                     specialist_id,
                     parent_session_id,
+                    context_id,
                     model,
                     cwd,
                     now,
@@ -149,7 +152,7 @@ impl SessionStore {
         db.conn()
             .query_row(
                 "SELECT id, workspace_id, provider_id, specialist_id,
-                        parent_session_id, status, model, cwd, created_at, updated_at
+                        parent_session_id, context_id, status, model, cwd, created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 [id],
                 Self::map_row,
@@ -177,7 +180,7 @@ impl SessionStore {
         let conn = db.conn();
         let mut stmt = conn.prepare(
             "SELECT id, workspace_id, provider_id, specialist_id,
-                    parent_session_id, status, model, cwd, created_at, updated_at
+                    parent_session_id, context_id, status, model, cwd, created_at, updated_at
              FROM sessions
              WHERE workspace_id = ?1 AND id > ?2
              ORDER BY id ASC
@@ -221,7 +224,7 @@ impl SessionStore {
             "UPDATE sessions SET status = ?1, updated_at = ?2
              WHERE id = ?3 AND status NOT IN ('completed', 'cancelled', 'error')
              RETURNING id, workspace_id, provider_id, specialist_id,
-                       parent_session_id, status, model, cwd, created_at, updated_at",
+                       parent_session_id, context_id, status, model, cwd, created_at, updated_at",
             rusqlite::params![new_status, now, id],
             Self::map_row,
         );
@@ -265,11 +268,12 @@ impl SessionStore {
             provider_id: row.get(2)?,
             specialist_id: row.get(3)?,
             parent_session_id: row.get(4)?,
-            status: row.get(5)?,
-            model: row.get(6)?,
-            cwd: row.get(7)?,
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
+            context_id: row.get(5)?,
+            status: row.get(6)?,
+            model: row.get(7)?,
+            cwd: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
         })
     }
 
@@ -284,6 +288,7 @@ impl SessionStore {
         model: Option<&str>,
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
+        context_id: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -291,16 +296,17 @@ impl SessionStore {
         conn.query_row(
             "INSERT INTO sessions
                  (id, workspace_id, provider_id, specialist_id,
-                  parent_session_id, status, model, cwd, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'connecting', ?6, ?7, ?8, ?8)
+                  parent_session_id, context_id, status, model, cwd, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?9)
              RETURNING id, workspace_id, provider_id, specialist_id,
-                       parent_session_id, status, model, cwd, created_at, updated_at",
+                       parent_session_id, context_id, status, model, cwd, created_at, updated_at",
             rusqlite::params![
                 id,
                 workspace_id,
                 provider_id,
                 specialist_id,
                 parent_session_id,
+                context_id,
                 model,
                 cwd,
                 now,
@@ -515,6 +521,7 @@ pub(crate) mod tests {
             Some("claude-sonnet-4-20250514"),
             Some("/tmp"),
             None,
+            None,
         )
         .unwrap();
 
@@ -547,7 +554,8 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         // Valid transitions from 'connecting'
-        let s = SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+        let s =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
         assert_eq!(s.status, "connecting");
 
         let s = SessionStore::update_status(&db, &s.id, "ready").unwrap();
@@ -573,12 +581,14 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         // cancelled is terminal
-        let s = SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+        let s =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
         let s = SessionStore::update_status(&db, &s.id, "cancelled").unwrap();
         assert!(SessionStore::update_status(&db, &s.id, "ready").is_err());
 
         // error is terminal
-        let s = SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+        let s =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
         let s = SessionStore::update_status(&db, &s.id, "error").unwrap();
         assert!(SessionStore::update_status(&db, &s.id, "ready").is_err());
     }
@@ -589,7 +599,7 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         for _ in 0..5 {
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
         }
 
         let page1 = SessionStore::list_by_workspace(&db, &ws_id, None, 2).unwrap();
@@ -648,8 +658,16 @@ pub(crate) mod tests {
         let db = test_db();
         let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
 
-        let result =
-            SessionStore::create(&db, &ws.id, "nonexistent-provider", None, None, None, None);
+        let result = SessionStore::create(
+            &db,
+            &ws.id,
+            "nonexistent-provider",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             AppError::Validation(msg) => {
@@ -665,7 +683,7 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         let parent =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
         let child = SessionStore::create(
             &db,
             &ws_id,
@@ -674,6 +692,7 @@ pub(crate) mod tests {
             None,
             None,
             Some(&parent.id),
+            None,
         )
         .unwrap();
 
@@ -687,7 +706,7 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
         let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
 
         // Create 5 messages
         for i in 0..5 {
@@ -748,7 +767,7 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
         let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
 
         // Create 4 messages in order. We use the `id` field of the returned
         // Message to assert that the *insertion* order is preserved by the
@@ -779,7 +798,7 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
         let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
 
         let msg = MessageStore::create(
             &db,
@@ -805,7 +824,7 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
         let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
 
         let page = MessageStore::list_by_session(&db, &session.id, None, 10).unwrap();
         assert!(page.data.is_empty());
@@ -817,7 +836,7 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
         let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None).unwrap();
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
 
         MessageStore::create(&db, &session.id, "user", r#"{"text":"hi"}"#, None).unwrap();
         MessageStore::create(&db, &session.id, "assistant", r#"{"text":"hello"}"#, None).unwrap();

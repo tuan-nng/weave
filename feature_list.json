@@ -400,14 +400,15 @@
     {
       "id": "feat-029",
       "phase": "phase-5",
-      "behavior": "Inter-agent communication tools: send_message_to_agent (delivers message to another agent's session), read_agent_conversation (reads another agent's message history, last N messages), get_agent_status (status, message count, active tasks), delegate_task (assigns task to agent), report_to_parent (submits completion report with optional artifact references). Enables multi-agent coordination patterns.",
-      "verification": "cargo test -p weave-server -- test_inter_agent_messaging && cargo test -p weave-server -- test_delegate_task",
-      "state": "not_started",
+      "behavior": "A2A (Agent-to-Agent) protocol server endpoints: implements Google A2A v1.0 REST binding core subset. Server exposes an Agent Card at GET /.well-known/agent.json describing its capabilities (built from loaded specialists as skills). Agent endpoints: POST /api/a2a/messages (SendMessage — creates or continues a Weave session, sends prompt, returns Task), GET /api/a2a/tasks/{id} (GetTask — session status, optional history and artifacts), POST /api/a2a/tasks/{id}/cancel (CancelTask — idempotent session cancel), GET /api/a2a/tasks/{id}/subscribe (SubscribeToTask — SSE stream of TaskStatusUpdate events via futures::stream::unfold). Sessions are A2A targets (A2A task ID = session UUID). context_id on sessions links multiple sessions into one logical A2A task. Auth via Bearer token checked against WEAVE_A2A_TOKEN env var; auth disabled when not set (localhost dev).",
+      "verification": "cargo test -p weave-server -- test_a2a",
+      "state": "passing",
       "dependencies": [
-        "feat-012",
-        "feat-008"
+        "feat-009",
+        "feat-010",
+        "feat-011"
       ],
-      "evidence": ""
+      "evidence": "./init.sh all 3 layers pass; 582 Rust tests (was 569, +13 A2A: 8 types + 5 auth) + 76 frontend tests; clippy clean; rustfmt + prettier clean; cargo test -p weave-server -- test_a2a exits 0 (13/13). Backend: src/a2a/ module with types.rs (A2A protocol types: AgentCard, Task, TaskStatus, SendMessageRequest, Part, TaskEvent), auth.rs (Bearer token verification against WEAVE_A2A_TOKEN), agent_card.rs (GET /.well-known/agent.json handler — dynamic agent card from specialists), messages.rs (POST /api/a2a/messages — SendMessage, creates/continues Weave sessions), tasks.rs (GET /api/a2a/tasks/{id} — GetTask; POST /api/a2a/tasks/{id}/cancel — CancelTask; GET /api/a2a/tasks/{id}/subscribe — SubscribeToTask SSE via futures::stream::unfold), mod.rs (router). Migration 009 adds context_id TEXT column + index to sessions table. AppState gains a2a_token: Option<String>. AppError gains Unauthorized variant (401). Session::context_id field added. SessionStore::create, create_tx, SessionService::create_session all gain context_id: Option<&str> parameter. WorkspaceStore::get_default_id helper added. A2A router mounted at /api/a2a; agent card at /.well-known/agent.json. Auth disabled when WEAVE_A2A_TOKEN not set (localhost dev)."
     },
     {
       "id": "feat-030",
