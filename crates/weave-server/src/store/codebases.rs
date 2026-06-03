@@ -98,7 +98,13 @@ impl CodebaseStore {
                 rusqlite::params![id, workspace_id, path, branch, label, now],
                 Self::map_row,
             )
-            .map_err(map_insert_error)
+            .map_err(|e| {
+                crate::db::map_insert_error(
+                    e,
+                    "a codebase with the same path already exists in this workspace",
+                    "workspace",
+                )
+            })
     }
 
     /// Fetch a codebase by primary key. No workspace scoping — callers
@@ -254,42 +260,6 @@ pub fn build_detail(codebase: Codebase, git: Result<Option<GitStatus>, String>) 
             git_error: Some(msg),
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// Error mapping
-// ---------------------------------------------------------------------------
-
-/// Remap `INSERT` failures to the right `AppError` variant. The
-/// only expected `INSERT`-time error from the application is a
-/// UNIQUE-constraint violation on `(workspace_id, path)` (the spec
-/// is "create a new row", not "upsert"). A FK violation means the
-/// workspace was deleted between the API check and the INSERT
-/// (TOCTOU window) — surface as `NotFound` so the caller gets the
-/// same shape as the precheck. Anything else (NOT NULL, CHECK,
-/// internal) propagates as `Database`. See
-/// `store/artifacts.rs::map_insert_error` for the canonical pattern.
-fn map_insert_error(e: rusqlite::Error) -> AppError {
-    if let rusqlite::Error::SqliteFailure(err, _msg) = &e {
-        if err.code == rusqlite::ErrorCode::ConstraintViolation {
-            // SQLITE_CONSTRAINT_UNIQUE = 2067
-            if err.extended_code == 2067 {
-                return AppError::Conflict(
-                    "a codebase with the same path already exists in this workspace".to_string(),
-                );
-            }
-            // SQLITE_CONSTRAINT_FOREIGNKEY = 787 — workspace_id no
-            // longer exists (narrow TOCTOU window the API precheck
-            // cannot fully close). Surface as NotFound.
-            if err.extended_code == 787 {
-                return AppError::NotFound {
-                    resource: "workspace".into(),
-                    id: "(deleted between verify and insert)".into(),
-                };
-            }
-        }
-    }
-    AppError::from(e)
 }
 
 // ---------------------------------------------------------------------------

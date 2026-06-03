@@ -80,7 +80,13 @@ impl ArtifactStore {
                 rusqlite::params![id, task_id, artifact_type, content, now],
                 Self::map_row,
             )
-            .map_err(map_insert_error)
+            .map_err(|e| {
+                crate::db::map_insert_error(
+                    e,
+                    "an artifact with the same task_id and type already exists",
+                    "task",
+                )
+            })
     }
 
     /// Insert-or-replace by `(task_id, type)`. If a row exists,
@@ -267,40 +273,6 @@ fn verify_task_in_workspace(db: &Db, task_id: &str, workspace_id: &str) -> Resul
             id: task_id.into(),
         })
     }
-}
-
-/// Remap `INSERT` failures to the right `AppError` variant. The
-/// only expected `INSERT`-time error from the application is a
-/// UNIQUE-constraint violation on `(task_id, type)` (the spec is
-/// "create a new row", not "upsert"). A FK violation means the
-/// task was deleted between `verify_task_in_workspace` and the
-/// INSERT (TOCTOU window) — surface as `NotFound` so the caller
-/// gets the same shape as the precheck. Anything else (NOT NULL,
-/// CHECK, internal) propagates as `Database`. See
-/// `store/workspaces.rs::map_unique_violation` for the canonical
-/// pattern that this follows.
-fn map_insert_error(e: rusqlite::Error) -> AppError {
-    if let rusqlite::Error::SqliteFailure(err, _msg) = &e {
-        if err.code == rusqlite::ErrorCode::ConstraintViolation {
-            // SQLITE_CONSTRAINT_UNIQUE = 2067
-            if err.extended_code == 2067 {
-                return AppError::Conflict(
-                    "an artifact with the same task_id and type already exists".to_string(),
-                );
-            }
-            // SQLITE_CONSTRAINT_FOREIGNKEY = 787 — task_id no longer
-            // exists (the narrow TOCTOU race the verify→insert path
-            // cannot fully close). Surface as NotFound so the caller
-            // gets the same shape as the precheck failure.
-            if err.extended_code == 787 {
-                return AppError::NotFound {
-                    resource: "task".into(),
-                    id: "(deleted between verify and insert)".into(),
-                };
-            }
-        }
-    }
-    AppError::from(e)
 }
 
 // ---------------------------------------------------------------------------

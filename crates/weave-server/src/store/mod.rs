@@ -3,6 +3,7 @@ pub mod boards;
 pub mod codebases;
 pub mod columns;
 pub(crate) mod kanban_test_helpers;
+pub mod notes;
 pub mod providers;
 pub mod sessions;
 pub mod tasks;

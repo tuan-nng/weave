@@ -2129,7 +2129,8 @@ You are a senior Rust engineer."#,
         tool_registry.register(Arc::new(MockTool::new("create_card")));
         tool_registry.register(Arc::new(MockTool::new("move_card")));
         tool_registry.register(Arc::new(MockTool::new("search_cards")));
-        tool_registry.register(Arc::new(MockTool::new("notes")));
+        tool_registry.register(Arc::new(MockTool::new("read_note")));
+        tool_registry.register(Arc::new(MockTool::new("list_notes")));
         let tools = Arc::new(tool_registry);
 
         // Build a specialist registry with a specialist using "planning" profile
@@ -2213,9 +2214,10 @@ You are a planning specialist."#,
                 "create_card",
                 "get_board",
                 "get_task",
+                "list_notes",
                 "list_tasks",
                 "move_card",
-                "notes",
+                "read_note",
                 "search_cards",
                 "update_task_fields"
             ]

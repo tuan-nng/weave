@@ -5,6 +5,46 @@ use tracing::info;
 
 use crate::error::AppError;
 
+/// Remap an `INSERT`-time `rusqlite::Error` to the right `AppError`
+/// variant for the `*_store::create` path. The expected
+/// `INSERT`-time errors are:
+///
+///   - `SQLITE_CONSTRAINT_UNIQUE` (extended code 2067) — a UNIQUE
+///     index on the table tripped. Surfaced as `Conflict` with the
+///     caller-supplied `conflict_message` so the API caller sees a
+///     stable shape ("a X with the same Y already exists").
+///   - `SQLITE_CONSTRAINT_FOREIGNKEY` (extended code 787) — the
+///     parent row was deleted between the API check and the INSERT
+///     (the narrow TOCTOU window the precheck cannot fully close).
+///     Surfaced as `NotFound` with the supplied `fk_resource` so
+///     the caller gets the same shape as the precheck failure.
+///
+/// Anything else (NOT NULL, CHECK, internal) propagates as
+/// `Database` via `AppError::from`.
+///
+/// The third caller (the notes store, feat-030) triggered the
+/// hoist from per-store private helpers. The previous
+/// implementations live in `store::artifacts` and `store::codebases`
+/// and remain identical in behavior.
+pub fn map_insert_error(e: rusqlite::Error, conflict_message: &str, fk_resource: &str) -> AppError {
+    if let rusqlite::Error::SqliteFailure(err, _msg) = &e {
+        if err.code == rusqlite::ErrorCode::ConstraintViolation {
+            // SQLITE_CONSTRAINT_UNIQUE = 2067
+            if err.extended_code == 2067 {
+                return AppError::Conflict(conflict_message.to_string());
+            }
+            // SQLITE_CONSTRAINT_FOREIGNKEY = 787
+            if err.extended_code == 787 {
+                return AppError::NotFound {
+                    resource: fk_resource.to_string(),
+                    id: "(deleted between verify and insert)".to_string(),
+                };
+            }
+        }
+    }
+    AppError::from(e)
+}
+
 /// Database connection wrapper with interior mutability.
 ///
 /// Encapsulates a single SQLite connection behind a mutex.
@@ -31,6 +71,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("migrations/006_column_transition_gates.sql"),
     ),
     ("007", include_str!("migrations/007_artifacts.sql")),
+    ("008", include_str!("migrations/008_notes.sql")),
 ];
 
 impl Db {
@@ -112,7 +153,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// Verify database opens with correct pragmas and all 11 tables exist.
+    /// Verify database opens with correct pragmas and all 13 tables exist.
     ///
     /// Uses a temp file because `:memory:` databases don't support WAL mode.
     #[test]
@@ -144,7 +185,7 @@ mod tests {
             .expect("failed to query busy_timeout");
         assert_eq!(timeout, 5000, "busy_timeout should be 5000");
 
-        // Verify all 12 tables exist
+        // Verify all 13 tables exist
         let expected_tables = [
             "workspaces",
             "sessions",
@@ -158,6 +199,7 @@ mod tests {
             "traces",
             "file_changes",
             "artifacts",
+            "notes",
         ];
 
         {
@@ -201,6 +243,6 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 7, "user_version should be 7 after all migrations");
+        assert_eq!(v1, 8, "user_version should be 8 after all migrations");
     }
 }

@@ -9,6 +9,7 @@ pub mod artifact;
 pub mod fs;
 pub mod git;
 pub mod kanban;
+pub mod note;
 pub mod shell;
 pub mod task;
 
@@ -121,6 +122,11 @@ impl ToolRegistry {
                 "list_tasks".to_string(),
                 "update_task_status".to_string(),
                 "update_task_fields".to_string(),
+                "create_note".to_string(),
+                "read_note".to_string(),
+                "list_notes".to_string(),
+                "set_note_content".to_string(),
+                "append_to_note".to_string(),
             ],
         );
         profiles.insert(
@@ -135,6 +141,8 @@ impl ToolRegistry {
                 "list_tasks".to_string(),
                 "update_task_status".to_string(),
                 "list_artifacts".to_string(),
+                "read_note".to_string(),
+                "list_notes".to_string(),
             ],
         );
         profiles.insert(
@@ -147,7 +155,8 @@ impl ToolRegistry {
                 "create_card".to_string(),
                 "move_card".to_string(),
                 "search_cards".to_string(),
-                "notes".to_string(),
+                "read_note".to_string(),
+                "list_notes".to_string(),
             ],
         );
         profiles.insert(
@@ -155,7 +164,8 @@ impl ToolRegistry {
             vec![
                 "get_task".to_string(),
                 "list_tasks".to_string(),
-                "notes".to_string(),
+                "read_note".to_string(),
+                "list_notes".to_string(),
                 "list_artifacts".to_string(),
             ],
         );

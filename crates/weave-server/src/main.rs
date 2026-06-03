@@ -105,6 +105,12 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(tools::artifact::ListArtifactsTool {
         db: db.clone(),
     }));
+    // Note tools (feat-030) — see tools/note/ for the per-tool bodies.
+    tool_registry.register(Arc::new(tools::note::CreateNoteTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::note::ReadNoteTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::note::ListNotesTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::note::SetNoteContentTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::note::AppendToNoteTool { db: db.clone() }));
     let tools = Arc::new(tool_registry);
 
     // 4. Validate remote binding
