@@ -64,7 +64,7 @@ impl ToolExecutor for GitStatusTool {
 /// Parse `git status --porcelain=v1 -b` output.
 ///
 /// Returns (branch, staged, unstaged, untracked).
-fn parse_status(stdout: &str) -> (String, Vec<String>, Vec<String>, Vec<String>) {
+pub(crate) fn parse_status(stdout: &str) -> (String, Vec<String>, Vec<String>, Vec<String>) {
     let mut branch = String::new();
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();

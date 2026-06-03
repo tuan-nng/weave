@@ -86,6 +86,54 @@ export interface ModelInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Codebases (feat-032) — domain models matching `store::codebases` in
+// `crates/weave-server/src/store/`. JSON field names mirror the Rust
+// `Serialize` derives 1:1.
+// ---------------------------------------------------------------------------
+
+export interface Codebase {
+  id: string;
+  workspace_id: string;
+  /// Absolute filesystem path.
+  path: string;
+  /// Optional branch hint (display-only — the codebase tracks the
+  /// working tree, not a ref).
+  branch: string | null;
+  /// Optional human label (e.g. "Backend", "Mobile").
+  label: string | null;
+  created_at: string;
+}
+
+/// One recent commit (hash + first line of message).
+export interface GitCommit {
+  hash: string;
+  message: string;
+}
+
+/// Git status snapshot. Returned inside `CodebaseDetail` when the
+/// path is a git repo AND git is callable. `branch` is empty when
+/// the repo has no commits. `dirty_files` is the union of
+/// staged + unstaged + untracked paths. `recent_commits` is up to
+/// the last 5 commits on HEAD.
+export interface GitStatus {
+  branch: string;
+  dirty_files: string[];
+  recent_commits: GitCommit[];
+}
+
+/// Composite response for `GET /api/codebases/{id}?wid={wid}`.
+///
+/// `git_status` is `null` and `git_error` is `Some(msg)` when the
+/// path is not a git repo or git is broken. The row is always
+/// present so the client can offer edit/delete regardless of git's
+/// state.
+export interface CodebaseDetail {
+  codebase: Codebase;
+  git_status: GitStatus | null;
+  git_error: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Kanban (feat-026) — domain models matching `store::boards`, `store::columns`,
 // `store::tasks` in `crates/weave-server/src/store/`. JSON field names mirror
 // the Rust `Serialize` derives 1:1.
@@ -213,6 +261,19 @@ export interface CreateCardRequest {
   description?: string;
   position?: number;
   status?: TaskStatus;
+}
+
+// ---------------------------------------------------------------------------
+// Codebase request DTOs (feat-032). Matches
+// `crates/weave-server/src/api/codebases.rs:CreateCodebaseRequest`.
+// ---------------------------------------------------------------------------
+
+export interface CreateCodebaseRequest {
+  /// Absolute filesystem path. The backend validates this is
+  /// absolute, exists, and is a git repo at create time.
+  path: string;
+  branch?: string;
+  label?: string;
 }
 
 export interface UpdateTaskRequest {

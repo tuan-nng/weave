@@ -59,6 +59,26 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  {
+    label: "Codebases",
+    href: ROUTES.codebases,
+    icon: (
+      <svg
+        className="w-[18px] h-[18px]"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={1.8}
+      >
+        {/* branch icon — three dots and connecting lines, evoking a git graph */}
+        <circle cx="6" cy="6" r="1.5" />
+        <circle cx="6" cy="18" r="1.5" />
+        <circle cx="18" cy="6" r="1.5" />
+        <path strokeLinecap="round" d="M6 7.5v9" />
+        <path strokeLinecap="round" d="M7.5 6h4a3 3 0 013 3v0" />
+      </svg>
+    ),
+  },
 ];
 
 const SECONDARY_NAV = [

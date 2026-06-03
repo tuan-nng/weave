@@ -126,6 +126,21 @@ pub fn seed_workspace_with_two_columns(db: &Db) -> (String, String, String, Stri
     (workspace_id, board_id, col1_id, col2_id)
 }
 
+/// Seed: default workspace + one codebase row at the given path.
+/// Returns `(workspace_id, codebase_id)`.
+///
+/// Used by `store::codebases` and `api::codebases` tests (feat-032)
+/// that need a registered codebase without going through the full
+/// `WorkspaceStore::ensure_default → CodebaseStore::create` chain.
+pub fn seed_workspace_with_codebase(db: &Db, path: &str) -> (String, String) {
+    let (workspace_id, _, _) = seed_workspace_with_board(db);
+    let codebase_id =
+        crate::store::codebases::CodebaseStore::create(db, &workspace_id, path, None, None)
+            .expect("seed codebase")
+            .id;
+    (workspace_id, codebase_id)
+}
+
 /// Seed an Anthropic provider in the given DB. Returns the provider id.
 ///
 /// Mirrors the config shape used by `store::sessions::tests::seed_deps`

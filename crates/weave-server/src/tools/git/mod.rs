@@ -5,8 +5,13 @@
 
 mod commit;
 mod diff;
-mod log;
-mod status;
+// `log` and `status` modules are `pub(crate)` so the API layer can
+// reuse their parsers (e.g. `api::codebases::compose_git_status`
+// composes the composite GET response from `parse_status` +
+// `parse_log` instead of re-parsing porcelain). The remaining
+// modules stay private — only their `*Tool` struct is re-exported.
+pub(crate) mod log;
+pub(crate) mod status;
 
 pub use commit::GitCommitTool;
 pub use diff::GitDiffTool;

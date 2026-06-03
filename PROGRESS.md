@@ -9,12 +9,12 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-03
-- **Latest commit:** 0d2dfd0 (feat-031 artifact tools for agents; Phase 6 fixes already in the commit, verified)
-- **Active feature:** none — feat-031 (artifact tools) fully closed out; all 8 critical+important Phase 6 fixes applied and verified; 6 nice-to-haves deferred for follow-up sessions
+- **Latest commit:** not committed yet (feat-032 implementation in working tree)
+- **Active feature:** none — feat-032 (CodebaseStore) fully closed out; verification command `cargo test -p weave-server -- test_codebase_crud && cargo test -p weave-server -- test_codebase_git_status` exits 0 (2/2 passing); `./init.sh` all 3 layers pass
 - **Build status:** green — `cargo build -p weave-server` succeeds; `./init.sh` all 3 layers pass
-- **Test status:** green — 491 Rust tests + 76 frontend tests pass. `test_artifact_transition_gate` has 4 steps (incl. re-block on different column). `test_provide_updates_when_present_preserves_id` sleeps 1.1s and asserts `updated_at` bump.
-- **Lint status:** green — clippy clean on `--all-targets` (production + tests), fmt clean. The pre-existing `type_complexity` warning at `service/sessions.rs:869` is out of scope. The 3 `needless_borrow` warnings in `list_artifacts.rs:91-93` are fixed.
-- **This session**: documentation-only reconciliation. Audited the 8 Phase 6 fixes — all present in the code at the cited line numbers. No commits.
+- **Test status:** green — 518 Rust tests (was 491, +27: 16 store + 7 api + 4 helper) + 83 frontend tests (was 76, +7 in `codebases.test.tsx`) pass
+- **Lint status:** green — clippy clean on `--all-targets`, fmt clean, prettier clean. The pre-existing `type_complexity` warning at `service/sessions.rs:869` is out of scope (unchanged from before this session).
+- **This session**: feat-032 implementation + 2 Phase 6 cleanups (moved `run_git_in_path` from store to api layer to fix layering; collapsed redundant if/else in `compose_git_status`). 4-agent simplify fan-out got rate-limited (429) — review was done inline.
 
 ## Completed Since Project Start
 
@@ -61,7 +61,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Out-of-Scope Items Noticed
 
-From the feat-022 code review (3 parallel agents), deferred for a follow-up session:
+### From feat-032 (this session)
+
+- **`map_insert_error` duplicated** in `store/artifacts.rs` and `store/codebases.rs` (UNIQUE 2067 → Conflict, FK 787 → NotFound). Both are private fns with identical bodies. ~20 lines of duplication across 2 callers; could hoist to `db.rs` or a `store::error_map` helper when a 3rd caller appears. Skipped per "minimal backend" architecture decision.
+- **`pub(crate) mod status; pub(crate) mod log;`** in `tools/git/mod.rs` — exposing the whole module to make 2 parsers (`parse_status`, `parse_log`) reachable. Could refactor to a `tools::git::parsers` submodule. Skipped: diff is small, comment explains why.
+- **Per-`GET` git subprocesses**: `compose_git_status` runs 2-3 git invocations synchronously on every detail fetch. Could be cached (in-memory or DB-backed) with a TTL. Out of scope for feat-032 (spec didn't ask); revisit when a page-load latency concern surfaces.
+- **`compose_git_status` fallback** uses 2 probes (`status` then `rev-parse`) to distinguish "not a repo" from "git broken". Could merge into a single `git status` and inspect stderr for "not a git repository". Negligible savings (~10ms in the unhappy path) — skipped.
+
+### From the feat-022 code review (3 parallel agents), deferred for a follow-up session:
 - **#7**: Relocate `parseFullText` from `journey-sidebar.tsx` to `useJourney`'s `select` callback — keeps the data layer responsible for parsing and makes the parsed shape stable across consumers. The current placement is a small smell, not a bug.
 - **#9**: Three toggle entry points for one bit of state (chat header "Journey" button, sidebar rail chart icon, sidebar panel × close). Each is independently wired to the same `setJourneyOpen` callback, so they stay in sync, but the surface is over-large. Decide whether to drop the panel × close (rail is always visible) or drop the rail. UX call, not a defect.
 - **#10**: No responsive layout below 1024px viewport — opening the sidebar squeezes the chat column to ~40px and overflows the aside horizontally. Needs a design call (overlay drawer vs. full-screen modal) and an Open Design mockup. v2 work.
@@ -91,9 +98,42 @@ From feat-031 code review (3 parallel agents), the 8 critical+important findings
 ## Next Steps
 
 1. feat-031 fully closed out — all 8 critical+important Phase 6 fixes are in the code and verified by `./init.sh` (see 2026-06-03 session note below). 6 nice-to-haves remain deferred (see "Out-of-Scope Items Noticed" section).
-2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-032, feat-033, feat-034, feat-035. feat-032 (CodebaseStore) is the natural follow-on to feat-031 (kanban) and the kanban spec rows in `feature_list.json` reference it.
+2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-033, feat-034, feat-035. feat-030 (WorktreeStore) is the natural follow-on to feat-032 (sessions↔codebase via `find_by_cwd_prefix` would be wired up first); feat-033 (Enhanced health check) is the simplest +1-week starter.
 
 ## Session Notes
+
+### 2026-06-03 — feat-032 (CodebaseStore) implementation + Phase 6 cleanups
+
+Full 7-phase workflow: Discovery → Codebase Exploration → Clarifying Questions → Architecture Design → Implementation → Quality Review → Summary. Chose feat-032 next (the natural follow-on to feat-031 + the kanban spec rows reference it). User-approved hybrid backend: minimal (pub(crate) parsers, no service::git module) + clean frontend URL (`/workspaces/:wid/codebases/:cid` mirrors boards).
+
+**Backend (Rust, +4 new, +5 modified):**
+- `store/codebases.rs` (~430 lines) — `Codebase`, `CodebaseDetail`, `GitStatus`, `GitCommit`, `CodebaseStore` (create/get_by_id/get_in_workspace/list_by_workspace/delete/find_by_cwd_prefix), `map_insert_error` (feat-031 pattern, 2067→Conflict, 787→NotFound), `build_detail`, 16 tests covering CRUD + cross-workspace + find_by_cwd_prefix semantics (longest match wins, exact path, partial-segment safety via `path || '/%'`)
+- `api/codebases.rs` (~520 lines) — 4 handlers (create/list/get/delete) + `compose_git_status` (runs `git status --porcelain=v1 -b` + `git log --oneline` via tokio::process::Command, falls back to `git rev-parse --git-dir` probe to distinguish "not a repo" from "git broken") + 7 tests covering CRUD + relative-path rejection + non-git-dir rejection + cross-workspace 404
+- `tools/git/{mod,status,log}.rs` — `parse_status`/`parse_log` made `pub(crate)`, modules `status`/`log` made `pub(crate)` (with comment explaining why)
+- `store/kanban_test_helpers.rs` — `seed_workspace_with_codebase` helper
+- `api/mod.rs` + `store/mod.rs` — registrations
+
+**Frontend (TS/React, +4 new, +6 modified):**
+- `hooks/use-codebase.ts` — 4 hooks (useCodebases, useCodebase, useCreateCodebase, useDeleteCodebase) + type re-exports
+- `pages/codebases.tsx` — list page with per-workspace grouping, modal-based create form (path + label, monospace path input)
+- `pages/codebase.tsx` — composite detail with identity dl + git status (branch + dirty files) + recent commits, graceful-degrade via ErrorBanner when `git_error` is set
+- `__tests__/codebases.test.tsx` — 7 tests (list grouping, empty workspaces, hidden section when empty, create-button validation, composite detail, git_error banner, graceful degrade)
+- `lib/{types,api,query-keys,routes}.ts` + `app/{layout,router}.tsx` — 5 new types, codebases API namespace + query key block + 2 routes, Codebases nav entry
+
+**Phase 6 cleanups (inline — 4-agent simplify fan-out got rate-limited at 429):**
+- **Fixed**: `run_git_in_path` moved from `store/codebases.rs` (layering violation — store spawning git subprocesses) to `api/codebases.rs` as a private fn. Store no longer imports `PathBuf` or `tokio::process::Command`.
+- **Fixed**: Collapsed redundant `if branch.is_empty() && recent_commits.is_empty() && dirty_files.is_empty()` if/else in `compose_git_status` (both branches returned the same `Ok(Some(GitStatus{...}))`) into a single return + clearer comment.
+- **Skipped (with reasoning)**: `map_insert_error` duplication between `store/artifacts.rs` and `store/codebases.rs` — minimal-backend scope, ~20 lines, only 2 callers. Will revisit when a 3rd caller appears.
+- **Skipped**: `pub(crate) mod status`/`log` — could refactor to `tools::git::parsers` submodule but diff is small. Skipped per altitude review.
+- **Skipped**: Per-GET git subprocess caching — out of scope (spec didn't ask).
+- **Skipped**: Merge `status`+`rev-parse` into one probe — negligible savings.
+
+**Final state:**
+- 518 Rust tests pass (was 491, +27)
+- 83 frontend tests pass (was 76, +7)
+- `./init.sh` all 3 layers pass (lint + test + build + smoke)
+- `feature_list.json`: feat-032 state set to `"passing"` with evidence citing test counts and the deferred wiring note for `find_by_cwd_prefix`
+- Working tree NOT committed (user to commit at their discretion)
 
 ### 2026-06-03 — feat-031 Phase 6 fixes: reconciliation only (code was already clean)
 
@@ -167,7 +207,7 @@ From feat-031 code review (3 parallel agents), the 8 critical+important findings
 ## Next Steps
 
 1. feat-031 fully closed out — all 8 critical+important Phase 6 fixes are in the code and verified by `./init.sh` (see 2026-06-03 session note below). 6 nice-to-haves remain deferred (see "Out-of-Scope Items Noticed" section).
-2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-032, feat-033, feat-034, feat-035. feat-032 (CodebaseStore) is the natural follow-on to feat-031 (kanban) and the kanban spec rows in `feature_list.json` reference it.
+2. Pick the next `not_started` feature from `feature_list.json`. The candidates with all-passing dependencies are feat-029, feat-030, feat-033, feat-034, feat-035. feat-030 (WorktreeStore) is the natural follow-on to feat-032 (sessions↔codebase via `find_by_cwd_prefix` would be wired up first); feat-033 (Enhanced health check) is the simplest +1-week starter.
 
 ## Session Notes
 

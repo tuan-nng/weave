@@ -47,4 +47,12 @@ export const queryKeys = {
     detail: (workspaceId: string, boardId: string) =>
       [...queryKeys.boards.all(), "detail", workspaceId, boardId] as const,
   },
+
+  // Codebases (feat-032). Same workspace-scoped pattern as boards.
+  codebases: {
+    all: () => [...queryKeys.all, "codebases"] as const,
+    list: (workspaceId: string) => [...queryKeys.codebases.all(), "list", workspaceId] as const,
+    detail: (workspaceId: string, codebaseId: string) =>
+      [...queryKeys.codebases.all(), "detail", workspaceId, codebaseId] as const,
+  },
 } as const;

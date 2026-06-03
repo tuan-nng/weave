@@ -1,9 +1,12 @@
 import type {
   Board,
   BoardDetail,
+  Codebase,
+  CodebaseDetail,
   Column,
   CreateBoardRequest,
   CreateCardRequest,
+  CreateCodebaseRequest,
   CreateColumnRequest,
   CreateProviderRequest,
   CreateSessionRequest,
@@ -229,5 +232,25 @@ export const api = {
         }),
       delete: (taskId: string) => apiFetch<null>(`/api/tasks/${taskId}`, { method: "DELETE" }),
     },
+  },
+
+  // Codebases (feat-032). List/create are workspace-scoped. The
+  // composite GET and DELETE take the workspace id as a `?wid=`
+  // query param so the server can run the cross-workspace 404 guard.
+  codebases: {
+    list: (workspaceId: string) => apiFetch<Codebase[]>(`/api/workspaces/${workspaceId}/codebases`),
+    get: (workspaceId: string, codebaseId: string) =>
+      apiFetch<CodebaseDetail>(
+        `/api/codebases/${codebaseId}?wid=${encodeURIComponent(workspaceId)}`,
+      ),
+    create: (workspaceId: string, data: CreateCodebaseRequest) =>
+      apiFetch<Codebase>(`/api/workspaces/${workspaceId}/codebases`, {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    delete: (workspaceId: string, codebaseId: string) =>
+      apiFetch<null>(`/api/codebases/${codebaseId}?wid=${encodeURIComponent(workspaceId)}`, {
+        method: "DELETE",
+      }),
   },
 };

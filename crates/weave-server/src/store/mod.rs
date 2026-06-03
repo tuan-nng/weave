@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod boards;
+pub mod codebases;
 pub mod columns;
 pub(crate) mod kanban_test_helpers;
 pub mod providers;

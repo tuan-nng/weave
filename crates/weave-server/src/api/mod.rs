@@ -1,3 +1,4 @@
+pub mod codebases;
 pub mod health;
 pub mod kanban;
 pub mod providers;
@@ -106,6 +107,17 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             axum::routing::patch(kanban::update_task).delete(kanban::delete_task),
         )
         .route("/api/boards/{bid}/stream", get(kanban::board_stream))
+        // Codebase routes (feat-032). list/create are workspace-scoped;
+        // get/delete are at the top level and take `?wid=` for the
+        // cross-workspace 404 guard.
+        .route(
+            "/api/workspaces/{wid}/codebases",
+            get(codebases::list_codebases).post(codebases::create_codebase),
+        )
+        .route(
+            "/api/codebases/{id}",
+            get(codebases::get_codebase).delete(codebases::delete_codebase),
+        )
         .layer(axum::Extension(state))
         .layer(axum::Extension(start_time))
         .fallback_service(static_assets::spa_service())

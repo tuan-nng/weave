@@ -76,7 +76,7 @@ impl ToolExecutor for GitLogTool {
 }
 
 /// Parse `git log --oneline` output into (hash, message) pairs.
-fn parse_log(stdout: &str) -> Vec<Value> {
+pub(crate) fn parse_log(stdout: &str) -> Vec<Value> {
     stdout
         .lines()
         .filter(|line| !line.is_empty())

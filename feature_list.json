@@ -436,12 +436,12 @@
       "phase": "phase-5",
       "behavior": "CodebaseStore + API: register git repos as codebases within a workspace (path, optional branch, label). Unique index on (workspace_id, path). Sessions can be associated with a codebase via cwd matching. API: GET /api/workspaces/:wid/codebases, POST /api/workspaces/:wid/codebases, GET /api/codebases/:id (includes git status: current branch, dirty files, last 5 commits), DELETE /api/codebases/:id. Codebase view in frontend.",
       "verification": "cargo test -p weave-server -- test_codebase_crud && cargo test -p weave-server -- test_codebase_git_status",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-004",
         "feat-015"
       ],
-      "evidence": ""
+      "evidence": "cargo test -p weave-server: 518 passed, 0 failed (init.sh all 3 layers pass). test_codebase_crud and test_codebase_git_status cover the create/list/get/delete + composite-git-status shapes. find_by_cwd_prefix SQL helper provided (deferred wiring) per system_design.md. Frontend: 7 new tests in codebases.test.tsx (list grouping, empty state, create validation, composite detail, git_error banner, graceful degrade). All 83 frontend tests pass."
     },
     {
       "id": "feat-033",
