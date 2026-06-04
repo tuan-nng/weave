@@ -36,6 +36,7 @@ pub fn make_test_state() -> AppState {
         specialists: Arc::new(crate::specialist::SpecialistRegistry::new()),
         tools: Arc::new(crate::tools::ToolRegistry::new()),
         a2a_token: None,
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     }
 }
 

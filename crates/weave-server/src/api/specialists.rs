@@ -41,6 +41,7 @@ mod tests {
             specialists: Arc::new(specialists),
             tools: Arc::new(crate::tools::ToolRegistry::new()),
             a2a_token: None,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 

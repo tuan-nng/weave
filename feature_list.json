@@ -460,11 +460,11 @@
       "phase": "phase-5",
       "behavior": "Graceful shutdown: on SIGTERM/SIGINT, stop accepting new connections, wait for in-flight requests (30s timeout), cancel all active agent sessions (abort provider streams), flush SQLite WAL checkpoint, log shutdown sequence. tokio::select! on signal and server handle. Active SSE clients receive disconnect event.",
       "verification": "cargo test -p weave-server -- test_graceful_shutdown",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-009"
       ],
-      "evidence": ""
+      "evidence": "./init.sh all 3 layers pass; 605 Rust tests + 83 frontend tests pass (12 new: test_sse_wire_event_shutdown_type, test_broadcast_shutdown_fans_out_to_all_subscribers, test_broadcast_shutdown_no_subscribers_is_noop, test_active_sessions_cancel_all_cancels_every_token, test_active_sessions_cancel_all_empty_is_zero, test_active_sessions_len_tracks_inserts_and_removes, test_db_checkpoint_runs_and_returns_structured_result, test_reap_orphans_marks_non_terminal_sessions_as_error, test_reap_orphans_empty_database_is_noop, test_reap_orphans_idempotent, test_graceful_shutdown, test_shutdown_signal_with_cap_fires_token_on_timeout). Verification command cargo test -p weave-server -- test_graceful_shutdown exits 0. Smoke test reaped 12 orphan sessions from prior run and observed SIGTERM → cleanup → 'Server shut down gracefully' in the log."
     },
     {
       "id": "feat-035",

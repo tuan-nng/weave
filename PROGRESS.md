@@ -9,10 +9,10 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-04
-- **Latest commit:** d7d5cb5 (feat-029 A2A server endpoints)
+- **Latest commit:** 8f07550 (feat-034 graceful shutdown)
 - **Active feature:** none — all features through phase-5 are passing
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 593 Rust tests + 83 frontend tests pass
+- **Test status:** green — 605 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
 
 ## Completed Since Project Start
@@ -51,6 +51,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-031**: Artifact tools (request, provide, list) + kanban transition gate-3
 - [x] **feat-032**: CodebaseStore + API + frontend pages
 - [x] **feat-033**: Enhanced health check (version, uptime, provider total/healthy/unhealthy, per-workspace active_sessions, db size_bytes, wal_checkpoint_pending; 10s provider-health TTL cache; always 200 with status="ok"|"degraded")
+- [x] **feat-034**: Graceful shutdown — SIGTERM/SIGINT/drain-cap race, parent CancellationToken in AppState, ActiveSessions::cancel_all, SseWireEvent::Shutdown + SseManager::broadcast_shutdown, Db::checkpoint (TRUNCATE), service::startup::reap_orphans (transactional mark-as-error), spawn cleanup task, run() extracted from main(). 12 new tests.
 - [x] **feat-036**: Session chat re-implementation (message_persisted SSE, useReducer, id-based handoff)
 
 ## In Progress
@@ -65,7 +66,6 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 | ID | Description | Dependencies |
 |----|-------------|-------------|
-| feat-034 | Graceful shutdown | feat-009 |
 | feat-035 | Configuration (env vars, CLI, TOML) | feat-001 |
 
 ## Key Architectural Decisions
@@ -125,4 +125,4 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - Dev: `just dev` (backend) + `just dev-web` (frontend). Production: single binary.
 - `./init.sh` is the one-command full verification gate. Run it before and after any change.
 - `feature_list.json` is the single source of truth for task scope — do not track work in comments or TODOs.
-- The 3 remaining features are feat-033 (health check), feat-034 (graceful shutdown), feat-035 (config).
+- The 1 remaining feature is feat-035 (config).

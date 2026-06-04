@@ -296,6 +296,7 @@ mod tests {
             specialists: Arc::new(crate::specialist::SpecialistRegistry::new()),
             tools: Arc::new(crate::tools::ToolRegistry::new()),
             a2a_token: None,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
 
         let app = test_app(state);

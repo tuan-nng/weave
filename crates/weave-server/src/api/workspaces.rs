@@ -146,6 +146,7 @@ mod tests {
             specialists,
             tools,
             a2a_token: None,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 

@@ -107,6 +107,37 @@ impl SseManager {
             .map(|c| c.load(Ordering::Relaxed))
             .unwrap_or(1)
     }
+
+    /// Broadcast a shutdown event to every live channel.
+    ///
+    /// Iterates all known entity channels (lazily created by `subscribe` or
+    /// `broadcast`) and pushes a `Shutdown` event into each. Returns the
+    /// number of entities notified. The event is also stored in the per-entity
+    /// ring buffer so a client that reconnects after the server has already
+    /// sent `Shutdown` will still see the disconnect notice on replay.
+    ///
+    /// Used by the graceful-shutdown sequence (feat-034) to tell every SSE
+    /// client to close their EventSource before the server returns. A
+    /// shutdown with no live subscribers is a no-op.
+    pub fn broadcast_shutdown(&self, reason: &str) -> usize {
+        // Snapshot the entity ids under the read lock so we don't hold it
+        // across the per-entity `broadcast` call (which takes the write lock).
+        let entity_ids: Vec<String> = {
+            let channels = self.channels.read().expect("sse channels lock poisoned");
+            channels.keys().cloned().collect()
+        };
+
+        for entity_id in &entity_ids {
+            self.broadcast(
+                entity_id,
+                SseWireEvent::Shutdown {
+                    reason: reason.to_string(),
+                },
+            );
+        }
+
+        entity_ids.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +277,15 @@ pub enum SseWireEvent {
         board_id: String,
     },
     Heartbeat {},
+    /// Server-initiated disconnect notice. Broadcast to all live subscribers
+    /// when the server begins a graceful shutdown (feat-034). The `reason`
+    /// is `"sigterm"`, `"sigint"`, or a test marker; clients should close
+    /// their EventSource on receipt. Distinct from `Connected` (sent on
+    /// subscribe) and `Gap` (sent on replay overflow) — this is a
+    /// server-initiated "the stream is ending now" event.
+    Shutdown {
+        reason: String,
+    },
 }
 
 impl SseWireEvent {
@@ -269,6 +309,7 @@ impl SseWireEvent {
             Self::ColumnAdded { .. } => "column_added",
             Self::SessionStarted { .. } => "session_started",
             Self::Heartbeat { .. } => "heartbeat",
+            Self::Shutdown { .. } => "shutdown",
         }
     }
 }
@@ -444,6 +485,53 @@ mod tests {
             .event_type(),
             "message_persisted"
         );
+    }
+
+    /// `Shutdown` event uses the `shutdown` SSE event type so the frontend
+    /// can dispatch it without parsing the data payload.
+    #[tokio::test]
+    async fn test_sse_wire_event_shutdown_type() {
+        assert_eq!(
+            SseWireEvent::Shutdown {
+                reason: "sigterm".into()
+            }
+            .event_type(),
+            "shutdown"
+        );
+    }
+
+    /// `broadcast_shutdown` fans out a `Shutdown` event to every live
+    /// subscriber across all entities. Subscribers see the event with the
+    /// exact reason that was passed in.
+    #[tokio::test]
+    async fn test_broadcast_shutdown_fans_out_to_all_subscribers() {
+        let manager = SseManager::new();
+        let mut rx_session = manager.subscribe("session-1");
+        let mut rx_board = manager.subscribe("board-42");
+
+        let count = manager.broadcast_shutdown("sigterm");
+        assert_eq!(count, 2, "both entities should be notified");
+
+        let event_session = rx_session.recv().await.expect("session subscriber");
+        let event_board = rx_board.recv().await.expect("board subscriber");
+
+        match event_session {
+            SseWireEvent::Shutdown { reason } => assert_eq!(reason, "sigterm"),
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+        match event_board {
+            SseWireEvent::Shutdown { reason } => assert_eq!(reason, "sigterm"),
+            other => panic!("expected Shutdown, got {other:?}"),
+        }
+    }
+
+    /// A shutdown with no live channels is a no-op — it does not panic,
+    /// does not allocate, and returns 0.
+    #[tokio::test]
+    async fn test_broadcast_shutdown_no_subscribers_is_noop() {
+        let manager = SseManager::new();
+        let count = manager.broadcast_shutdown("sigint");
+        assert_eq!(count, 0, "no entities should be notified");
     }
 
     #[tokio::test]
