@@ -34,4 +34,4 @@ cd web && npm install && npm run dev
 ## Docs
 
 - [Architecture](docs/ARCHITECTURE.md) — system design, domain model, API surface
-- [Plan](docs/PLAN.md) — implementation phases and file structure
+- [Plan](docs/road-map/PLAN.md) — implementation phases and file structure

@@ -9,6 +9,18 @@ Format: dated, scoped, with rejected alternatives.
 Newest at the top.
 -->
 
+## 2026-06-04: Multi-runtime strategy committed
+
+- **Decision:** Adopt the multi-runtime direction recorded in [`docs/road-map/multi-runtime-strategy.md`](docs/road-map/multi-runtime-strategy.md). Sessions grow `runtime` and `mode` columns. The `Provider` table widens to a discriminated union (HTTP vs CLI). `CliCodingAgent` is added as a new `CodingAgent` impl for Claude Code, Codex, and OpenCode. Attended mode is a separate `Terminal` abstraction, parallel to `CodingAgent`.
+- **Reason:** Claude Code, Codex, and OpenCode are now credible primary coding surfaces. None of them gives the user a conductor layer. Weave already has the trait shape, the journey/trace store, and the kanban — adding the three CLIs is a strategic extension, not a new product.
+- **Rejected alternatives:**
+  - Stay single-runtime (Anthropic API only) — rejected: leaves Weave as one of many single-model tools, with no compelling reason to exist once a user has Claude Code installed.
+  - Add WebSocket / process-spawning into the HTTP path — rejected: violates the SSE-only transport decision and conflates the HTTP agent model with the subprocess model.
+  - Implement multi-runtime by spawning a local HTTP proxy per CLI — rejected: adds an unnecessary process and a wire-format conversion the OS can do for us.
+  - Add "attended mode" as a `CodingAgent` impl — rejected: attended mode is user-driven, not model-driven. A single trait cannot represent both lifecycles cleanly. Kept separate.
+- **Constraints introduced:** A session table migration is required to add `runtime` and `mode` plus per-CLI session-id columns. Existing rows default to `runtime = "anthropic-api"`, `mode = "native"`. The `Provider` table migration is additive (new config fields, no rename of existing ones). The `CodingAgent` trait itself does not change.
+- **Revisit when:** The implementation plan is written and the first CLI is integrated — verify the trait shape still fits (the `2026-05-31` "trait shape" revisit trigger).
+
 ## 2026-05-31: Single Rust binary with embedded frontend
 
 - **Decision:** Build a single Rust binary that embeds the compiled React frontend at build time via `build.rs`. No separate Node.js runtime in production.

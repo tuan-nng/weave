@@ -78,9 +78,17 @@ Use `ci sketch <file> -p weave` for declarations, `ci show <sym> --with-body -p 
 
 Load only the one relevant to your task — don't read the whole set. Start with `SYSTEM_DESIGN.md` for the routing map, then drill into specifics.
 
+### Road-map
+Forward-looking plans and strategies. Read these when deciding *what to build next* or *why we're going in a direction*.
+
+- `docs/road-map/PLAN.md` — Implementation phases and file creation order (the original v1 plan, now historical)
+- `docs/road-map/multi-runtime-strategy.md` — Strategy for adding Claude Code / Codex / OpenCode as session runtimes (the active strategic direction)
+
+### Current state
+Reference material for the system *as it exists today*. Load only the one relevant to your task.
+
 - `docs/SYSTEM_DESIGN.md` — Routing map: architecture layers, session state machine, what was dropped. **Start here.**
 - `docs/ARCHITECTURE.md` — System layout, domain model overview
-- `docs/PLAN.md` — Implementation phases and file creation order
 - `docs/data-model.md` — Load when adding/modifying DB tables or understanding schema
 - `docs/api-contracts.md` — Load when adding/modifying API endpoints or SSE events
 - `docs/domain-services.md` — Load for service orchestration, session lifecycle, specialist loading

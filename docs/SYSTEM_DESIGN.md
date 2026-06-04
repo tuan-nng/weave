@@ -80,6 +80,7 @@ Load only the one relevant to your task — don't read the whole set.
 | [`docs/concurrency-model.md`](concurrency-model.md) | Async task spawning, shared state, graceful shutdown |
 | [`docs/frontend-architecture.md`](frontend-architecture.md) | Component trees, hooks, SSE→cache sync strategy |
 | [`docs/operations.md`](operations.md) | Dependencies, security, logging, backup, performance |
+| [`docs/road-map/multi-runtime-strategy.md`](road-map/multi-runtime-strategy.md) | Strategy for adding Claude Code / Codex / OpenCode as session runtimes — runtime × mode model, positioning, non-obvious calls. Load when discussing multi-CLI support, the `Provider` widening, or kanban runtime binding. |
 
 ## Session State Machine
 
@@ -124,4 +125,4 @@ Load only the one relevant to your task — don't read the whole set.
 | MCP server mode | Out of scope |
 | Webhooks / schedules | Out of scope |
 | i18n | English only for v1 |
-| Multiple concurrent providers | One active provider per session is sufficient |
+| Multiple concurrent providers | One active provider per session is sufficient — **amended 2026-06-04**: see [`docs/road-map/multi-runtime-strategy.md`](road-map/multi-runtime-strategy.md). Multi-runtime *across* sessions is now a goal; multi-runtime *inside* a single session is not. |

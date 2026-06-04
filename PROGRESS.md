@@ -14,11 +14,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 605 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green.
+- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green. New strategic plan `docs/road-map/multi-runtime-strategy.md` (registered in `docs/SYSTEM_DESIGN.md` routing map; `DECISIONS.md` entry added). Doc reorganization: `docs/PLAN.md` and `docs/multi-runtime-strategy.md` moved into `docs/road-map/`. CLAUDE.md topic-docs list split into "Road-map" + "Current state" subsections. All cross-references updated. Doc-only changes, no code.
 
 ## Completed Since Project Start
 
-- [x] System design docs (`docs/SYSTEM_DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`)
+- [x] System design docs (`docs/SYSTEM_DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/road-map/PLAN.md`)
 - [x] **feat-001**: Binary skeleton (CLI, tracing, health check, graceful shutdown)
 - [x] **feat-002**: SQLite with WAL mode, migrations (11 tables)
 - [x] **feat-003**: Shared error types (AppError, ProviderError)
@@ -123,6 +123,21 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - 11 files: `index.md` (landing), `quickstart.md` (5-min path), then one per feature (workspaces, providers, sessions, journey, kanban, codebases, specialists), plus `common-workflows.md` and `best-practices.md`.
 - Internal `docs/` (ARCHITECTURE, data-model, etc.) stays the engineer-facing source of truth; `docs/user/` is the user-facing counterpart and the right handoff for new Weave users.
 - No code changes, all 605 Rust + 83 frontend tests still green, `./init.sh` still passes.
+
+### 2026-06-04 — Multi-runtime strategic plan
+- Wrote `docs/road-map/multi-runtime-strategy.md` (proposed). Commits the direction: sessions gain a `runtime` (`claude-code` / `codex` / `opencode` / `anthropic-api` / `openai-api` / `openai-compatible`) and a `mode` (`native` / `wrapped` / `attended`) axis. The `Provider` table widens to a discriminated union; `CliCodingAgent` is a new `CodingAgent` impl; attended mode is a separate `Terminal` abstraction.
+- Records the non-obvious calls: specialists stay prompt-only, models come from the tool not Weave, journey is the unifying artifact, per-turn subprocess for wrapped mode, the `Multiple concurrent providers` drop in `SYSTEM_DESIGN.md` is amended.
+- Registered in `docs/SYSTEM_DESIGN.md` routing map. Pointer in `DECISIONS.md` (2026-06-04 entry). Doc-only change — no code, no schema migration, no API surface change yet.
+- Implementation plan is the next deliverable; the strategic plan explicitly defers schema, API, and frontend decisions to it.
+
+### 2026-06-04 — Doc reorganization into `docs/road-map/`
+- Moved `docs/PLAN.md` and `docs/multi-runtime-strategy.md` into `docs/road-map/`. PLAN moved via `git mv` (rename preserved in history); strategy moved via plain `mv` (was untracked).
+- `docs/SYSTEM_DESIGN.md` — added the new doc to the topic-docs routing map; amended the "Multiple concurrent providers" drop to point at the new path. Link targets (relative `(...)`) fixed for both occurrences.
+- `CLAUDE.md` — Topic Docs list split into **Road-map** (forward-looking plans) and **Current state** (reference material for the system as it exists). Two new entries in the Road-map subsection.
+- `README.md` — Plan link updated to the new path.
+- `DECISIONS.md` — multi-runtime strategy link updated (full path retained since DECISIONS.md is at the repo root).
+- `PROGRESS.md` — historical journal entries updated to the new paths so future readers can click through.
+- Verification: `grep` for the old paths returns empty; `grep` for stale relative link targets returns empty. Doc-only — `./init.sh` is not affected.
 
 ## Notes for Next Session
 
