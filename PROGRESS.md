@@ -14,7 +14,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 605 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green. New strategic plan `docs/road-map/multi-runtime-strategy.md` (registered in `docs/SYSTEM_DESIGN.md` routing map; `DECISIONS.md` entry added). Doc reorganization: `docs/PLAN.md` and `docs/multi-runtime-strategy.md` moved into `docs/road-map/`. CLAUDE.md topic-docs list split into "Road-map" + "Current state" subsections. All cross-references updated. Doc-only changes, no code.
+- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green. New strategic plan `docs/road-map/multi-runtime-strategy.md` (registered in `docs/SYSTEM_DESIGN.md` routing map; `DECISIONS.md` entry added; updated to prioritize the native Anthropic tool-execution loop as the first prerequisite and Claude Code CLI wrapped mode as the first CLI target). Doc reorganization: `docs/PLAN.md` and `docs/multi-runtime-strategy.md` moved into `docs/road-map/`. CLAUDE.md topic-docs list split into "Road-map" + "Current state" subsections. All cross-references updated. Doc-only changes, no code.
 
 ## Completed Since Project Start
 
@@ -125,8 +125,8 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - No code changes, all 605 Rust + 83 frontend tests still green, `./init.sh` still passes.
 
 ### 2026-06-04 — Multi-runtime strategic plan
-- Wrote `docs/road-map/multi-runtime-strategy.md` (proposed). Commits the direction: sessions gain a `runtime` (`claude-code` / `codex` / `opencode` / `anthropic-api` / `openai-api` / `openai-compatible`) and a `mode` (`native` / `wrapped` / `attended`) axis. The `Provider` table widens to a discriminated union; `CliCodingAgent` is a new `CodingAgent` impl; attended mode is a separate `Terminal` abstraction.
-- Records the non-obvious calls: specialists stay prompt-only, models come from the tool not Weave, journey is the unifying artifact, per-turn subprocess for wrapped mode, the `Multiple concurrent providers` drop in `SYSTEM_DESIGN.md` is amended.
+- Wrote `docs/road-map/multi-runtime-strategy.md` (committed strategic direction). Commits the direction: sessions gain a Runtime Tool axis (`claude-code` / `codex` / `opencode` / `anthropic-api` / `openai-api` / `openai-compatible`) and a `mode` (`native` / `wrapped` / `attended`) axis. The first implementation prerequisite is the native Anthropic tool-execution loop; Claude Code CLI wrapped mode is the first CLI target. The `Provider` table widens to a discriminated union; `CliCodingAgent` is added alongside `AnthropicAgent` with request/context shape to revisit; attended mode is a separate `Terminal` abstraction.
+- Records the non-obvious calls: Claude Code CLI wrapped mode is the first implementation target, specialists stay prompt-only, models come from the tool not Weave, journey is the unifying artifact, per-turn subprocess for wrapped mode, the `Multiple concurrent providers` drop in `SYSTEM_DESIGN.md` is amended.
 - Registered in `docs/SYSTEM_DESIGN.md` routing map. Pointer in `DECISIONS.md` (2026-06-04 entry). Doc-only change — no code, no schema migration, no API surface change yet.
 - Implementation plan is the next deliverable; the strategic plan explicitly defers schema, API, and frontend decisions to it.
 
