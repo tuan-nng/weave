@@ -12,7 +12,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Latest commit:** d7d5cb5 (feat-029 A2A server endpoints)
 - **Active feature:** none — all features through phase-5 are passing
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 582 Rust tests + 83 frontend tests pass
+- **Test status:** green — 593 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
 
 ## Completed Since Project Start
@@ -50,6 +50,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-030**: Note tools for agents (create, read, list, set_content, append)
 - [x] **feat-031**: Artifact tools (request, provide, list) + kanban transition gate-3
 - [x] **feat-032**: CodebaseStore + API + frontend pages
+- [x] **feat-033**: Enhanced health check (version, uptime, provider total/healthy/unhealthy, per-workspace active_sessions, db size_bytes, wal_checkpoint_pending; 10s provider-health TTL cache; always 200 with status="ok"|"degraded")
 - [x] **feat-036**: Session chat re-implementation (message_persisted SSE, useReducer, id-based handoff)
 
 ## In Progress
@@ -64,7 +65,6 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 | ID | Description | Dependencies |
 |----|-------------|-------------|
-| feat-033 | Enhanced health check | feat-007 |
 | feat-034 | Graceful shutdown | feat-009 |
 | feat-035 | Configuration (env vars, CLI, TOML) | feat-001 |
 
@@ -97,6 +97,9 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - feat-030: Note tools (5 tool executors, `notes` table via migration 008). `map_insert_error` hoisted to `db.rs` (3rd caller). 569 Rust tests.
 - feat-031 Phase 6 reconciliation: all 8 critical+important review fixes confirmed already-applied. PROGRESS.md updated.
 - feat-032: CodebaseStore + API + frontend (4 new backend files, 4 new frontend files). 518 Rust tests + 83 frontend tests.
+
+### 2026-06-04 — feat-033
+- Enhanced health check (`GET /api/health`): added `providers` (total/healthy/unhealthy), `active_sessions` (per-workspace `BTreeMap`), `database` (size_bytes, wal_checkpoint_pending, reachable). Raw JSON shape preserved (liveness-probe contract). Provider health probed in parallel via `futures_util::future::join_all` with a 10s TTL cache; `add_agent`/`remove_agent` invalidate the cache. `degraded` rule: `healthy == 0 || !database.reachable`. 593 Rust tests pass (11 new). 4 files touched: `db.rs` (+ `path: PathBuf`, `size_bytes`, `wal_checkpoint_pending`), `store/sessions.rs` (+ `count_active_by_workspace` using the `TERMINAL` const), `agent/registry.rs` (+ `health_cache`, `cached_health_summary`, `agents_snapshot`, `invalidate_health_cache`), `api/health.rs` (rewrote `HealthResponse`, added `ProviderSummary`/`DatabaseInfo` and 4 integration tests including a cache-hit + healthy-status pair).
 
 ### 2026-06-02 — feat-022, feat-026, feat-023
 - feat-022: Journey sidebar. Backend SQL filter tightened to Decision+Error only. Frontend: 5 components, 14 new tests.

@@ -4,6 +4,7 @@ use chrono::Utc;
 use rusqlite::Connection;
 use rusqlite::ErrorCode;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use tracing::info;
 use uuid::Uuid;
 
@@ -314,6 +315,39 @@ impl SessionStore {
             Self::map_row,
         )
         .map_err(map_fk_violation)
+    }
+
+    /// Count non-terminal sessions grouped by workspace.
+    ///
+    /// A session is "active" iff its `status` is not in [`TERMINAL`]
+    /// (i.e. not `completed`, `cancelled`, or `error`). The returned
+    /// `BTreeMap` is sorted by `workspace_id` (deterministic JSON key
+    /// order). Workspaces with zero active sessions are absent from
+    /// the result (`GROUP BY` only emits non-empty groups).
+    ///
+    /// Used by `GET /api/health` to report per-workspace active counts
+    /// without enumerating individual sessions. Reads are served by the
+    /// existing `idx_sessions_workspace` and `idx_sessions_status`.
+    pub fn count_active_by_workspace(db: &Db) -> Result<BTreeMap<String, u64>, AppError> {
+        // Build the `IN (?, ?, ?)` placeholder list at runtime so the
+        // status names stay in sync with the [`TERMINAL`] const.
+        let placeholders = TERMINAL.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT workspace_id, COUNT(*) FROM sessions
+             WHERE status NOT IN ({placeholders})
+             GROUP BY workspace_id"
+        );
+
+        let conn = db.conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut out = BTreeMap::new();
+        let mut rows = stmt.query(rusqlite::params_from_iter(TERMINAL.iter().copied()))?;
+        while let Some(row) = rows.next()? {
+            let ws: String = row.get(0)?;
+            let n: i64 = row.get(1)?;
+            out.insert(ws, n as u64);
+        }
+        Ok(out)
     }
 }
 
@@ -849,5 +883,44 @@ pub(crate) mod tests {
             page.data.is_empty(),
             "messages should be cascade-deleted with session"
         );
+    }
+
+    /// `count_active_by_workspace` excludes terminal sessions, omits
+    /// workspaces with zero active sessions, and returns a `BTreeMap`
+    /// sorted by `workspace_id`.
+    #[test]
+    fn test_count_active_by_workspace_excludes_terminal() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+        // Need a second workspace — create one directly.
+        let ws2_id = crate::store::workspaces::WorkspaceStore::create(&db, "ws2")
+            .expect("create ws2")
+            .id;
+
+        // ws1: 2 active, 1 terminal
+        let s1a =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s1b =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s1t =
+            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        SessionStore::update_status(&db, &s1a.id, "ready").unwrap();
+        SessionStore::update_status(&db, &s1b.id, "ready").unwrap();
+        SessionStore::update_status(&db, &s1t.id, "completed").unwrap();
+
+        // ws2: 1 active
+        let s2a =
+            SessionStore::create(&db, &ws2_id, &provider_id, None, None, None, None, None).unwrap();
+        SessionStore::update_status(&db, &s2a.id, "ready").unwrap();
+
+        let map = SessionStore::count_active_by_workspace(&db).expect("count");
+
+        assert_eq!(
+            map.get(&ws_id),
+            Some(&2),
+            "ws1: 2 active, 1 terminal excluded"
+        );
+        assert_eq!(map.get(&ws2_id), Some(&1), "ws2: 1 active");
+        assert_eq!(map.len(), 2, "only two workspaces with active sessions");
     }
 }

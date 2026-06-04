@@ -1,9 +1,14 @@
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::info;
 
 use crate::error::AppError;
+
+/// Path literal for in-memory databases. SQLite treats `:memory:` as a
+/// reserved name; we compare against it in `size_bytes` to return
+/// `None` (no on-disk file).
+const IN_MEMORY_PATH: &str = ":memory:";
 
 /// Remap an `INSERT`-time `rusqlite::Error` to the right `AppError`
 /// variant for the `*_store::create` path. The expected
@@ -51,6 +56,9 @@ pub fn map_insert_error(e: rusqlite::Error, conflict_message: &str, fk_resource:
 /// WAL mode allows concurrent reads; writes acquire the lock.
 pub struct Db {
     conn: Mutex<Connection>,
+    /// Path the database was opened from (including `":memory:"`).
+    /// Used by `size_bytes` to short-circuit in-memory databases.
+    path: PathBuf,
 }
 
 /// Ordered list of (version, sql) migrations embedded at compile time.
@@ -93,6 +101,7 @@ impl Db {
 
         let db = Self {
             conn: Mutex::new(conn),
+            path: path.to_path_buf(),
         };
         db.run_migrations()?;
 
@@ -126,6 +135,34 @@ impl Db {
             Err(e) => Err(e),
             // tx drops here on Err, auto-rollback via RAII
         }
+    }
+
+    /// File size of the underlying SQLite database in bytes.
+    ///
+    /// Returns `None` for in-memory databases (`:memory:`) — the path
+    /// has no on-disk file. Returns `None` if the file metadata cannot
+    /// be read (e.g. the file was deleted between open and probe).
+    pub fn size_bytes(&self) -> Option<u64> {
+        if self.path == Path::new(IN_MEMORY_PATH) {
+            return None;
+        }
+        std::fs::metadata(&self.path).ok().map(|m| m.len())
+    }
+
+    /// Whether the WAL has frames that have not yet been merged into
+    /// the main database file.
+    ///
+    /// Runs `PRAGMA wal_checkpoint(PASSIVE)` and inspects the result
+    /// tuple `(busy, log, checkpointed)`. `PASSIVE` does not block
+    /// writers and never returns an error in normal operation; any
+    /// unexpected error is reported as `false` (best-effort).
+    pub fn wal_checkpoint_pending(&self) -> bool {
+        let conn = self.conn.lock().expect("database lock poisoned");
+        let result: rusqlite::Result<(i64, i64, i64)> =
+            conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            });
+        matches!(result, Ok((_, log, ckpt)) if log > ckpt)
     }
 
     /// Run all pending migrations in order.
@@ -245,5 +282,51 @@ mod tests {
 
         assert_eq!(v1, v2, "user_version should not change on second run");
         assert_eq!(v1, 9, "user_version should be 9 after all migrations");
+    }
+
+    /// `size_bytes` returns `None` for `:memory:` databases — there is
+    /// no on-disk file to measure.
+    #[test]
+    fn test_db_size_bytes_returns_none_for_memory() {
+        let db = Db::open(Path::new(":memory:")).expect("open :memory:");
+        assert_eq!(db.size_bytes(), None);
+    }
+
+    /// `size_bytes` returns `Some(n)` for a file-backed DB after
+    /// migrations have created tables. The exact size depends on
+    /// SQLite's page size and the migration footprint; we just check
+    /// it's non-zero.
+    #[test]
+    fn test_db_size_bytes_returns_some_for_file() {
+        let path = std::env::temp_dir().join("weave-test-db-size-bytes.db");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+
+        let db = Db::open(&path).expect("open file");
+        let size = db.size_bytes();
+        assert!(
+            size.is_some(),
+            "size_bytes should be Some for a file-backed db"
+        );
+        assert!(
+            size.unwrap() > 0,
+            "size_bytes should be > 0 after migrations"
+        );
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    /// `wal_checkpoint_pending` is best-effort and returns `bool`.
+    /// PASSIVE may auto-merge frames, so the value can be either true
+    /// or false after writes; we only assert the call succeeds.
+    #[test]
+    fn test_db_wal_checkpoint_pending_returns_bool() {
+        let db = Db::open(Path::new(":memory:")).expect("open :memory:");
+        // In-memory DBs have no WAL; the pragma returns (0,0,0).
+        assert!(!db.wal_checkpoint_pending());
     }
 }

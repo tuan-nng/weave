@@ -449,11 +449,11 @@
       "phase": "phase-5",
       "behavior": "Enhanced health check: GET /api/health returns version, uptime_seconds, provider count (total/healthy/unhealthy), active_sessions count, database size_bytes, wal_checkpoint_pending status. Provider health_check_all runs in parallel. Useful for monitoring and debugging.",
       "verification": "cargo test -p weave-server -- test_health_check_detailed",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-007"
       ],
-      "evidence": ""
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0. 593 Rust tests pass (11 new: test_health_check_detailed, test_health_active_sessions_per_workspace, test_health_database_size_bytes_for_file_db, test_health_check_status_ok_when_provider_healthy, test_db_size_bytes_returns_none_for_memory, test_db_size_bytes_returns_some_for_file, test_db_wal_checkpoint_pending_returns_bool, test_count_active_by_workspace_excludes_terminal, test_agents_snapshot_returns_empty_for_empty_registry, test_cached_health_summary_empty_registry, test_cached_health_summary_cache_hit_within_ttl)."
     },
     {
       "id": "feat-034",
