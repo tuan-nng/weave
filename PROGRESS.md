@@ -9,7 +9,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-04
-- **Latest commit:** 8f07550 (feat-034 graceful shutdown)
+- **Latest commit:** 026ac45 (feat-034 graceful shutdown)
 - **Active feature:** none — all features through phase-5 are passing
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 605 Rust tests + 83 frontend tests pass
