@@ -14,6 +14,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 605 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
+- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green.
 
 ## Completed Since Project Start
 
@@ -117,6 +118,12 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - Agent tools: filesystem, shell, git, task context, TraceCollector.
 - Session resume with parent chain validation.
 
+### 2026-06-04 — User-facing docs under `docs/user/`
+- Created `docs/user/` mirroring routa's `use-routa/` style: short, scannable, second-person, UX-focused (not internals).
+- 11 files: `index.md` (landing), `quickstart.md` (5-min path), then one per feature (workspaces, providers, sessions, journey, kanban, codebases, specialists), plus `common-workflows.md` and `best-practices.md`.
+- Internal `docs/` (ARCHITECTURE, data-model, etc.) stays the engineer-facing source of truth; `docs/user/` is the user-facing counterpart and the right handoff for new Weave users.
+- No code changes, all 605 Rust + 83 frontend tests still green, `./init.sh` still passes.
+
 ## Notes for Next Session
 
 - Package manager is **Bun** (not npm). Use `bun run test`, `bunx vite build`, etc.
@@ -126,3 +133,4 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - `./init.sh` is the one-command full verification gate. Run it before and after any change.
 - `feature_list.json` is the single source of truth for task scope — do not track work in comments or TODOs.
 - The 1 remaining feature is feat-035 (config).
+- `docs/user/` is the user-facing documentation set (created 2026-06-04). When a feature ships, consider whether its user-facing guide needs an update — but do not change internal `docs/*.md` from a user-doc session.
