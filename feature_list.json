@@ -72,6 +72,72 @@
         "feat-034",
         "feat-035"
       ]
+    },
+    {
+      "id": "phase-6",
+      "name": "Native Tool Loop",
+      "description": "Complete the native Anthropic tool-execution loop. Prerequisite for all wrapped-CLI work because journey and trace shapes depend on tools actually executing and being recorded. Anthropic API in native mode must keep its current behavior and gain a real tool-use loop.",
+      "features": [
+        "feat-037"
+      ]
+    },
+    {
+      "id": "phase-7",
+      "name": "Multi-Runtime Foundation",
+      "description": "Schema, model, and trait surface changes to carry runtime/mode on a session and a per-Runtime-Tool provider config. No user-facing surface change yet. The Provider table widens to a discriminated union (HTTP vs CLI); the CodingAgent trait gains a per-turn context; runtime x mode compatibility is enforced at session creation.",
+      "features": [
+        "feat-038",
+        "feat-039",
+        "feat-040",
+        "feat-041",
+        "feat-042"
+      ]
+    },
+    {
+      "id": "phase-8",
+      "name": "Claude Code CLI Wrapped Mode",
+      "description": "First CLI runtime target. Per-turn subprocess runner, fake-CLI test harness, Claude Code stream-json parser, PermissionMapper, CLI-native resume id persistence with message-history replay fallback, CLI -> journey translation, child-process reaping on crash, workspace-scoped CLI session validation, and an end-to-end CliCodingAgent conformance test. Anthropic API in native mode stays green throughout.",
+      "features": [
+        "feat-043",
+        "feat-044",
+        "feat-045",
+        "feat-046",
+        "feat-047",
+        "feat-048",
+        "feat-049",
+        "feat-050",
+        "feat-051"
+      ]
+    },
+    {
+      "id": "phase-9",
+      "name": "Multi-Runtime User Surface",
+      "description": "Settings, session creation, kanban, and A2A surfaces that let a user pick a Runtime Tool explicitly. The silent first-provider fallback is replaced with explicit Runtime Tool selection or a configured default.",
+      "features": [
+        "feat-052",
+        "feat-053",
+        "feat-054",
+        "feat-055",
+        "feat-056"
+      ]
+    },
+    {
+      "id": "phase-10",
+      "name": "Additional CLI Runtimes",
+      "description": "Codex and OpenCode adapters, built on the shared CliRunner, parser framework, PermissionMapper, fake-CLI harness, and conformance suite from Phase 8. Each adapter must pass the conformance suite to ship. Real CLI smoke tests are manual.",
+      "features": [
+        "feat-057",
+        "feat-058",
+        "feat-059"
+      ]
+    },
+    {
+      "id": "phase-11",
+      "name": "Attended Mode (Deferred)",
+      "description": "Attended mode is a separate Terminal abstraction (not a CodingAgent impl). Deferred until Phase 8 wrapped mode is stable and the lifecycle split (Weave drives the CLI vs. the user drives the CLI) is justified by real usage.",
+      "features": [
+        "feat-060"
+      ]
     }
   ],
   "features": [
@@ -488,6 +554,325 @@
         "feat-010"
       ],
       "evidence": "./init.sh all 3 layers pass; verification command exits 0."
+    },
+    {
+      "id": "feat-037",
+      "phase": "phase-6",
+      "behavior": "Complete the native Anthropic tool-execution loop in `AnthropicAgent::send_message`. The provider advertises Weave tools via MessageRequest.tools; on a `content_block_start` of type `tool_use` the agent collects the streamed `input_json_delta` events into a serde_json::Value, runs the named tool through ToolRegistry subject to the session's profile, appends a `tool_result` content block carrying the tool_use_id and the serialized result, and continues the model call. The `tool_use` `stop_reason` is the loop driver; the loop terminates on `end_turn` / `max_tokens` / `cancelled` / loop-limit-exceeded. Reuses TraceCollector to record tool_call events with name, sanitized input, output, and duration_ms. Handles: malformed input JSON, unknown tool name, tool input that fails JSON-schema validation, tool execution error (recorded in the tool_result and the loop continues), cancel mid-loop (the in-flight tool future is aborted, partial assistant text is persisted with stop_reason=cancelled), and a per-turn loop limit (default 8 iterations, configurable per session) that turns into stop_reason=error after a final `Sorry, too many tool calls` assistant message. Existing Anthropic API behavior is preserved: a model that does NOT call a tool is still a one-shot stream ending in `end_turn`.",
+      "verification": "cargo test -p weave-server -- test_native_tool_loop_basic && cargo test -p weave-server -- test_native_tool_loop_unknown_tool && cargo test -p weave-server -- test_native_tool_loop_validation_error && cargo test -p weave-server -- test_native_tool_loop_exec_error && cargo test -p weave-server -- test_native_tool_loop_limit && cargo test -p weave-server -- test_native_tool_loop_cancellation && cargo test -p weave-server -- test_native_tool_loop_no_tool_passes_through",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-006",
+        "feat-009",
+        "feat-012",
+        "feat-013"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-038",
+      "phase": "phase-7",
+      "behavior": "Add three columns to `sessions`: `runtime_kind TEXT NOT NULL DEFAULT 'anthropic-api'` (one of `anthropic-api` | `openai-api` | `openai-compatible` | `claude-code` | `codex` | `opencode`), `mode TEXT NOT NULL DEFAULT 'native'` (one of `native` | `wrapped` | `attended`), and `runtime_metadata_json TEXT` (nullable, JSON-encoded per-runtime state including the CLI-native session id for resume). Migration is a new SQL file under `resources/migrations/` applied in order; existing rows backfill to `runtime_kind='anthropic-api', mode='native', runtime_metadata_json=NULL`. `SessionStore::create` and `update` accept and persist these fields; `get` and `list` return them. `MessageStore` and the SSE `done` event include the runtime_kind and mode in their payload. The `parent_session_id` resume chain (feat-018) inherits the parent session's runtime/mode by default but accepts an override on the new session row. Schema change is additive; no column renames.",
+      "verification": "cargo test -p weave-server -- test_session_runtime_kind_migration && cargo test -p weave-server -- test_session_runtime_metadata_roundtrip && cargo test -p weave-server -- test_session_runtime_default_backfill",
+      "state": "not_started",
+      "dependencies": [
+        "feat-008"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-039",
+      "phase": "phase-7",
+      "behavior": "Widen the Provider table to a discriminated union. Add a `kind TEXT NOT NULL DEFAULT 'http'` column to `providers` (`http` | `cli`). HTTP rows carry the existing `base_url`, `api_key`, `default_model` (unchanged). CLI rows carry a new `binary_path TEXT`, `args_json TEXT`, `env_json TEXT`, `default_model TEXT`, and `permission_mode TEXT` (one of `accept-edits` | `default` | `plan` | `bypass-permissions` | CLI-specific strings). Both variants keep `name` and `default_model`. Migration is additive; existing rows backfill to `kind='http'`. `POST /api/providers` accepts the `kind` discriminator and validates the right shape (http requires base_url + api_key; cli requires binary_path; both require name + default_model). `GET /api/providers` and `GET /api/providers/:id` return `kind` and the kind-specific config. `add_provider` in ProviderRegistry builds the matching `CodingAgent` (HTTP → `AnthropicAgent`-style; CLI → `CliCodingAgent` placeholder until feat-051). `api_key` is stripped from responses as today. The `/api/providers/:id/models` endpoint is still HTTP-only in this feature; the CLI model cache is feat-042.",
+      "verification": "cargo test -p weave-server -- test_provider_kind_http_crud && cargo test -p weave-server -- test_provider_kind_cli_crud && cargo test -p weave-server -- test_provider_kind_validation && cargo test -p weave-server -- test_provider_api_key_stripped_across_kinds && cargo test -p weave-server -- test_provider_migration_backfills_http",
+      "state": "not_started",
+      "dependencies": [
+        "feat-007"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-040",
+      "phase": "phase-7",
+      "behavior": "Enforce the Runtime Tool x mode compatibility matrix from §4 of the strategy at session creation and at kanban / A2A binding time. New types: `RuntimeKind` enum (`AnthropicApi`, `OpenAiApi`, `OpenAiCompatible`, `ClaudeCode`, `Codex`, `Opencode`) and `SessionMode` enum (`Native`, `Wrapped`, `Attended`). New function `validate_runtime_mode_compat(runtime: RuntimeKind, mode: SessionMode) -> Result<(), AppError>`. Allowed pairs: HTTP kinds only with `native`; CLI kinds with `wrapped` (and `attended` once Phase 11 lands; rejected until then with a clear error referencing the deferred feature). Mismatches return `AppError::Validation` with a `code: \"runtime_mode_incompatible\"` payload listing the runtime, the mode, and the modes the runtime supports. Session creation (`POST /api/workspaces/:wid/sessions`), kanban auto-spawn (`try_automate_lane`), and A2A `POST /api/a2a/messages` all call this. UI is updated separately in feat-053 to surface the error.",
+      "verification": "cargo test -p weave-server -- test_runtime_mode_compat_anthropic_native_ok && cargo test -p weave-server -- test_runtime_mode_compat_anthropic_wrapped_rejected && cargo test -p weave-server -- test_runtime_mode_compat_claude_code_wrapped_ok && cargo test -p weave-server -- test_runtime_mode_compat_claude_code_native_rejected && cargo test -p weave-server -- test_runtime_mode_compat_attended_rejected_for_now && cargo test -p weave-server -- test_kanban_autospawn_rejects_incompatible_pair && cargo test -p weave-server -- test_a2a_rejects_incompatible_pair",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-038",
+        "feat-039"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-041",
+      "phase": "phase-7",
+      "behavior": "Extend the `CodingAgent` trait so CLI-backed turns can carry per-session execution context. New `TurnContext` struct: `{ session_id, workspace_id, cwd, codebase_root, cli_resume_id: Option<String>, effective_permissions: PermissionSnapshot, cancellation_token: CancellationToken }`. `send_message` gains a `&TurnContext` parameter alongside `MessageRequest`; the signature change is breaking for any external implementer, but no external implementer exists (private trait). `AnthropicAgent` (native mode) ignores CLI-only fields; `AnthropicAgent` still receives cwd if it needs it for permission gating (it does not today, but the field is forwarded for future use). New `CliCodingAgent` is added in feat-043 onward and uses the full TurnContext. `SessionService::send_prompt` builds the TurnContext from session state and threads it through; the `done` SSE event includes the chosen runtime_kind + mode. `PermissionSnapshot` is a placeholder struct in this feature; the real mapper is feat-046.",
+      "verification": "cargo test -p weave-server -- test_turn_context_construction && cargo test -p weave-server -- test_turn_context_passes_cwd_and_codebase && cargo test -p weave-server -- test_anthropic_agent_signature_change_compiles && cargo test -p weave-server -- test_session_service_passes_turn_context",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-009",
+        "feat-038"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-042",
+      "phase": "phase-7",
+      "behavior": "Per-Runtime-Tool model cache. New `ModelCache` keyed on Provider id with a configurable TTL (default 5 minutes, much longer than the 10s provider-health TTL). HTTP `list_models` keeps its current behavior (cache hit returns the cached list). CLI `list_models` shells out to the registered binary; results are cached. The cache is invalidated on `add_provider` / `remove_provider` and on explicit `POST /api/providers/:id/refresh-models` (which also rejects the call for HTTP kinds to keep the API symmetric). Cache miss path: shell out, parse, store, return. Cache hit path: return the snapshot. `GET /api/providers/:id/models` is the public surface. Cache contents are not persisted; they are rebuilt at startup. The 10s health-check TTL from feat-033 is unchanged.",
+      "verification": "cargo test -p weave-server -- test_model_cache_hit && cargo test -p weave-server -- test_model_cache_miss_shells_out && cargo test -p weave-server -- test_model_cache_invalidation_on_add_remove && cargo test -p weave-server -- test_model_cache_refresh_endpoint && cargo test -p weave-server -- test_model_cache_refresh_rejected_for_http && cargo test -p weave-server -- test_model_cache_ttl_expiry",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-007",
+        "feat-039"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-043",
+      "phase": "phase-8",
+      "behavior": "Per-turn CLI subprocess runner used by every `CliCodingAgent`. New `CliRunner` in `crates/weave-server/src/agent/cli_runner.rs`. Takes a `CliInvocation { binary, args, env, cwd, stdin_prompt }` plus a `TurnContext` (for cancellation, session id tracking, and the active permission snapshot). Spawns via `tokio::process::Command`, captures stdout as a line stream (one JSON event per line for Claude Code's `stream-json` grammar; the line-stream is the parser's input, not the runner's concern), captures stderr to a bounded buffer (256KB, then truncated with a clear warning), waits on the child with `tokio::select!` on the cancel token, and on cancel sends SIGTERM to the child and SIGKILL after 5s. On exit, the child handle is removed from the per-session process table. The runner is intentionally per-turn: there is no long-lived process state and the child is reaped before the next turn starts. Exit code 0 is success; non-zero is mapped to `StreamEvent::Error` and the runner's stream is closed. Reuses `shell_exec`'s output truncation policy (100KB on stdout, last-256KB on stderr).",
+      "verification": "cargo test -p weave-server -- test_cli_runner_basic && cargo test -p weave-server -- test_cli_runner_cwd_env_args && cargo test -p weave-server -- test_cli_runner_cancel_sends_sigterm && cargo test -p weave-server -- test_cli_runner_exit_nonzero_maps_to_error && cargo test -p weave-server -- test_cli_runner_stderr_capture && cargo test -p weave-server -- test_cli_runner_per_turn_process_table",
+      "state": "not_started",
+      "dependencies": [
+        "feat-009",
+        "feat-041"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-044",
+      "phase": "phase-8",
+      "behavior": "A test-only fake CLI binary under `crates/weave-server/tests/fakes/fake_cli/` that emulates a Claude-Code-style CLI for conformance tests. Reads `stream-json` style prompts from stdin (or argv, both supported via env var `FAKE_CLI_INPUT_MODE=stdin|argv`), emits a deterministic sequence of events on stdout (one JSON object per line) scripted by env vars (`FAKE_CLI_SCRIPT=text+tool+done`, etc.), supports `permission_denied`, `crash`, and `resume_unknown_session` scenarios via env-var flags, and echoes back the resume id (from argv or stdin) so tests can assert the runner passed it. The fake is a separate `[[bin]]` target in `weave-server` and is built by `cargo test -p weave-server`. Used by feat-051 (Claude Code e2e) and later by feat-058/059 (Codex, OpenCode).",
+      "verification": "cargo test -p weave-server -- test_fake_cli_emits_text_delta && cargo test -p weave-server -- test_fake_cli_emits_tool_use_and_result && cargo test -p weave-server -- test_fake_cli_permission_denied_scenario && cargo test -p weave-server -- test_fake_cli_crash_scenario && cargo test -p weave-server -- test_fake_cli_resume_unknown_session && cargo test -p weave-server -- test_fake_cli_echoes_resume_id",
+      "state": "not_started",
+      "dependencies": [],
+      "evidence": ""
+    },
+    {
+      "id": "feat-045",
+      "phase": "phase-8",
+      "behavior": "A line-stream parser that consumes Claude Code's `stream-json` output and converts each line into a `StreamEvent`. Handles: `text_delta` -> `TextDelta`; `tool_use` start (with `name` and empty `input`) -> `ToolUseStart`; `input_json_delta` -> `ToolUseDelta`; `tool_result` (with `tool_use_id` and `content`) -> `ToolResult`; `thinking` -> `Thinking`; `error` -> `Error`; `session_id` -> captured into `TurnContext::cli_resume_id` (so feat-047 can persist it); `done` (with `stop_reason`) -> `Done`. The parser is a state machine that tracks in-flight `content_block`s by their CLI-assigned ids and reconciles them with the Weave `tool_use` id. Malformed lines (invalid JSON, unknown event types, partial blocks) are logged at WARN and skipped — never fatal. The parser does NOT execute tools; that is the journey translator's job in feat-048. The parser is the only Claude-Code-specific piece; the rest of the runtime is shared with Codex and OpenCode via feat-057.",
+      "verification": "cargo test -p weave-server -- test_claude_code_parser_text_delta && cargo test -p weave-server -- test_claude_code_parser_tool_use_start_delta && cargo test -p weave-server -- test_claude_code_parser_tool_result && cargo test -p weave-server -- test_claude_code_parser_thinking && cargo test -p weave-server -- test_claude_code_parser_session_id_capture && cargo test -p weave-server -- test_claude_code_parser_done_stop_reason && cargo test -p weave-server -- test_claude_code_parser_malformed_line_skipped",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-046",
+      "phase": "phase-8",
+      "behavior": "`PermissionMapper` trait + Claude Code implementation. Trait: `fn effective_permissions(kind: RuntimeKind, profile: ToolProfile) -> PermissionSnapshot`. Snapshot is a struct of CLI-specific flags the runner must build into argv / env. Claude Code mapper: takes the Weave `ToolProfile` (`full` | `implementation` | `review` | `planning` | `reporting`) and emits the corresponding Claude Code `--permission-mode` value, an allowlist of Weave tool names, and the CLI flags the user agreed to. Concrete mapping table lives in `crates/weave-server/src/agent/permissions/claude_code.rs`. The snapshot is passed through `TurnContext::effective_permissions` (feat-041) and consumed by the runner when building argv (feat-043). Review profile maps to `plan`; implementation maps to `accept-edits`; reporting maps to `default` with no shell. Mapping is intentionally minimal: it does NOT try to mirror Weave's exact tool allowlist into Claude Code's tool list — Claude Code's tool surface is the CLI's responsibility. A snapshot is also a struct that can serialize to JSON for debugging (logged at DEBUG on each turn).",
+      "verification": "cargo test -p weave-server -- test_permission_mapper_trait_compiles && cargo test -p weave-server -- test_permission_mapper_claude_code_full && cargo test -p weave-server -- test_permission_mapper_claude_code_implementation && cargo test -p weave-server -- test_permission_mapper_claude_code_review && cargo test -p weave-server -- test_permission_mapper_claude_code_planning && cargo test -p weave-server -- test_permission_mapper_claude_code_reporting && cargo test -p weave-server -- test_permission_snapshot_serializes_to_json",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-012",
+        "feat-040",
+        "feat-041"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-047",
+      "phase": "phase-8",
+      "behavior": "CLI-native resume metadata persistence with message-history replay fallback. On a successful CLI turn, the CLI's native session id (captured by the parser in feat-045) is stored in `sessions.runtime_metadata_json['cli_resume_id']`. On the next `send_message` for the same session, the runner reads the stored id and passes it to the CLI via the resume flag the CLI expects (e.g., `--resume <id>` for Claude Code). If the CLI rejects the resume id (non-zero exit, or a structured `resume_unknown_session` error in stdout / stderr), the runner clears the stored id and falls back to message-history replay: rebuild the assistant context from the stored messages table and re-invoke the CLI without the resume flag. The `done` SSE event includes a `resume_state: ` `native` | `replayed` | `none` `` so the UI can surface which mode was used. If the user changes `runtime_kind` on a new session, the prior `cli_resume_id` is NOT inherited. The session header pill (feat-054) shows the resume state.",
+      "verification": "cargo test -p weave-server -- test_cli_resume_id_persisted_after_turn && cargo test -p weave-server -- test_cli_resume_id_passed_on_next_turn && cargo test -p weave-server -- test_cli_resume_fallback_replay_on_unknown && cargo test -p weave-server -- test_cli_resume_cleared_after_replay && cargo test -p weave-server -- test_cli_resume_not_inherited_across_runtime_switch && cargo test -p weave-server -- test_cli_resume_state_in_sse_done",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-008",
+        "feat-038",
+        "feat-041",
+        "feat-043",
+        "feat-045"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-048",
+      "phase": "phase-8",
+      "behavior": "`JourneyTranslator` that maps parsed CLI stream events into Weave trace events and `StreamEvent`s WITHOUT re-executing CLI tools. Text deltas pass through as `TextDelta`. Tool calls from the CLI (text + input from `ToolUseStart` + `ToolUseDelta`) become a `tool_call` trace event with the CLI's reported input and a placeholder duration captured from the time between `ToolUseStart` and the matching `ToolResult`; the trace is recorded in the `traces` table; `StreamEvent` is `ToolUseStart` / `ToolUseDelta` for UI display. The CLI is the source of truth for the tool result — the translator does NOT re-run the tool. File changes announced by the CLI (via a CLI-specific event type emitted by Claude Code) are recorded in the `file_changes` table. Thinking blocks become `decision` trace events. Errors become `error` trace events. The journey sidebar endpoint (feat-022) is unchanged. If a tool_use does not get a matching tool_result within the turn (CLI dropped it), the translator records a `tool_call` event with `status='orphaned'` so the journey still shows the attempt.",
+      "verification": "cargo test -p weave-server -- test_journey_translator_text_passthrough && cargo test -p weave-server -- test_journey_translator_tool_call_recorded && cargo test -p weave-server -- test_journey_translator_tool_not_re_executed && cargo test -p weave-server -- test_journey_translator_file_change_recorded && cargo test -p weave-server -- test_journey_translator_thinking_to_decision && cargo test -p weave-server -- test_journey_translator_error_to_error && cargo test -p weave-server -- test_journey_translator_orphaned_tool_use && cargo test -p weave-server -- test_journey_translator_dedupes_file_changes",
+      "state": "not_started",
+      "dependencies": [
+        "feat-005",
+        "feat-017",
+        "feat-043",
+        "feat-045"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-049",
+      "phase": "phase-8",
+      "behavior": "Child-process reaping on crash + per-session process tracking. Extends the existing `ActiveSessions` (added in feat-034) with a parallel `ActiveChildProcesses` table: `session_id -> tokio::process::Child handle + Pid`. New `service::startup::reap_cli_processes` (separate from `reap_orphans` for sessions) scans the filesystem for surviving CLI binaries whose parent pid is the Weave pid and whose session id matches a session that is no longer active (DB row terminal or missing) — terminates them with SIGTERM, waits 5s, then SIGKILL. Cancel routes SIGTERM to the tracked process and removes the entry on exit. Database-only orphan reaping (feat-034) is no longer sufficient once wrapped CLIs exist. Reaping is idempotent and re-runnable. Logs a count of reaped processes. Does not scan processes unrelated to Weave (filters on `parent_pid == weve_pid` and `argv[0]` matching a known registered CLI binary).",
+      "verification": "cargo test -p weave-server -- test_cli_reap_orphan_processes_terminates && cargo test -p weave-server -- test_cli_cancel_kills_tracked_process && cargo test -p weave-server -- test_cli_reap_idempotent && cargo test -p weave-server -- test_cli_reap_unrelated_process_untouched && cargo test -p weave-server -- test_cli_reap_runs_in_startup_sequence",
+      "state": "not_started",
+      "dependencies": [
+        "feat-009",
+        "feat-034",
+        "feat-043"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-050",
+      "phase": "phase-8",
+      "behavior": "Workspace-scoped CLI session validation. Wrapped sessions (any `mode=wrapped` + any CLI runtime_kind) MUST have `cwd` inside a registered `Codebase` row for the workspace (the existing `codebases.path` unique on `(workspace_id, path)` index is the lookup key — use canonical path comparison via `dunce::canonicalize` to handle Windows path quirks even though Weave is Linux-first). Reject at session creation with `AppError::Validation` and `code: \"cwd_outside_codebase\"` listing the cwd and the registered codebases for the workspace. Native (HTTP) sessions keep their existing behavior (cwd is optional and unconstrained). Kanban auto-spawn calls the same validator before creating a wrapped session. The provider's default working directory (if the provider row has one) is used as a fallback cwd inside the first matching codebase. A2A `POST /api/a2a/messages` also enforces the check.",
+      "verification": "cargo test -p weave-server -- test_wrapped_session_requires_codebase && cargo test -p weave-server -- test_wrapped_session_cwd_outside_codebase_rejected && cargo test -p weave-server -- test_native_session_no_codebase_requirement && cargo test -p weave-server -- test_kanban_wrapped_autospawn_validates_cwd && cargo test -p weave-server -- test_a2a_wrapped_session_validates_cwd",
+      "state": "not_started",
+      "dependencies": [
+        "feat-008",
+        "feat-032",
+        "feat-040"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-051",
+      "phase": "phase-8",
+      "behavior": "Wire the first CLI Runtime Tool end-to-end. `ClaudeCodeCodingAgent` implements `CodingAgent` (with the `TurnContext` signature from feat-041), uses `CliRunner` (feat-043), the Claude Code stream parser (feat-045), the Claude Code `PermissionMapper` (feat-046), the journey translator (feat-048), and persists resume metadata (feat-047). `add_provider` for a `kind=cli` row whose `binary_path` matches a registered `claude-code` adapter builds a `ClaudeCodeCodingAgent`; matching is by binary basename for now. End-to-end conformance test uses the fake CLI harness (feat-044) as the registered binary: create a wrapped session, send a prompt, assert events stream through the SSE endpoint, assert resume state is `none` on the first turn and `native` on the second, cancel mid-stream and assert the child process is reaped, run a real smoke test with the actual `claude` binary as a manual check. Anthropic API in native mode stays green: every step in Phase 8 runs the full Rust test suite and `./init.sh` and the native tests must pass.",
+      "verification": "cargo test -p weave-server -- test_claude_code_wrapped_session_create && cargo test -p weave-server -- test_claude_code_wrapped_streams_via_sse && cargo test -p weave-server -- test_claude_code_wrapped_resume_first_turn_native_second && cargo test -p weave-server -- test_claude_code_wrapped_cancel_mid_stream && cargo test -p weave-server -- test_claude_code_wrapped_falls_back_to_replay && cargo test -p weave-server -- test_claude_code_wrapped_records_journey && cargo test -p weave-server -- test_native_anthropic_still_passes_through_loop",
+      "state": "not_started",
+      "dependencies": [
+        "feat-037",
+        "feat-038",
+        "feat-039",
+        "feat-040",
+        "feat-041",
+        "feat-042",
+        "feat-043",
+        "feat-044",
+        "feat-045",
+        "feat-046",
+        "feat-047",
+        "feat-048",
+        "feat-049",
+        "feat-050"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-052",
+      "phase": "phase-9",
+      "behavior": "Settings page replaces its hardcoded `type: 'anthropic'` form with a kind-aware form. The provider list renders a `kind` badge (HTTP / CLI) on each row. The 'Add provider' modal renders a kind picker first; once chosen, the rest of the form is the variant-specific shape. HTTP form fields: name, base_url, api_key (password input), default_model (free text + datalist of cached models). CLI form fields: name, binary_path (path picker that resolves to an absolute path), args (array of strings), env (map of string->string), default_model (free text + datalist of cached models), permission_mode (preset dropdown). Backend endpoint extension is minimal: `POST /api/providers` already accepts `kind` after feat-039. Existing providers (HTTP, kind='http') continue to render as today. Frontend tests cover both flows; the lint gate (Prettier, ESLint, tsc) is green.",
+      "verification": "cd web && bun run test -- --run settings-runtime-tool && cd web && bun run lint && cd web && bun run typecheck",
+      "state": "not_started",
+      "dependencies": [
+        "feat-020",
+        "feat-039",
+        "feat-042"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-053",
+      "phase": "phase-9",
+      "behavior": "Replace the current 3-field 'New Session' modal with a 4-step wizard. Step 1: Runtime Tool picker. List comes from `GET /api/providers` (kind + display_name); only providers with healthy `health_check` results from the last cache window are selectable. Step 2: Role (specialist) picker. List comes from the existing specialists endpoint; the picker is filtered to specialists whose `tool_profile` is compatible with the chosen Runtime Tool (the matrix from feat-040 is enforced client-side for UX and server-side for safety). Step 3: Model picker. List comes from `GET /api/providers/:id/models` (the cache from feat-042); first entry is pre-selected. Step 4: workspace target (default: current workspace), optional codebase (filtered to the workspace's codebases), optional kanban task (filtered to active tasks not currently being worked on). Each step has a Back button; the final Submit button creates the session. The backend `POST /api/workspaces/:wid/sessions` is extended to accept `runtime_kind` and `mode` (defaulting to `claude-code`/`wrapped` if the chosen provider is CLI, `anthropic-api`/`native` if HTTP). Validation errors surface inline with the failing step highlighted.",
+      "verification": "cd web && bun run test -- --run new-session-wizard && cd web && bun run test && cd web && bun run lint",
+      "state": "not_started",
+      "dependencies": [
+        "feat-021",
+        "feat-040",
+        "feat-041",
+        "feat-042"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-054",
+      "phase": "phase-9",
+      "behavior": "The session page renders one of three layouts from the same `/session/:id` URL, chosen by the session's `mode`. `native` layout: existing chat view (unchanged for HTTP-backed sessions; used for Anthropic API and OpenAI API). `wrapped` layout: same chat view body, but `SessionHeader` gains a pill row showing the Runtime Tool display name, the active permission mode (from the most recent `PermissionSnapshot`), and the resume state (none / native / replayed). A small `WrappedSessionBanner` is shown above the message list on the first turn to surface the new interaction model in plain language. `attended` layout: not yet implemented (rejected at session creation until Phase 11); the layout slot is reserved. The wrapped and native layouts share 95% of components; the differences are isolated to `SessionHeader` and `WrappedSessionBanner`. The 'jump to latest' pill and SSE streaming behavior from feat-036 are unchanged.",
+      "verification": "cd web && bun run test -- --run session-layouts && cd web && bun run test && cd web && bun run lint",
+      "state": "not_started",
+      "dependencies": [
+        "feat-021",
+        "feat-040",
+        "feat-051"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-055",
+      "phase": "phase-9",
+      "behavior": "Kanban column binding for `(runtime_kind, specialist_id)`. Add a nullable `runtime_kind` column to `columns` (default NULL = inherit workspace default). Migration is additive. `POST /api/boards/:bid/columns` and `PATCH /api/columns/:cid` accept `runtime_kind`. When a card is auto-spawned by lane automation, the created session uses the column's `(runtime_kind, specialist_id)` binding. If `runtime_kind` is NULL, behavior is unchanged (uses the workspace's default Runtime Tool). The frontend `ColumnHeader` shows a small Runtime Tool badge when `runtime_kind` is set and `auto_trigger` is on. The `try_automate_lane` service is updated to honor the binding. This feature also removes the silent first-provider fallback in the kanban flow: a column with no workspace-default Runtime Tool fails the auto-spawn with a clear error pointing at the column's binding. The A2A counterpart is feat-056.",
+      "verification": "cargo test -p weave-server -- test_columns_migration_adds_runtime_kind && cargo test -p weave-server -- test_kanban_autospawn_uses_column_runtime_kind && cargo test -p weave-server -- test_kanban_autospawn_inherits_when_null && cargo test -p weave-server -- test_kanban_autospawn_errors_when_no_default && cd web && bun run test -- --run kanban-runtime-badge",
+      "state": "not_started",
+      "dependencies": [
+        "feat-024",
+        "feat-025",
+        "feat-040"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-056",
+      "phase": "phase-9",
+      "behavior": "A2A accepts an explicit `runtime_kind` and removes the silent first-provider fallback. `POST /api/a2a/messages` accepts an optional `runtime_kind` field on the request body. Resolution order: (1) request body's `runtime_kind` if present and the user is permitted to use it; (2) the session's existing `runtime_kind` if resuming; (3) an explicit configured default (new env var `WEAVE_A2A_DEFAULT_RUNTIME_KIND`, default `anthropic-api`). The current behavior of falling back to 'the first provider in the list' is removed. Sessions created via A2A get a `provider_id` resolved from the chosen `runtime_kind` via the provider registry; if no healthy provider matches, the call fails with `code: 'no_provider_for_runtime'`. The Agent Card at `GET /.well-known/agent.json` lists the configured default. Document the breaking change in CHANGELOG and the A2A section of `docs/api-contracts.md`.",
+      "verification": "cargo test -p weave-server -- test_a2a_explicit_runtime_kind && cargo test -p weave-server -- test_a2a_uses_session_runtime_when_resuming && cargo test -p weave-server -- test_a2a_uses_configured_default && cargo test -p weave-server -- test_a2a_no_first_provider_fallback && cargo test -p weave-server -- test_a2a_errors_when_no_provider_for_runtime && cargo test -p weave-server -- test_a2a_agent_card_lists_default",
+      "state": "not_started",
+      "dependencies": [
+        "feat-029",
+        "feat-040"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-057",
+      "phase": "phase-10",
+      "behavior": "A shared CLI adapter conformance test suite that every `CliCodingAgent` impl must pass before shipping. The suite lives in `crates/weave-server/tests/cli_conformance.rs` and exercises the adapter contract independent of which CLI is being wrapped. Conformance cases: (a) argv construction from a `CliInvocation` matches the recorded expected argv; (b) the stream parser maps a canonical event sequence to the expected `StreamEvent` sequence; (c) the resume id is captured and persisted; (d) the `PermissionMapper` produces a `PermissionSnapshot` whose serialized form matches the expected JSON for each `ToolProfile`; (e) the journey translator records the canonical tool_call and file_change events; (f) the runner handles `permission_denied` and `crash` scenarios from the fake CLI harness (feat-044) by mapping them to `StreamEvent::Error` and terminating the stream; (g) the adapter rejects sessions whose `cwd` is outside a registered codebase (the validation is enforced upstream in feat-050; the conformance test confirms the adapter's `TurnContext` plumbing is correct). Codex (feat-058) and OpenCode (feat-059) must pass the full suite. Real CLIs are not required for the suite — the fake harness is the conformance target.",
+      "verification": "cargo test -p weave-server --test cli_conformance && cargo test -p weave-server -- test_conformance_argv_construction && cargo test -p weave-server -- test_conformance_stream_parser && cargo test -p weave-server -- test_conformance_resume_metadata && cargo test -p weave-server -- test_conformance_permission_mapper && cargo test -p weave-server -- test_conformance_journey_translator && cargo test -p weave-server -- test_conformance_error_scenarios && cargo test -p weave-server -- test_conformance_workspace_scoped_cwd",
+      "state": "not_started",
+      "dependencies": [
+        "feat-043",
+        "feat-044",
+        "feat-045",
+        "feat-046",
+        "feat-047",
+        "feat-048",
+        "feat-050"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-058",
+      "phase": "phase-10",
+      "behavior": "Concrete `CodexCodingAgent` (target Runtime Tool: `codex`). Implements `CodingAgent` with the `TurnContext` signature. Reuses `CliRunner` (feat-043), the conformance suite (feat-057), and the journey translator (feat-048). Codex-specific bits: argv shape (Codex CLI flags), the Codex-specific stream parser (a sibling of the Claude Code parser in feat-045), the Codex-specific `PermissionMapper` impl, and the resume flag Codex uses. Default model override per §8 of the strategy: if a Codex provider row has a `default_model`, the runner uses it. Same architectural surface as `ClaudeCodeCodingAgent`. Adapter is registered by binary basename (`codex`). End-to-end test uses the fake CLI harness adapted to emit Codex-style events.",
+      "verification": "cargo test -p weave-server -- test_codex_wrapped_session_create && cargo test -p weave-server -- test_codex_wrapped_streams_via_sse && cargo test -p weave-server -- test_codex_resume_cycle && cargo test -p weave-server -- test_codex_permission_mapper && cargo test -p weave-server --test cli_conformance",
+      "state": "not_started",
+      "dependencies": [
+        "feat-051",
+        "feat-057"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-059",
+      "phase": "phase-10",
+      "behavior": "Concrete `OpenCodeCodingAgent` (target Runtime Tool: `opencode`). Implements `CodingAgent` with the `TurnContext` signature. Reuses `CliRunner`, the conformance suite, and the journey translator. OpenCode-specific bits: argv shape, OpenCode-specific stream parser, OpenCode-specific `PermissionMapper` impl, and the resume flag OpenCode uses. Per §8 of the strategy, OpenCode pointed at Anthropic is modeled as `opencode` with a per-Runtime Tool default model override on the provider row, NOT as a separate `opencode-anthropic` Runtime Tool. Adapter is registered by binary basename (`opencode`). End-to-end test uses the fake CLI harness adapted to emit OpenCode-style events. The smoke check confirms that `default_model` override on the provider row reaches the CLI argv.",
+      "verification": "cargo test -p weave-server -- test_opencode_wrapped_session_create && cargo test -p weave-server -- test_opencode_wrapped_streams_via_sse && cargo test -p weave-server -- test_opencode_resume_cycle && cargo test -p weave-server -- test_opencode_permission_mapper && cargo test -p weave-server -- test_opencode_default_model_override_reaches_argv && cargo test -p weave-server --test cli_conformance",
+      "state": "not_started",
+      "dependencies": [
+        "feat-051",
+        "feat-057"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-060",
+      "phase": "phase-11",
+      "behavior": "Attended mode: a separate `Terminal` trait (NOT a `CodingAgent` impl) representing user-driven, long-lived subprocess hosting. The `Terminal` trait: `spawn(session, binary, args, env, cwd) -> TerminalHandle`, `attach(session_id) -> TerminalStream` (a duplex stream the frontend can render in an xterm.js pane), `detach(session_id)`, `kill(session_id) -> Result`. Lifecycle: spawn on session start, attach on session page open, detach on page close, kill on session cancel / shutdown. Watches the filesystem (via the `notify` crate) and the CLI's trace events to feed the journey sidebar — does NOT parse CLI stream events for execution (that's the wrapped-mode translator's job). The session page layout switcher (feat-054) renders the `attended` layout from the same `/session/:id` URL. Phase 11: do not start until Phase 8 wrapped mode is stable. Conformance test uses the fake CLI harness running in a long-lived mode (the harness from feat-044 is extended to support a `serve` subcommand that emits events as they occur and reads stdin for the user's keystrokes).",
+      "verification": "cargo test -p weave-server -- test_terminal_trait_compiles && cargo test -p weave-server -- test_terminal_spawn_and_attach && cargo test -p weave-server -- test_terminal_detach_keeps_process && cargo test -p weave-server -- test_terminal_kill_terminates && cargo test -p weave-server -- test_terminal_filesystem_watcher_feeds_journey && cargo test -p weave-server -- test_terminal_workspaces_scoped_validation && cd web && bun run test -- --run terminal-pane && cd web && bun run test",
+      "state": "not_started",
+      "dependencies": [
+        "feat-051"
+      ],
+      "evidence": ""
     }
   ]
 }

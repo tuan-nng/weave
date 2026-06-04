@@ -10,7 +10,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 - **Last updated:** 2026-06-04
 - **Latest commit:** 026ac45 (feat-034 graceful shutdown)
-- **Active feature:** none — all features through phase-5 are passing
+- **Active feature:** none — all features through phase-5 are passing; multi-runtime planning complete; awaiting next-session pickup of feat-037 (native tool loop) per the strategy's prerequisite
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 605 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
@@ -68,6 +68,32 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 | ID | Description | Dependencies |
 |----|-------------|-------------|
 | feat-035 | Configuration (env vars, CLI, TOML) | feat-001 |
+| feat-037 | Native Anthropic tool-execution loop (prerequisite) | feat-005, 006, 009, 012, 013 |
+| feat-038 | Session table migration for runtime/mode/cli_resume_id | feat-008 |
+| feat-039 | Provider table config discriminated union (HTTP vs CLI) | feat-007 |
+| feat-040 | Runtime Tool × mode compatibility validator | feat-005, 038, 039 |
+| feat-041 | CodingAgent trait extension for CLI turn context (`TurnContext`) | feat-005, 009, 038 |
+| feat-042 | ProviderRegistry model cache (per-Runtime-Tool, 5min TTL) | feat-005, 007, 039 |
+| feat-043 | Per-turn CLI subprocess runner | feat-009, 041 |
+| feat-044 | Fake CLI test harness (conformance fixture) | — |
+| feat-045 | Claude Code `stream-json` parser | feat-005 |
+| feat-046 | `PermissionMapper` trait + Claude Code implementation | feat-005, 012, 040, 041 |
+| feat-047 | CLI resume metadata persistence + replay fallback | feat-005, 008, 038, 041, 043, 045 |
+| feat-048 | `JourneyTranslator` for CLI streams (no re-execution) | feat-005, 017, 043, 045 |
+| feat-049 | Child-process reaping on startup + per-session tracking | feat-009, 034, 043 |
+| feat-050 | Workspace-scoped CLI session validation (cwd inside codebase) | feat-008, 032, 040 |
+| feat-051 | `ClaudeCodeCodingAgent` end-to-end (fake harness) | feat-037…050 |
+| feat-052 | Settings page Runtime Tool-aware form | feat-020, 039, 042 |
+| feat-053 | 4-step session creation sheet (Runtime Tool → Role → Model → What it works on) | feat-021, 040, 041, 042 |
+| feat-054 | Session page layout switcher (native / wrapped / attended) | feat-021, 040, 051 |
+| feat-055 | Kanban column `(runtime_kind, specialist_id)` binding | feat-024, 025, 040 |
+| feat-056 | A2A explicit Runtime Tool selection (no first-provider fallback) | feat-029, 040 |
+| feat-057 | Shared CLI adapter conformance test suite | feat-043, 044, 045, 046, 047, 048, 050 |
+| feat-058 | `CodexCodingAgent` adapter | feat-051, 057 |
+| feat-059 | `OpenCodeCodingAgent` adapter | feat-051, 057 |
+| feat-060 | Attended mode `Terminal` abstraction (deferred) | feat-051 |
+
+Detailed task descriptions (per-feature engineering handoff) live at `docs/road-map/multi-runtime-tasks.md`.
 
 ## Key Architectural Decisions
 
@@ -129,6 +155,13 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - Records the non-obvious calls: Claude Code CLI wrapped mode is the first implementation target, specialists stay prompt-only, models come from the tool not Weave, journey is the unifying artifact, per-turn subprocess for wrapped mode, the `Multiple concurrent providers` drop in `SYSTEM_DESIGN.md` is amended.
 - Registered in `docs/SYSTEM_DESIGN.md` routing map. Pointer in `DECISIONS.md` (2026-06-04 entry). Doc-only change — no code, no schema migration, no API surface change yet.
 - Implementation plan is the next deliverable; the strategic plan explicitly defers schema, API, and frontend decisions to it.
+
+### 2026-06-04 — Multi-runtime task breakdown
+- Broke the strategy into 24 implementation features across 6 new phases in `feature_list.json` (feat-037…feat-060). All new entries `state: "not_started"`. WIP=1 invariant preserved (no feature in `active` state). Existing 35 passing features and feat-035 (not_started) untouched.
+- Phases: phase-6 (native tool loop), phase-7 (multi-runtime foundation: schema + trait + cache), phase-8 (Claude Code wrapped mode — 9 features), phase-9 (multi-runtime user surface), phase-10 (Codex/OpenCode adapters), phase-11 (attended mode, deferred).
+- Key commitments baked into the breakdown: `TurnContext` extends the `CodingAgent` trait (not `MessageRequest`); `cli_resume_id` lives inside `runtime_metadata_json` (generic per-runtime column, not CLI-specific); `attended` mode is rejected at session creation until Phase 11; adapter conformance suite (feat-057) is a hard gate for Codex/OpenCode.
+- Detailed per-feature task descriptions (engineering handoff format) live at `docs/road-map/multi-runtime-tasks.md` (created in this session).
+- `feature_list.json` validated: 11 phases, 60 features, all phase refs resolve, all dependency targets exist, states preserved. JSON load test passed.
 
 ### 2026-06-04 — Doc reorganization into `docs/road-map/`
 - Moved `docs/PLAN.md` and `docs/multi-runtime-strategy.md` into `docs/road-map/`. PLAN moved via `git mv` (rename preserved in history); strategy moved via plain `mv` (was untracked).
