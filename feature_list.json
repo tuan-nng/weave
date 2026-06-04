@@ -560,7 +560,7 @@
       "phase": "phase-6",
       "behavior": "Complete the native Anthropic tool-execution loop in `AnthropicAgent::send_message`. The provider advertises Weave tools via MessageRequest.tools; on a `content_block_start` of type `tool_use` the agent collects the streamed `input_json_delta` events into a serde_json::Value, runs the named tool through ToolRegistry subject to the session's profile, appends a `tool_result` content block carrying the tool_use_id and the serialized result, and continues the model call. The `tool_use` `stop_reason` is the loop driver; the loop terminates on `end_turn` / `max_tokens` / `cancelled` / loop-limit-exceeded. Reuses TraceCollector to record tool_call events with name, sanitized input, output, and duration_ms. Handles: malformed input JSON, unknown tool name, tool input that fails JSON-schema validation, tool execution error (recorded in the tool_result and the loop continues), cancel mid-loop (the in-flight tool future is aborted, partial assistant text is persisted with stop_reason=cancelled), and a per-turn loop limit (default 8 iterations, configurable per session) that turns into stop_reason=error after a final `Sorry, too many tool calls` assistant message. Existing Anthropic API behavior is preserved: a model that does NOT call a tool is still a one-shot stream ending in `end_turn`.",
       "verification": "cargo test -p weave-server -- test_native_tool_loop_basic && cargo test -p weave-server -- test_native_tool_loop_unknown_tool && cargo test -p weave-server -- test_native_tool_loop_validation_error && cargo test -p weave-server -- test_native_tool_loop_exec_error && cargo test -p weave-server -- test_native_tool_loop_limit && cargo test -p weave-server -- test_native_tool_loop_cancellation && cargo test -p weave-server -- test_native_tool_loop_no_tool_passes_through",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-005",
         "feat-006",
@@ -568,7 +568,7 @@
         "feat-012",
         "feat-013"
       ],
-      "evidence": ""
+      "evidence": "All 7 spec tests pass (cargo test -p weave-server test_native_tool_loop: 7 passed, 604 filtered out). Full ./init.sh green: cargo clippy clean, cargo fmt --check clean, 611 Rust tests + 83 frontend tests pass, cargo build succeeds, smoke test (GET /api/health + GET /) returns 200. Implementation adds a nested agent_loop in service/sessions.rs that drives the model <-> tool-execution loop (MAX_TOOL_ITERATIONS=8, TOOL_EXECUTION_TIMEOUT=30s), with StopReason::LoopLimit and ToolOutcome enum handling all five error paths (unknown tool, validation failure, tool error, cancel-mid-loop, loop-cap). Tool inputs are sanitized (whitespace trim) and validated against the tool's JSON Schema. ToolResult content blocks now carry is_error to the wire. build_message_metadata includes tool_calls summary and stop_reason in metadata JSON when any tool was called. A2A map_sse_to_a2a maps LoopLimit to TaskStatus::Failed. TraceCollector made Clone for the tool context. The Anthropic streaming EventConverter was changed to defer ToolUseStart emission until ContentBlockStop so streamed input_json_delta is assembled into a serde_json::Value before the tool is invoked."
     },
     {
       "id": "feat-038",

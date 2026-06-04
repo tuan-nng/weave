@@ -274,6 +274,10 @@ fn map_sse_to_a2a(event: &SseWireEvent) -> (Option<TaskStatus>, Option<String>) 
                     TaskStatus::Completed
                 }
                 StopReason::Cancelled => TaskStatus::Canceled,
+                // feat-037: the loop hit the per-turn iteration cap. The model never
+                // reached a natural end-of-turn, so A2A consumers should see the
+                // task as failed rather than completed-with-an-empty-message.
+                StopReason::LoopLimit { .. } => TaskStatus::Failed,
             };
             (Some(status), None)
         }

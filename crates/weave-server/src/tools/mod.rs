@@ -51,6 +51,33 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+/// Recursively trim string leaves of a JSON value.
+///
+/// The Anthropic provider has been observed to occasionally emit large
+/// blocks of leading/trailing whitespace in `input_json_delta` chunks when
+/// the tool input is rendered through markdown fences. The whitespace makes
+/// the round-tripped string a poor candidate for `jsonschema` validation
+/// and harder to grep in trace logs. We trim string leaves in place so
+/// downstream tools always see clean inputs while the input *shape* (keys
+/// and types) is preserved exactly as the model intended.
+///
+/// (feat-037)
+pub fn sanitize_tool_input(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => Value::String(s.trim().to_string()),
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_tool_input).collect()),
+        Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(k.clone(), sanitize_tool_input(v));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ToolExecutor trait
 // ---------------------------------------------------------------------------

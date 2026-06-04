@@ -10,11 +10,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 - **Last updated:** 2026-06-04
 - **Latest commit:** 026ac45 (feat-034 graceful shutdown)
-- **Active feature:** none — all features through phase-5 are passing; multi-runtime planning complete; awaiting next-session pickup of feat-037 (native tool loop) per the strategy's prerequisite
+- **Active feature:** none — feat-037 (native Anthropic tool-execution loop) is now `passing`; multi-runtime foundation phase-6 prerequisite complete; phase-7 (feat-038..042) is now unblocked
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 605 Rust tests + 83 frontend tests pass
+- **Test status:** green — 611 Rust tests + 83 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** new `docs/user/` directory — 11 user-facing feature guides (index, quickstart, workspaces, providers, sessions, journey, kanban, codebases, specialists, common-workflows, best-practices). ~1287 lines, no code changes, `./init.sh` still green. New strategic plan `docs/road-map/multi-runtime-strategy.md` (registered in `docs/SYSTEM_DESIGN.md` routing map; `DECISIONS.md` entry added; updated to prioritize the native Anthropic tool-execution loop as the first prerequisite and Claude Code CLI wrapped mode as the first CLI target). Doc reorganization: `docs/PLAN.md` and `docs/multi-runtime-strategy.md` moved into `docs/road-map/`. CLAUDE.md topic-docs list split into "Road-map" + "Current state" subsections. All cross-references updated. Doc-only changes, no code.
+- **Uncommitted:** feat-037 implementation. New `StopReason::LoopLimit { iterations }` variant + `is_error` field on `ContentBlock::ToolResult`. New `agent_loop` async fn in `service/sessions.rs` driving the model ↔ tool-execution loop (MAX_TOOL_ITERATIONS=8, TOOL_EXECUTION_TIMEOUT=30s). New `ToolOutcome` enum handling unknown tool / validation failure / tool error / cancel-mid-loop / loop-cap. New `execute_tool_call` free fn with JSON Schema validation (Draft7) and per-tool timeout. New `sanitize_tool_input` helper trimming string leaves. `TraceCollector` made `Clone`. `EventConverter` now defers `ToolUseStart` emission until `ContentBlockStop` so streamed `input_json_delta` is assembled into a `serde_json::Value` before the tool is invoked. `ContentBlock::ToolResult` carries `is_error` to the wire. A2A `map_sse_to_a2a` maps `LoopLimit` → `TaskStatus::Failed`. `build_message_metadata` includes `tool_calls` summary in metadata JSON whenever a tool was called. 7 new spec tests + `ScriptedTool` + `ScriptedAgent` + 2 helpers.
 
 ## Completed Since Project Start
 
@@ -54,6 +54,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-033**: Enhanced health check (version, uptime, provider total/healthy/unhealthy, per-workspace active_sessions, db size_bytes, wal_checkpoint_pending; 10s provider-health TTL cache; always 200 with status="ok"|"degraded")
 - [x] **feat-034**: Graceful shutdown — SIGTERM/SIGINT/drain-cap race, parent CancellationToken in AppState, ActiveSessions::cancel_all, SseWireEvent::Shutdown + SseManager::broadcast_shutdown, Db::checkpoint (TRUNCATE), service::startup::reap_orphans (transactional mark-as-error), spawn cleanup task, run() extracted from main(). 12 new tests.
 - [x] **feat-036**: Session chat re-implementation (message_persisted SSE, useReducer, id-based handoff)
+- [x] **feat-037**: Native Anthropic tool-execution loop (agent_loop, ToolOutcome, JSON Schema validation, sanitize_tool_input, EventConverter deferred-emit, LoopLimit stop_reason). 7 spec tests cover basic happy path, unknown tool, validation error, exec error, loop limit, cancel mid-loop, and no-tool passthrough.
 
 ## In Progress
 
@@ -116,6 +117,10 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - **TOCTOU between gate check and move**: gate runs in a read tx, move in a write tx. Window is tight (SQLite WAL serializes) but exists.
 - **`MAX_TASK_TITLE_LEN` defined in two places**: `tools/fs/mod.rs` and `api/kanban.rs`. Fix: hoist to `store::tasks`.
 - **Cancel button always visible** in session header even when no stream is active. UX wart.
+- **Tool-containment gap** (security audit, feat-037 review): `ToolContext.codebase_root` is hardcoded to server CWD (`service/sessions.rs:436`). `fs_read` (`tools/fs/read.rs:34-60`), `fs_list` (`tools/fs/list.rs:47`), and `fs_search` (`tools/fs/search.rs:55-59`) only call `PathValidator::require_absolute` — they do NOT call `validate_write_path`, so a model can read or list any absolute path the server can reach. `shell_exec` (`tools/shell.rs:63-77`) does not validate `cwd` against `codebase_root` either. Fix in a future feature: add `root_path` to `workspaces` table; require every tool path arg to be contained under `codebase_root`.
+- **Tool `input_schema` compile failure silently allows the call** (`service/sessions.rs:692-702`). Should return `ValidationFailed` instead of proceeding.
+- **`tracing::debug!(... command = %command ...)` in `shell_exec`** (`tools/shell.rs:82-88`) logs the full shell command including any embedded secrets. Drop the `command` field, keep only binary name + arg count.
+- **`agent_loop` clones `history` and `tool_defs` per iteration** (O(n²)). Switch `MessageRequest` to borrow `&[Message]` + `&[ToolDefinition]`.
 
 ## Session Notes
 

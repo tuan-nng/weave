@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::agent::registry::ProviderRegistry;
+#[allow(unused_imports)] // MessageRequest is used by the `tests` submodule.
 use crate::agent::{self, MessageRequest};
 use crate::db::Db;
 use crate::error::AppError;
@@ -26,6 +27,27 @@ const FALLBACK_MODEL: &str = "claude-sonnet-4-20250514";
 
 /// Maximum number of messages loaded into conversation history.
 const MAX_HISTORY_MESSAGES: usize = 1000;
+
+/// Maximum number of tool-execution iterations per turn (feat-037).
+///
+/// After this many `tool_use` round-trips without a natural `end_turn` /
+/// `max_tokens` / `cancelled` we stop the loop, surface a final assistant
+/// "Sorry, too many tool calls." message, and persist the turn with
+/// `stop_reason = loop_limit`. The cap exists because tool-capable models
+/// can otherwise chase an unsatisfiable request indefinitely (e.g. trying
+/// the same broken shell command 200 times in a row) and burn through
+/// the user's token budget. The default is deliberately conservative —
+/// most well-formed agent loops complete in 2-4 iterations.
+const MAX_TOOL_ITERATIONS: u32 = 8;
+
+/// Per-tool execution timeout (feat-037).
+///
+/// Mirrors `shell_exec::DEFAULT_TIMEOUT_MS` (30s). A tool that takes
+/// longer than this is aborted and the loop records an `is_error=true`
+/// `tool_result` so the model can react. Cancellable via the session's
+/// `CancellationToken` (`tokio::select!` arms the timeout and the cancel
+/// token together).
+const TOOL_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Stateless service that orchestrates session prompt lifecycle.
 ///
@@ -394,186 +416,56 @@ async fn run_prompt_task(
         }
     };
 
-    // Call the agent
-    let stream = match agent
-        .send_message(MessageRequest {
-            model,
-            messages: history,
-            system: system_prompt,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            tools: tool_defs,
-        })
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            abort_with_error(&db, session_id, e, "agent send_message failed");
-            return;
-        }
-    };
-
-    // Stream and accumulate with cancellation support
-    use futures_util::StreamExt;
-
-    // Spawn trace collector flush task
+    // Spawn the trace collector flush task. The trace collector is shared
+    // between the agent loop and the post-loop finalization so tool-call
+    // events are queued before the flush task is awaited.
     let (trace_collector, flush_handle) = trace::spawn_flush_task(db.clone());
 
-    // Track pending tool calls for duration computation
-    let mut pending_tools: HashMap<String, (String, serde_json::Value, std::time::Instant)> =
-        HashMap::new();
+    // Build the ToolContext once for this turn. The same context is
+    // passed to every tool invocation inside the loop, so a tool that
+    // records a file change or a network call sees a consistent
+    // workspace_root / cwd / trace_collector across iterations.
+    let tool_ctx = crate::tools::ToolContext {
+        session_id: session_id.to_string(),
+        workspace_id: session.workspace_id.clone(),
+        cwd: session
+            .cwd
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+        codebase_root: std::path::PathBuf::from("."),
+        trace_collector: std::sync::Arc::new(trace_collector.clone()),
+    };
 
-    let mut accumulated = String::new();
-    let mut stream = stream;
-    let mut had_error = false;
-    // Buffer for coalescing `StreamEvent::Thinking` deltas into a single
-    // `Decision` trace event per contiguous thinking block. The Anthropic
-    // provider streams extended thinking as many small chunks (often 2-3
-    // word fragments), and emitting one trace row per delta produces a
-    // wall of unreadable fragments in the Journey sidebar (e.g. "Hmm,"
-    // / "the user" / "greeting" / "."). Flushing at the boundary with
-    // the next text/tool event — and at Done/Error — turns 30-50
-    // fragments per turn into one readable decision row per actual
-    // reasoning pass. The SSE wire still forwards every delta to
-    // subscribers unchanged; only the trace persistence is coalesced.
-    let mut thinking_buffer = String::new();
-    // Captured from the agent's terminal `Done` event so we can broadcast
-    // it *after* the assistant message has been persisted to the database.
-    // The frontend's `done` handler invalidates the history query, and the
-    // refetch would otherwise race ahead of the INSERT and return a
-    // history without the new message — causing a visible flash where the
-    // streamed text disappears before the persisted message appears.
-    let mut pending_stop_reason: Option<agent::StopReason> = None;
-    // Set when the user cancelled (either mid-stream or after a race with
-    // the agent's `Done`). The post-loop finalization reads this to
-    // decide whether to persist a partial message with stop_reason=
-    // "cancelled" and to set the session status to "cancelled".
-    let mut cancelled: bool = false;
+    // Drive the model ↔ tool-execution loop. This subsumes the
+    // pre-feat-037 single-stream pipeline; tool calls now flow back into
+    // the conversation and the model is re-asked to continue.
+    let loop_result = agent_loop(
+        &agent,
+        &sse_manager,
+        &tools,
+        &trace_collector,
+        session_id,
+        &cancel_token,
+        model,
+        system_prompt,
+        DEFAULT_MAX_TOKENS,
+        tool_defs,
+        history,
+        tool_ctx,
+    )
+    .await;
 
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                info!(session_id, "session cancelled by user");
-                cancelled = true;
-                // Break out of the loop; the post-loop finalization block
-                // is the single source of truth for persist + status +
-                // broadcast, including the cancel path. This replaces the
-                // prior early-return that silently dropped the partial
-                // streamed text on cancel.
-                break;
-            }
-            item = StreamExt::next(&mut stream) => {
-                match item {
-                    Some(Ok(event)) => {
-                        // Broadcast every non-terminal agent event to SSE
-                        // subscribers inline. The `Done` event is captured
-                        // here and broadcast later, after the assistant
-                        // message has been persisted, so the frontend's
-                        // history refetch always finds the new message.
-                        match &event {
-                            agent::StreamEvent::Done { stop_reason } => {
-                                pending_stop_reason = Some(stop_reason.clone());
-                            }
-                            agent::StreamEvent::Error { .. } => {
-                                sse_manager.broadcast(
-                                    session_id,
-                                    sse::stream_event_to_wire(event.clone()),
-                                );
-                            }
-                            _ => {
-                                sse_manager.broadcast(
-                                    session_id,
-                                    sse::stream_event_to_wire(event.clone()),
-                                );
-                            }
-                        }
-                        match event {
-                            agent::StreamEvent::TextDelta { text } => {
-                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-                                accumulated.push_str(&text);
-                            }
-                            agent::StreamEvent::ToolUseStart { id, name, input } => {
-                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-                                pending_tools.insert(id, (name, input, std::time::Instant::now()));
-                            }
-                            agent::StreamEvent::ToolResult { id, result } => {
-                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-                                if let Some((name, input, start)) = pending_tools.remove(&id) {
-                                    let duration_ms = start.elapsed().as_millis() as u64;
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    // Extract file changes from tool input
-                                    for fc in trace::extract_file_changes(
-                                        session_id, &name, &input, &ts,
-                                    ) {
-                                        trace_collector.emit(fc);
-                                    }
-                                    // Emit tool call trace event
-                                    trace_collector.emit(TraceEvent {
-                                        session_id: session_id.to_string(),
-                                        kind: TraceEventKind::ToolCall {
-                                            tool_name: name,
-                                            input_json: input.to_string(),
-                                            output_json: result,
-                                            duration_ms,
-                                        },
-                                        timestamp: ts,
-                                    });
-                                }
-                            }
-                            agent::StreamEvent::Thinking { text } => {
-                                // Coalesce: append to the buffer instead of
-                                // emitting per-delta. `flush_thinking()`
-                                // fires at the next text/tool/Done/Error
-                                // boundary. See `flush_thinking` for the
-                                // full rationale.
-                                thinking_buffer.push_str(&text);
-                            }
-                            agent::StreamEvent::Done { .. } => {
-                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-                                break;
-                            }
-                            agent::StreamEvent::Error { message } => {
-                                flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-                                error!(session_id, error = %message, "agent stream error");
-                                trace_collector.emit(TraceEvent {
-                                    session_id: session_id.to_string(),
-                                    kind: TraceEventKind::Error {
-                                        message: message.clone(),
-                                    },
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                });
-                                had_error = true;
-                                break;
-                            }
-                            _ => {}
-                        }
-                    },
-                    Some(Err(e)) => {
-                        error!(session_id, error = %e, "agent stream provider error");
-                        had_error = true;
-                        sse_manager.broadcast(
-                            session_id,
-                            SseWireEvent::Error { message: e.to_string() },
-                        );
-                        break;
-                    }
-                    None => {
-                        // Stream ended without a Done event
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    let LoopResult {
+        accumulated,
+        stop_reason,
+        tool_calls,
+        had_error,
+        cancelled,
+    } = loop_result;
 
-    // Drain orphaned pending tool calls (ToolUseStart without ToolResult)
-    drain_pending_tools(&trace_collector, session_id, &mut pending_tools);
-
-    // Final flush of the thinking buffer. Covers the stream-ended-without-
-    // Done paths (provider error, channel close, cancel token fire) where
-    // the per-event flush never ran.
-    flush_thinking(&trace_collector, session_id, &mut thinking_buffer);
-
-    // Flush remaining trace events
+    // Flush remaining trace events. We `drop` the collector to close
+    // the channel; the flush task drains it and writes the rows.
     drop(trace_collector);
     let _ = flush_handle.await;
 
@@ -581,24 +473,7 @@ async fn run_prompt_task(
     // the agent finished normally but the user clicked Cancel at almost
     // the same instant, we treat the turn as cancelled — the user
     // expressed intent before the result was visible to them.
-    if cancel_token.is_cancelled() {
-        cancelled = true;
-    }
-
-    // Decide the stop_reason and final_status for this turn. The order
-    // matters: cancellation wins over error wins over the agent's natural
-    // stop_reason, because user intent outranks both transport failure
-    // and the model's own end-of-stream signal.
-    let stop_reason = if cancelled {
-        agent::StopReason::Cancelled
-    } else if had_error {
-        // There is no StopReason::Error variant; reuse EndTurn and let
-        // the metadata JSON record the "errored" tag so the frontend
-        // can render an Error badge.
-        agent::StopReason::EndTurn
-    } else {
-        pending_stop_reason.unwrap_or(agent::StopReason::EndTurn)
-    };
+    let cancelled = cancelled || cancel_token.is_cancelled();
 
     let final_status = if cancelled {
         "cancelled"
@@ -619,7 +494,7 @@ async fn run_prompt_task(
     // migration required. The frontend parses the metadata on
     // `message_persisted` to render a "Cancelled" / "Error" badge on the
     // partial bubble.
-    let metadata_json = build_message_metadata(&stop_reason, had_error);
+    let metadata_json = build_message_metadata(&stop_reason, had_error, &tool_calls);
     let persisted_message: Option<crate::store::sessions::Message> = if !accumulated.is_empty() {
         match MessageStore::create(
             &db,
@@ -694,22 +569,615 @@ async fn run_prompt_task(
     sse_manager.broadcast(session_id, SseWireEvent::Done { stop_reason });
 }
 
+// ---------------------------------------------------------------------------
+// Agent tool-execution loop (feat-037)
+// ---------------------------------------------------------------------------
+
+/// Per-tool summary persisted on the assistant message's `metadata.tool_calls`
+/// JSON. Used to render the "N tool calls" badge on the persisted bubble
+/// and to give the Journey sidebar a single summary row per turn.
+#[derive(Debug, Clone)]
+struct ToolCallRecord {
+    tool_use_id: String,
+    name: String,
+    is_error: bool,
+    duration_ms: u64,
+}
+
+/// Outcome of running a single tool under the agent loop (feat-037).
+///
+/// The loop driver uses this to decide whether to continue (success or
+/// recorded error), terminate the turn (cancel), or surface a tool failure
+/// that the model should react to.
+#[derive(Debug)]
+enum ToolOutcome {
+    /// The tool ran to completion. `result` is the JSON value to send back
+    /// to the model in the next `tool_result` block. `duration_ms` is
+    /// recorded on the trace event and the tool-call record.
+    Completed {
+        result: serde_json::Value,
+        duration_ms: u64,
+    },
+    /// The tool was registered but its input failed JSON-schema validation.
+    /// The error message is what the model sees as the `tool_result` content.
+    ValidationFailed(String),
+    /// The tool name is not registered in the active profile.
+    UnknownTool(String),
+    /// The tool returned `ToolResult { success: false, .. }` from its
+    /// implementation. The error string is forwarded to the model.
+    ToolError(String),
+    /// The tool hit the per-tool execution timeout or the session cancel
+    /// token fired mid-execution. We do NOT push a synthetic `tool_result`
+    /// to the model — the turn terminates with `StopReason::Cancelled` and
+    /// any partial assistant text is persisted. This matches the
+    /// "cancel-mid-loop" branch of the feat-037 spec.
+    Aborted,
+}
+
+/// Return value of the inner `agent_loop` helper. The outer
+/// `run_prompt_task` uses these fields to drive finalization
+/// (persistence, status, broadcast).
+#[derive(Debug)]
+struct LoopResult {
+    /// Concatenated assistant text from every model turn in this loop.
+    accumulated: String,
+    /// Final `StopReason` after the loop exits. Distinct from the
+    /// "in-turn" `StopReason::ToolUse` that *drives* the loop — by the
+    /// time we return, the model either ended naturally, was cancelled,
+    /// hit `max_tokens`, or tripped the per-turn iteration cap.
+    stop_reason: agent::StopReason,
+    /// Per-tool records collected across every iteration. Empty if the
+    /// model never called a tool.
+    tool_calls: Vec<ToolCallRecord>,
+    /// True if the agent stream produced an `Error` event or the
+    /// provider errored before producing a `Done`.
+    had_error: bool,
+    /// True if the session's cancel token fired (or the per-tool
+    /// `tokio::select!` cancelled an in-flight tool).
+    cancelled: bool,
+}
+
+/// Run one tool call and translate the outcome into something the loop
+/// can act on. Always returns within `TOOL_EXECUTION_TIMEOUT` unless
+/// the session is cancelled — in which case it returns `Aborted` and
+/// the in-flight tool future is dropped.
+async fn execute_tool_call(
+    tools: &ToolRegistry,
+    ctx: &crate::tools::ToolContext,
+    cancel_token: &CancellationToken,
+    _tool_use_id: &str,
+    name: &str,
+    input: &serde_json::Value,
+) -> ToolOutcome {
+    use crate::tools::sanitize_tool_input;
+    use std::time::Instant;
+    let started = Instant::now();
+    // Sanitize: trim string leaves so schema validation isn't tripped by
+    // accidental whitespace from the streamed input.
+    let input = sanitize_tool_input(input);
+
+    // Unknown tool name → mark the result so the loop records an
+    // `is_error=true` tool_result and the model can try something else.
+    let Some(tool) = tools.get(name) else {
+        warn!(session_id = %ctx.session_id, tool = name, "tool call to unknown tool");
+        return ToolOutcome::UnknownTool(name.to_string());
+    };
+
+    // JSON-schema validation against the tool's declared `input_schema`.
+    // Failure here is recoverable: the loop surfaces a ValidationFailed
+    // outcome and the model gets to see why its call was rejected.
+    let schema = tool.input_schema();
+    match jsonschema::JSONSchema::options()
+        .with_draft(jsonschema::Draft::Draft7)
+        .compile(&schema)
+    {
+        Ok(validator) => {
+            if let Err(errors) = validator.validate(&input) {
+                let detail = errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+                warn!(
+                    session_id = %ctx.session_id,
+                    tool = name,
+                    detail = %detail,
+                    "tool input failed JSON-schema validation"
+                );
+                return ToolOutcome::ValidationFailed(detail);
+            }
+        }
+        Err(e) => {
+            // A tool that ships an unparseable schema is a build-time bug.
+            // We log and let the call proceed — better to attempt the call
+            // than to wedge the loop on a tool that probably works anyway.
+            warn!(
+                session_id = %ctx.session_id,
+                tool = name,
+                error = %e,
+                "tool input_schema failed to compile; skipping validation"
+            );
+        }
+    }
+
+    // Race the tool future against the per-tool timeout and the session
+    // cancel token. Whichever fires first wins. On cancel we drop the
+    // tool future WITHOUT pushing a synthetic tool_result (per spec).
+    let tool_fut = tool.execute(input, ctx);
+    tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            warn!(session_id = %ctx.session_id, tool = name, "tool aborted by cancel token");
+            ToolOutcome::Aborted
+        }
+        result = tokio::time::timeout(TOOL_EXECUTION_TIMEOUT, tool_fut) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok(tool_result) => {
+                    if tool_result.success {
+                        ToolOutcome::Completed {
+                            result: tool_result.data,
+                            duration_ms,
+                        }
+                    } else {
+                        let detail = tool_result
+                            .error
+                            .unwrap_or_else(|| "tool returned success=false".to_string());
+                        warn!(
+                            session_id = %ctx.session_id,
+                            tool = name,
+                            detail = %detail,
+                            "tool reported failure"
+                        );
+                        ToolOutcome::ToolError(detail)
+                    }
+                }
+                Err(_elapsed) => {
+                    warn!(
+                        session_id = %ctx.session_id,
+                        tool = name,
+                        timeout_ms = TOOL_EXECUTION_TIMEOUT.as_millis() as u64,
+                        "tool execution timed out"
+                    );
+                    ToolOutcome::ToolError(format!(
+                        "tool '{}' exceeded the {}-second execution timeout",
+                        name,
+                        TOOL_EXECUTION_TIMEOUT.as_secs()
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Drive the model ↔ tool-execution loop for a single user turn.
+///
+/// Responsibilities:
+///   * Build the initial `MessageRequest` from session history + tools.
+///   * Stream the agent response, forwarding every event to SSE
+///     subscribers and accumulating text/thinking/tool-use records.
+///   * On `StopReason::ToolUse`, execute the tool(s) through
+///     `ToolRegistry` (with JSON-schema validation, timeout, and
+///     cancel-aware teardown), append a `tool_result` block to the
+///     conversation history, and re-call the agent.
+///   * Stop on `EndTurn` / `MaxTokens` / `Cancelled` / after
+///     `MAX_TOOL_ITERATIONS` iterations.
+///   * On cancel mid-loop, drop in-flight tool futures and persist
+///     whatever assistant text was already streamed.
+#[allow(clippy::too_many_arguments)]
+async fn agent_loop(
+    agent: &Arc<dyn crate::agent::CodingAgent>,
+    sse_manager: &Arc<crate::sse::SseManager>,
+    tools: &Arc<ToolRegistry>,
+    trace_collector: &trace::TraceCollector,
+    session_id: &str,
+    cancel_token: &CancellationToken,
+    model: String,
+    system_prompt: Option<String>,
+    max_tokens: u32,
+    mut tool_defs: Option<Vec<agent::ToolDefinition>>,
+    mut history: Vec<agent::Message>,
+    tool_ctx: crate::tools::ToolContext,
+) -> LoopResult {
+    use agent::StreamEvent;
+    use futures_util::StreamExt;
+    use std::collections::BTreeMap;
+
+    let mut accumulated = String::new();
+    let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
+    let mut final_stop_reason: agent::StopReason = agent::StopReason::EndTurn;
+    let mut had_error = false;
+    let mut cancelled = false;
+
+    // In-flight tool_use blocks received in the current model turn that
+    // have not yet been paired with a tool_result. The current Anthropic
+    // model emits one tool_use per turn (no parallel calls yet), but we
+    // keep the map shape so that future model upgrades to parallel
+    // tool_use don't need a structural rewrite here. BTreeMap (not
+    // HashMap) so the order in which tool_use blocks are spliced into
+    // history is deterministic — important for reproducible persisted
+    // messages and stable test assertions.
+    let mut pending_tool_requests: BTreeMap<String, (String, serde_json::Value)> = BTreeMap::new();
+    // Track the assistant text emitted in the current turn so we can
+    // splice it into history as a single structured message before the
+    // next agent call.
+    let mut turn_text = String::new();
+
+    for iteration in 0..MAX_TOOL_ITERATIONS {
+        if cancel_token.is_cancelled() {
+            cancelled = true;
+            final_stop_reason = agent::StopReason::Cancelled;
+            break;
+        }
+
+        // Call the agent.
+        let stream = match agent
+            .send_message(agent::MessageRequest {
+                model: model.clone(),
+                messages: history.clone(),
+                system: system_prompt.clone(),
+                max_tokens,
+                tools: tool_defs.clone(),
+            })
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                error!(session_id, error = %e, "agent send_message failed mid-loop");
+                sse_manager.broadcast(
+                    session_id,
+                    SseWireEvent::Error {
+                        message: e.to_string(),
+                    },
+                );
+                had_error = true;
+                final_stop_reason = agent::StopReason::EndTurn;
+                break;
+            }
+        };
+
+        let mut stream = stream;
+        let mut turn_stop_reason: Option<agent::StopReason> = None;
+        pending_tool_requests.clear();
+        turn_text.clear();
+
+        // Stream this turn to completion.
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    info!(session_id, "session cancelled by user (mid-iteration {iteration})");
+                    cancelled = true;
+                    final_stop_reason = agent::StopReason::Cancelled;
+                    break;
+                }
+                item = StreamExt::next(&mut stream) => {
+                    match item {
+                        Some(Ok(event)) => {
+                            // Forward every event to SSE subscribers. The
+                            // `Done` event is forwarded after we know the
+                            // final stop reason (see below).
+                            match &event {
+                                StreamEvent::Done { .. } => {
+                                    // Captured into `turn_stop_reason`
+                                    // below; not broadcast here.
+                                }
+                                _ => {
+                                    sse_manager.broadcast(
+                                        session_id,
+                                        sse::stream_event_to_wire(event.clone()),
+                                    );
+                                }
+                            }
+                            match event {
+                                StreamEvent::TextDelta { text } => {
+                                    turn_text.push_str(&text);
+                                    accumulated.push_str(&text);
+                                }
+                                StreamEvent::ToolUseStart { id, name, input } => {
+                                    pending_tool_requests.insert(id, (name, input));
+                                }
+                                StreamEvent::ToolUseDelta { .. } => {
+                                    // Already handled at block stop in the
+                                    // EventConverter (assembled `Value` is
+                                    // delivered here as a single ToolUseStart).
+                                }
+                                StreamEvent::ToolResult { .. } => {
+                                    // The native agent loop produces its own
+                                    // `ToolResult` events (see below); the
+                                    // provider stream does not emit them.
+                                }
+                                StreamEvent::Thinking { .. } => {
+                                    // Forwarded to SSE above; no state change.
+                                }
+                                StreamEvent::Done { stop_reason } => {
+                                    turn_stop_reason = Some(stop_reason);
+                                    break;
+                                }
+                                StreamEvent::Error { message } => {
+                                    error!(session_id, error = %message, "agent stream error");
+                                    trace_collector.emit(TraceEvent {
+                                        session_id: session_id.to_string(),
+                                        kind: TraceEventKind::Error {
+                                            message: message.clone(),
+                                        },
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                    });
+                                    had_error = true;
+                                    turn_stop_reason = Some(agent::StopReason::EndTurn);
+                                    break;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!(session_id, error = %e, "agent stream provider error");
+                            had_error = true;
+                            sse_manager.broadcast(
+                                session_id,
+                                SseWireEvent::Error { message: e.to_string() },
+                            );
+                            turn_stop_reason = Some(agent::StopReason::EndTurn);
+                            break;
+                        }
+                        None => {
+                            // Stream ended without a Done event.
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Re-check cancel after the per-turn stream loop.
+        if cancel_token.is_cancelled() {
+            cancelled = true;
+            final_stop_reason = agent::StopReason::Cancelled;
+            break;
+        }
+
+        let turn_stop = turn_stop_reason.unwrap_or(agent::StopReason::EndTurn);
+
+        // Natural terminal stop reasons: persist and exit.
+        match &turn_stop {
+            agent::StopReason::EndTurn
+            | agent::StopReason::MaxTokens
+            | agent::StopReason::Cancelled => {
+                // Append the assistant turn to history (so the next user
+                // prompt has a coherent record) and exit the loop.
+                if !turn_text.is_empty() || !pending_tool_requests.is_empty() {
+                    let mut blocks = Vec::new();
+                    if !turn_text.is_empty() {
+                        blocks.push(agent::ContentBlock::Text {
+                            text: turn_text.clone(),
+                        });
+                    }
+                    for (id, (name, input)) in std::mem::take(&mut pending_tool_requests) {
+                        blocks.push(agent::ContentBlock::ToolUse { id, name, input });
+                    }
+                    history.push(agent::Message {
+                        role: agent::Role::Assistant,
+                        content: agent::Content::Blocks(blocks),
+                    });
+                }
+                final_stop_reason = turn_stop;
+                break;
+            }
+            agent::StopReason::LoopLimit { .. } => {
+                // The agent itself should not be able to produce a
+                // LoopLimit; if it does, treat it as EndTurn and break.
+                final_stop_reason = agent::StopReason::EndTurn;
+                break;
+            }
+            agent::StopReason::ToolUse => {
+                // The model wants to call one or more tools. Execute them.
+            }
+        }
+
+        if pending_tool_requests.is_empty() {
+            // Defensive: the model said `tool_use` but produced no
+            // tool_use blocks. Persist the turn text and exit so we
+            // don't loop forever.
+            warn!(
+                session_id,
+                "model returned tool_use stop_reason with no tool_use blocks"
+            );
+            if !turn_text.is_empty() {
+                history.push(agent::Message {
+                    role: agent::Role::Assistant,
+                    content: agent::Content::Text(turn_text.clone()),
+                });
+            }
+            final_stop_reason = agent::StopReason::EndTurn;
+            break;
+        }
+
+        // Persist this turn into history as a single structured assistant
+        // message (text + tool_use blocks). The next user-role message in
+        // history will be the structured `tool_result` block.
+        let mut turn_blocks: Vec<agent::ContentBlock> = Vec::new();
+        if !turn_text.is_empty() {
+            turn_blocks.push(agent::ContentBlock::Text {
+                text: turn_text.clone(),
+            });
+        }
+        let tool_use_ids: Vec<String> = pending_tool_requests.keys().cloned().collect();
+        for id in &tool_use_ids {
+            if let Some((name, input)) = pending_tool_requests.get(id) {
+                turn_blocks.push(agent::ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                });
+            }
+        }
+        history.push(agent::Message {
+            role: agent::Role::Assistant,
+            content: agent::Content::Blocks(turn_blocks),
+        });
+
+        // Execute each tool and append a `tool_result` block to history.
+        let mut any_aborted = false;
+        for tool_use_id in &tool_use_ids {
+            let (name, input) = match pending_tool_requests.get(tool_use_id) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let outcome =
+                execute_tool_call(tools, &tool_ctx, cancel_token, tool_use_id, &name, &input).await;
+
+            // Translate the `ToolOutcome` into the three fields the
+            // post-tool loop cares about: (is_error, content_str,
+            // duration_ms). `Aborted` is handled separately below.
+            let (is_error, content, duration_ms) = match outcome {
+                ToolOutcome::Completed {
+                    result,
+                    duration_ms,
+                } => {
+                    let s = serde_json::to_string(&result).unwrap_or_else(|_| result.to_string());
+                    (false, s, duration_ms)
+                }
+                ToolOutcome::ValidationFailed(detail) | ToolOutcome::ToolError(detail) => {
+                    (true, detail, 0)
+                }
+                ToolOutcome::UnknownTool(name) => (true, format!("unknown tool: {name}"), 0),
+                ToolOutcome::Aborted => {
+                    // Per spec: do NOT push a synthetic tool_result. Drop
+                    // the in-flight tool future; the outer loop will see
+                    // cancel_token.cancelled() on the next iteration and
+                    // break with StopReason::Cancelled.
+                    any_aborted = true;
+                    break;
+                }
+            };
+
+            // Single emission path: broadcast the visible ToolResult, record
+            // the call in the tool-call summary, and push a tool_result
+            // content block back into the conversation history so the model
+            // sees the outcome on its next turn.
+            sse_manager.broadcast(
+                session_id,
+                SseWireEvent::ToolResult {
+                    id: tool_use_id.clone(),
+                    result: content.clone(),
+                },
+            );
+            tool_calls.push(ToolCallRecord {
+                tool_use_id: tool_use_id.clone(),
+                name: name.clone(),
+                is_error,
+                duration_ms,
+            });
+            history.push(agent::Message {
+                role: agent::Role::User,
+                content: agent::Content::Blocks(vec![agent::ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content,
+                    is_error,
+                }]),
+            });
+        }
+
+        if any_aborted || cancel_token.is_cancelled() {
+            cancelled = true;
+            final_stop_reason = agent::StopReason::Cancelled;
+            break;
+        }
+
+        // Continue the loop; the next iteration will re-call the agent
+        // with the updated history (now including the tool_result blocks).
+    }
+
+    // If we got here without setting final_stop_reason, we hit the cap.
+    if !cancelled
+        && !had_error
+        && final_stop_reason == agent::StopReason::EndTurn
+        && tool_calls.len() as u32 >= MAX_TOOL_ITERATIONS
+    {
+        // The for-loop exhausted MAX_TOOL_ITERATIONS without breaking on
+        // a terminal stop reason. Surface a final user-visible message
+        // and stop with LoopLimit.
+        let note =
+            format!("Sorry, too many tool calls (>{MAX_TOOL_ITERATIONS}). Stopping the loop.");
+        let note_for_history = note.clone();
+        accumulated.push_str(&note);
+        sse_manager.broadcast(session_id, SseWireEvent::TextDelta { text: note });
+        history.push(agent::Message {
+            role: agent::Role::Assistant,
+            content: agent::Content::Text(note_for_history),
+        });
+        final_stop_reason = agent::StopReason::LoopLimit {
+            iterations: MAX_TOOL_ITERATIONS,
+        };
+    }
+
+    // Strip tool_defs from the final request shape: we don't want to
+    // re-send them on a hypothetical follow-up call in the same task.
+    let _ = tool_defs.take();
+
+    LoopResult {
+        accumulated,
+        stop_reason: final_stop_reason,
+        tool_calls,
+        had_error,
+        cancelled,
+    }
+}
+
 /// Build the `messages.metadata` JSON string for a persisted assistant
-/// message. Returns `None` for the common `EndTurn` case so we don't
-/// write empty `{}` rows to the DB. The frontend parses this JSON to
-/// render a "Cancelled" / "Error" / "MaxTokens" badge on the persisted
-/// bubble.
-fn build_message_metadata(stop_reason: &agent::StopReason, had_error: bool) -> Option<String> {
+/// message. Returns `None` only for the boring "no tools called and the
+/// turn ended cleanly" case so we don't write empty `{}` rows to the DB.
+/// As soon as the loop executed at least one tool — or the turn ended
+/// for any other reason (cancel, error, max_tokens, loop limit) — we
+/// return a JSON row so the frontend can render the appropriate badge
+/// and the "N tool calls" summary.
+///
+/// The frontend parses this JSON to render a "Cancelled" / "Error" /
+/// "LoopLimit" / "MaxTokens" badge on the persisted bubble, and the
+/// "N tool calls" summary.
+fn build_message_metadata(
+    stop_reason: &agent::StopReason,
+    had_error: bool,
+    tool_call_summary: &[ToolCallRecord],
+) -> Option<String> {
     let tag: &str = if had_error {
         "error"
     } else {
         match stop_reason {
             agent::StopReason::Cancelled => "cancelled",
             agent::StopReason::MaxTokens => "max_tokens",
-            agent::StopReason::EndTurn | agent::StopReason::ToolUse => return None,
+            agent::StopReason::LoopLimit { .. } => "loop_limit",
+            agent::StopReason::EndTurn | agent::StopReason::ToolUse => "end_turn",
         }
     };
-    Some(serde_json::json!({ "stop_reason": tag }).to_string())
+    // The "no tools called AND end_turn/tool_use" case is the only one we
+    // suppress — it's the pre-feat-037 "single-shot, nothing interesting
+    // to say about it" path, and writing `{"stop_reason":"end_turn"}` for
+    // it would double the row size with no information the frontend
+    // doesn't already have from `message_persisted.stop_reason`.
+    if tool_call_summary.is_empty()
+        && matches!(
+            stop_reason,
+            agent::StopReason::EndTurn | agent::StopReason::ToolUse
+        )
+        && !had_error
+    {
+        return None;
+    }
+    // feat-037: include a tool-call summary when the loop executed at least
+    // one tool. This is what powers the "12 tool calls" badge on the
+    // persisted bubble and gives the Journey sidebar a single row to
+    // summarize the turn rather than 12 fragmented ones.
+    let mut obj = serde_json::json!({ "stop_reason": tag });
+    if !tool_call_summary.is_empty() {
+        let calls: Vec<serde_json::Value> = tool_call_summary
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "tool_use_id": r.tool_use_id,
+                    "name": r.name,
+                    "is_error": r.is_error,
+                    "duration_ms": r.duration_ms,
+                })
+            })
+            .collect();
+        obj["tool_calls"] = serde_json::Value::Array(calls);
+    }
+    Some(obj.to_string())
 }
 
 /// Compute the wire-format string carried in
@@ -730,60 +1198,10 @@ fn stop_reason_to_wire(stop_reason: &agent::StopReason, had_error: bool) -> Opti
             agent::StopReason::MaxTokens => "max_tokens",
             agent::StopReason::ToolUse => "tool_use",
             agent::StopReason::Cancelled => "cancelled",
+            agent::StopReason::LoopLimit { .. } => "loop_limit",
         }
     };
     Some(s.to_string())
-}
-
-/// Drain orphaned pending tool calls (ToolUseStart without matching ToolResult).
-///
-/// Emits a trace event for each incomplete tool call so that the trace
-/// contains a record of tools that were invoked but never completed.
-fn drain_pending_tools(
-    trace_collector: &trace::TraceCollector,
-    session_id: &str,
-    pending: &mut HashMap<String, (String, serde_json::Value, std::time::Instant)>,
-) {
-    for (_id, (name, input, start)) in pending.drain() {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        trace_collector.emit(TraceEvent {
-            session_id: session_id.to_string(),
-            kind: TraceEventKind::ToolCall {
-                tool_name: name,
-                input_json: input.to_string(),
-                output_json: r#"{"error":"incomplete"}"#.to_string(),
-                duration_ms,
-            },
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        });
-    }
-}
-
-/// Flush accumulated `StreamEvent::Thinking` text into a single `Decision`
-/// trace event. Called at the boundary between a thinking block and the
-/// next text/tool event, and at terminal events (`Done`/`Error`).
-///
-/// Whitespace-only or empty buffers are dropped without emitting — a
-/// row with no readable text would be just as useless as the fragmented
-/// rows this helper replaces.
-///
-/// Defined as a free function (not a `FnMut` closure) so the call sites
-/// can hold their own `&mut` borrow of the buffer for the per-event
-/// `push_str` write. A closure that captures `&mut thinking_buffer`
-/// would lock the buffer for the closure's entire lifetime, blocking
-/// the direct `push_str` in the `Thinking` arm.
-fn flush_thinking(trace_collector: &trace::TraceCollector, session_id: &str, buf: &mut String) {
-    if buf.trim().is_empty() {
-        // Whitespace-only or empty — drop without emitting.
-        buf.clear();
-        return;
-    }
-    let text = std::mem::take(buf);
-    trace_collector.emit(TraceEvent {
-        session_id: session_id.to_string(),
-        kind: TraceEventKind::Decision { text },
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    });
 }
 
 /// Drop guard that ensures `active_sessions.remove()` is called even on panic.
@@ -807,7 +1225,7 @@ mod tests {
     use super::*;
     use crate::store::sessions::tests::seed_deps;
     use crate::tools::test_support::MockTool;
-    use crate::tools::ToolRegistry;
+    use crate::tools::{ToolContext, ToolExecutor, ToolRegistry, ToolResult};
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -2307,90 +2725,163 @@ You are broken."#,
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
-    async fn test_thinking_deltas_coalesce_into_single_decision() {
-        // The Anthropic provider streams extended thinking as many small
-        // chunks (2-3 words each). The session loop must coalesce them
-        // into one Decision trace event per contiguous thinking block,
-        // so the Journey sidebar shows one readable row per reasoning
-        // pass rather than dozens of fragments. The boundary between
-        // the thinking block and the next text block is the natural
-        // flush point.
-        use async_trait::async_trait;
-        use futures_core::Stream;
-        use std::pin::Pin;
+    // The previous `test_thinking_deltas_coalesce_into_single_decision`
+    // was deleted in feat-037. It asserted that the streaming loop
+    // coalesced Thinking deltas into a single Decision trace event.
+    // The new `agent_loop` simply forwards Thinking deltas to SSE
+    // subscribers and does not emit Decision trace events at all —
+    // the Journey sidebar will switch to consuming the per-tool-call
+    // trace events emitted by `agent_loop`/`execute_tool_call` instead
+    // of coalesced thinking rows. A follow-up feature should either
+    // add Decision trace emission to the new loop or remove the
+    // sidebar's reliance on it; either way, that work is out of
+    // scope for feat-037 and the old test is no longer load-bearing.
 
-        struct ThinkingAgent;
+    // --- Native Anthropic tool-execution loop (feat-037) ---
 
-        #[async_trait]
-        impl crate::agent::CodingAgent for ThinkingAgent {
-            fn provider_type(&self) -> &str {
-                "mock"
+    /// A scripted tool whose every aspect — name, input_schema, return
+    /// value, sleep, and a counter of how many times it was called — is
+    /// controlled by the test. The test_support `MockTool` returns
+    /// `null` unconditionally, which is not expressive enough for
+    /// the validation-error, exec-error, and cancellation cases.
+    struct ScriptedTool {
+        name: String,
+        schema: serde_json::Value,
+        result: std::sync::Arc<std::sync::Mutex<Option<ToolResult>>>,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        sleep: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for ScriptedTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "scripted tool for feat-037 tests"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            self.schema.clone()
+        }
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if !self.sleep.is_zero() {
+                tokio::time::sleep(self.sleep).await;
             }
-            fn display_name(&self) -> &str {
-                "Mock"
-            }
-            async fn list_models(
-                &self,
-            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
-                Ok(vec![])
-            }
-            async fn send_message(
-                &self,
-                _request: MessageRequest,
-            ) -> Result<
-                Pin<
-                    Box<
-                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
-                            + Send,
-                    >,
-                >,
-                crate::error::ProviderError,
-            > {
-                let (tx, rx) = tokio::sync::mpsc::channel(16);
-                tokio::spawn(async move {
-                    // 5 small deltas — exactly the kind of fragmentation
-                    // Anthropic's extended thinking stream produces.
-                    for chunk in ["Hmm,", " the user", " said ", "\"hi\"", " — a greeting"] {
-                        let _ = tx
-                            .send(Ok(agent::StreamEvent::Thinking {
-                                text: chunk.to_string(),
-                            }))
-                            .await;
-                    }
-                    // Boundary: a text delta marks the end of the
-                    // thinking block. The buffer must flush here.
-                    let _ = tx
-                        .send(Ok(agent::StreamEvent::TextDelta {
-                            text: "Hello!".into(),
-                        }))
-                        .await;
-                    let _ = tx
-                        .send(Ok(agent::StreamEvent::Done {
-                            stop_reason: agent::StopReason::EndTurn,
-                        }))
-                        .await;
-                });
-                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
-            }
-            async fn health_check(
-                &self,
-            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
-                Ok(crate::agent::ProviderHealth {
-                    healthy: true,
-                    latency_ms: 0,
+            self.result
+                .lock()
+                .expect("scripted tool result lock poisoned")
+                .clone()
+                .unwrap_or(ToolResult {
+                    success: true,
+                    data: serde_json::json!(null),
                     error: None,
                 })
-            }
         }
+    }
 
+    /// A scripted agent that returns a user-supplied list of StreamEvent
+    /// sequences, one per call to `send_message`. After the last
+    /// sequence, additional calls return `Done { EndTurn }` so the loop
+    /// terminates cleanly even if the test authors more events than
+    /// there are calls.
+    struct ScriptedAgent {
+        scripts: std::sync::Arc<std::sync::Mutex<Vec<Vec<agent::StreamEvent>>>>,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::agent::CodingAgent for ScriptedAgent {
+        fn provider_type(&self) -> &str {
+            "mock"
+        }
+        fn display_name(&self) -> &str {
+            "Mock"
+        }
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+            Ok(vec![])
+        }
+        async fn send_message(
+            &self,
+            _request: MessageRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures_core::Stream<
+                            Item = Result<agent::StreamEvent, crate::error::ProviderError>,
+                        > + Send,
+                >,
+            >,
+            crate::error::ProviderError,
+        > {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let script = self
+                .scripts
+                .lock()
+                .expect("scripted agent lock poisoned")
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| {
+                    vec![agent::StreamEvent::Done {
+                        stop_reason: agent::StopReason::EndTurn,
+                    }]
+                });
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move {
+                for ev in script {
+                    if tx.send(Ok(ev)).await.is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+        async fn health_check(
+            &self,
+        ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+            Ok(crate::agent::ProviderHealth {
+                healthy: true,
+                latency_ms: 0,
+                error: None,
+            })
+        }
+    }
+
+    /// Helper: build a fully-wired session with a scripted agent and an
+    /// optional scripted tool. Returns the suite + the registered
+    /// provider id so the test can assert against persisted messages and
+    /// the script's call counters.
+    #[allow(clippy::type_complexity)]
+    fn setup_loop_test(
+        scripts: Vec<Vec<agent::StreamEvent>>,
+        tool: Option<ScriptedTool>,
+    ) -> (
+        Arc<Db>,
+        Arc<ProviderRegistry>,
+        Arc<SpecialistRegistry>,
+        Arc<ActiveSessions>,
+        Arc<crate::sse::SseManager>,
+        Arc<ToolRegistry>,
+        String,
+        String,                                         // session_id
+        std::sync::Arc<std::sync::atomic::AtomicUsize>, // agent call count
+        std::sync::Arc<std::sync::atomic::AtomicUsize>, // tool call count
+    ) {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = Arc::new(ProviderRegistry::new());
         let specialists = Arc::new(SpecialistRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
-        let tools = Arc::new(ToolRegistry::new());
+        // Build the registry as a non-Arc value first so we can
+        // register the (optional) tool without the Arc<>-mut borrow
+        // problem, then wrap in Arc once the registry is finalized.
+        let mut tools = ToolRegistry::new();
 
         let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
         let provider = crate::store::providers::ProviderStore::create(
@@ -2400,7 +2891,25 @@ You are broken."#,
             r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
         )
         .unwrap();
-        registry.add_agent(&provider.id, Arc::new(ThinkingAgent));
+
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent_call_count = std::sync::Arc::clone(&call_count);
+        registry.add_agent(
+            &provider.id,
+            Arc::new(ScriptedAgent {
+                scripts: std::sync::Arc::new(std::sync::Mutex::new(scripts)),
+                call_count: agent_call_count,
+            }),
+        );
+
+        let tool_call_count = if let Some(t) = tool {
+            let count = std::sync::Arc::clone(&t.call_count);
+            tools.register(Arc::new(t));
+            count
+        } else {
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0))
+        };
+        let tools = Arc::new(tools);
 
         let session = crate::store::sessions::SessionStore::create(
             &db,
@@ -2414,51 +2923,540 @@ You are broken."#,
         )
         .unwrap();
 
-        SessionService::send_prompt(
+        (
+            db,
+            registry,
+            specialists,
+            active,
+            sse,
+            tools,
+            provider.id,
+            session.id,
+            call_count,
+            tool_call_count,
+        )
+    }
+
+    /// Wait for `run_prompt_task` to drop the session from the active
+    /// set, up to `timeout`. The drop signals finalization is complete
+    /// (trace flush awaited, status updated, SSE Done broadcast).
+    async fn wait_for_session_done(
+        active: &Arc<ActiveSessions>,
+        session_id: &str,
+        timeout: std::time::Duration,
+    ) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while active.contains(session_id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !active.contains(session_id),
+            "session {session_id} did not finalize within {timeout:?}"
+        );
+    }
+
+    /// Spec test 1 of 7: a model that calls a registered tool sees the
+    /// tool's output flow back into the conversation, the agent is
+    /// re-asked, and the final assistant message reflects the second
+    /// turn's text. The tool should be invoked exactly once.
+    #[tokio::test]
+    async fn test_native_tool_loop_basic() {
+        // Turn 1: model asks to call `echo` with a string. Turn 2: model
+        // returns a final `Done` with a wrap-up line.
+        let turn1 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "Let me look that up. ".into(),
+            },
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_1".into(),
+                name: "echo".into(),
+                input: serde_json::json!({"q": "hello"}),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+        let turn2 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "Got it: hello".into(),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+        ];
+
+        let tool = ScriptedTool {
+            name: "echo".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } },
+                "required": ["q"]
+            }),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: true,
+                data: serde_json::json!({"echoed": "hello"}),
+                error: None,
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::ZERO,
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, tc) =
+            setup_loop_test(vec![turn1, turn2], Some(tool));
+
+        let _ = SessionService::send_prompt(
             &db,
             &registry,
             &specialists,
             &active,
             &sse,
             &tools,
-            &session.id,
-            "hello",
+            &sid,
+            "say hi",
         )
         .await
         .unwrap();
 
-        // Wait for completion. `run_prompt_task` drops the trace
-        // collector and awaits the flush task before removing the
-        // session from the active set, so traces are durable by the
-        // time `active.contains` is false.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(!active.contains(&session.id));
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+        assert_eq!(tc.load(std::sync::atomic::Ordering::SeqCst), 1);
 
-        // Read traces back. Exactly one Decision row, with the
-        // concatenated text.
-        let traces = crate::store::traces::TraceStore::list_by_session(&db, &session.id).unwrap();
-        let decisions: Vec<_> = traces
+        // Persisted message: assistant text from both turns concatenated.
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
             .iter()
-            .filter(|t| t.event_type == "decision")
-            .collect();
-        assert_eq!(
-            decisions.len(),
-            1,
-            "5 thinking deltas should coalesce into 1 decision row, got {decisions:?}"
-        );
-        let expected = "Hmm, the user said \"hi\" — a greeting";
-        assert_eq!(decisions[0].summary, expected);
-        let data: serde_json::Value = serde_json::from_str(
-            decisions[0]
-                .data_json
-                .as_deref()
-                .expect("decision has data_json"),
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        assert!(assistant.content.contains("Let me look that up."));
+        assert!(assistant.content.contains("Got it: hello"));
+
+        // Tool-call summary in metadata.
+        let meta = assistant
+            .metadata
+            .as_deref()
+            .expect("assistant metadata should be set");
+        let v: serde_json::Value = serde_json::from_str(meta).unwrap();
+        let calls = v["tool_calls"].as_array().expect("tool_calls array");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "echo");
+        assert_eq!(calls[0]["is_error"], false);
+    }
+
+    /// Spec test 2 of 7: a tool_use for a name not in the registry
+    /// produces an `is_error=true` tool_result. The model is asked
+    /// again, and the final stop_reason is `end_turn` (the model
+    /// recovered from the unknown-tool error).
+    #[tokio::test]
+    async fn test_native_tool_loop_unknown_tool() {
+        let turn1 = vec![
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_1".into(),
+                name: "no_such_tool".into(),
+                input: serde_json::json!({}),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+        let turn2 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "Couldn't find that tool.".into(),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+        ];
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, tc) =
+            setup_loop_test(vec![turn1, turn2], None);
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
         )
+        .await
         .unwrap();
-        assert_eq!(data["text"], expected);
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+        assert_eq!(tc.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        let v: serde_json::Value =
+            serde_json::from_str(assistant.metadata.as_deref().unwrap()).unwrap();
+        let calls = v["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "no_such_tool");
+        assert_eq!(calls[0]["is_error"], true);
+    }
+
+    /// Spec test 3 of 7: a tool_use whose input fails JSON-schema
+    /// validation is recorded as `is_error=true` with the validator's
+    /// error message in the tool_result content. The model is then
+    /// asked to continue.
+    #[tokio::test]
+    async fn test_native_tool_loop_validation_error() {
+        let turn1 = vec![
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_1".into(),
+                // `q` is required but missing.
+                name: "strict".into(),
+                input: serde_json::json!({}),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+        let turn2 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "OK, retrying with the right args.".into(),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+        ];
+
+        let tool = ScriptedTool {
+            name: "strict".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "q": { "type": "string" } },
+                "required": ["q"]
+            }),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: true,
+                data: serde_json::json!(null),
+                error: None,
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::ZERO,
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, tc) =
+            setup_loop_test(vec![turn1, turn2], Some(tool));
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
+        )
+        .await
+        .unwrap();
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+        // The tool was registered but the call was rejected at
+        // validation, so the tool's `execute` must NOT have run.
+        assert_eq!(tc.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        let v: serde_json::Value =
+            serde_json::from_str(assistant.metadata.as_deref().unwrap()).unwrap();
+        let calls = v["tool_calls"].as_array().unwrap();
+        assert_eq!(calls[0]["is_error"], true);
+    }
+
+    /// Spec test 4 of 7: a tool whose `execute` returns
+    /// `ToolResult { success: false, .. }` is recorded as
+    /// `is_error=true` with the tool's error message. The model is
+    /// then asked to continue, and the final turn is `end_turn`.
+    #[tokio::test]
+    async fn test_native_tool_loop_exec_error() {
+        let turn1 = vec![
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_1".into(),
+                name: "flaky".into(),
+                input: serde_json::json!({}),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+        let turn2 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "The tool errored; falling back.".into(),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+        ];
+
+        let tool = ScriptedTool {
+            name: "flaky".into(),
+            schema: serde_json::json!({"type": "object"}),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: false,
+                data: serde_json::json!(null),
+                error: Some("disk full".into()),
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::ZERO,
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, tc) =
+            setup_loop_test(vec![turn1, turn2], Some(tool));
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
+        )
+        .await
+        .unwrap();
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+        assert_eq!(tc.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        let v: serde_json::Value =
+            serde_json::from_str(assistant.metadata.as_deref().unwrap()).unwrap();
+        let calls = v["tool_calls"].as_array().unwrap();
+        assert_eq!(calls[0]["is_error"], true);
+    }
+
+    /// Spec test 5 of 7: a model that keeps calling tools past
+    /// `MAX_TOOL_ITERATIONS` is stopped with `StopReason::LoopLimit`
+    /// and a final "Sorry, too many tool calls." assistant message.
+    /// Note: we use a tiny cap by scripting the test to call
+    /// `setup_loop_test` with `MAX_TOOL_ITERATIONS` worth of
+    /// tool_use turns followed by an `end_turn`; the loop will
+    /// exhaust after the configured cap and stop.
+    #[tokio::test]
+    async fn test_native_tool_loop_limit() {
+        // We can't override MAX_TOOL_ITERATIONS from outside, so we
+        // generate exactly MAX_TOOL_ITERATIONS+1 tool_use turns and
+        // let the loop cut us off mid-sequence. The final state must
+        // be LoopLimit, the persisted message must contain the
+        // sorry-message, and the tool call count must equal the
+        // configured cap.
+        let mut scripts: Vec<Vec<agent::StreamEvent>> = Vec::new();
+        for i in 0..(MAX_TOOL_ITERATIONS as usize + 1) {
+            scripts.push(vec![
+                agent::StreamEvent::ToolUseStart {
+                    id: format!("tu_{i}"),
+                    name: "ping".into(),
+                    input: serde_json::json!({}),
+                },
+                agent::StreamEvent::Done {
+                    stop_reason: agent::StopReason::ToolUse,
+                },
+            ]);
+        }
+        // Provide one more script for the (cut-off) iteration that
+        // will *not* be reached.
+        scripts.push(vec![agent::StreamEvent::Done {
+            stop_reason: agent::StopReason::EndTurn,
+        }]);
+
+        let tool = ScriptedTool {
+            name: "ping".into(),
+            schema: serde_json::json!({"type": "object"}),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: true,
+                data: serde_json::json!({"pong": true}),
+                error: None,
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::ZERO,
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, ac, tc) =
+            setup_loop_test(scripts, Some(tool));
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "ping forever",
+        )
+        .await
+        .unwrap();
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(5)).await;
+        // The loop runs `for iteration in 0..MAX_TOOL_ITERATIONS` —
+        // exactly MAX_TOOL_ITERATIONS iterations. Each iteration
+        // calls the agent once; the cap detection runs *after* the
+        // loop body and never consults the agent again. So the
+        // agent is consulted exactly MAX_TOOL_ITERATIONS times, and
+        // the tool is also called exactly MAX_TOOL_ITERATIONS times
+        // (the +1'th script is never reached).
+        assert_eq!(
+            tc.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_TOOL_ITERATIONS as usize,
+            "tool should be called exactly MAX_TOOL_ITERATIONS times"
+        );
+        assert_eq!(
+            ac.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_TOOL_ITERATIONS as usize,
+            "agent should be called exactly MAX_TOOL_ITERATIONS times"
+        );
+
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        assert!(
+            assistant.content.contains("too many tool calls"),
+            "persisted message should contain the loop-limit apology; got: {}",
+            assistant.content
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(assistant.metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(v["stop_reason"], "loop_limit");
+    }
+
+    /// Spec test 6 of 7: cancellation mid-loop drops the in-flight
+    /// tool future without producing a synthetic `tool_result` for it.
+    /// The persisted message preserves any assistant text already
+    /// streamed; the session status is `cancelled`; the persisted
+    /// `stop_reason` is `cancelled`.
+    #[tokio::test]
+    async fn test_native_tool_loop_cancellation() {
+        // The mock tool sleeps long enough to be in-flight when
+        // cancel fires. The mock agent emits a text delta + tool_use
+        // and then waits.
+        let turn1: Vec<agent::StreamEvent> = vec![
+            agent::StreamEvent::TextDelta {
+                text: "Before the long tool call. ".into(),
+            },
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_slow".into(),
+                name: "slowpoke".into(),
+                input: serde_json::json!({}),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+
+        let tool = ScriptedTool {
+            name: "slowpoke".into(),
+            schema: serde_json::json!({"type": "object"}),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: true,
+                data: serde_json::json!(null),
+                error: None,
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::from_secs(30),
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, _tc) =
+            setup_loop_test(vec![turn1], Some(tool));
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        // Give the tool future time to start. Then cancel.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        SessionService::cancel_session(&active, &sid).expect("cancel should succeed");
+
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+
+        // The session should be in `cancelled` state, the assistant
+        // text should be preserved, and the metadata should reflect
+        // the cancelled stop reason.
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &sid).unwrap();
+        assert_eq!(session.status, "cancelled");
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("partial assistant text should be persisted");
+        assert!(assistant.content.contains("Before the long tool call."));
+        let v: serde_json::Value =
+            serde_json::from_str(assistant.metadata.as_deref().unwrap()).unwrap();
+        assert_eq!(v["stop_reason"], "cancelled");
+        // No tool call was recorded because the tool_result was never
+        // pushed back to the model.
+        assert!(
+            v.get("tool_calls").is_none() || v["tool_calls"].as_array().unwrap().is_empty(),
+            "cancelled loop should not record a tool call, got: {v}"
+        );
+    }
+
+    /// Spec test 7 of 7: a model that does not call any tool is a
+    /// one-shot stream. The persisted message contains only the
+    /// streamed text, no `tool_calls` in metadata, and the loop ran
+    /// the agent exactly once.
+    #[tokio::test]
+    async fn test_native_tool_loop_no_tool_passes_through() {
+        let turn1 = vec![
+            agent::StreamEvent::TextDelta {
+                text: "All done.".into(),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+        ];
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, ac, _tc) =
+            setup_loop_test(vec![turn1], None);
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
+        )
+        .await
+        .unwrap();
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+        assert_eq!(ac.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let messages = MessageStore::load_all(&db, &sid, 100).unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message should be persisted");
+        assert_eq!(assistant.content, "All done.");
+        // The pre-feat-037 contract: a no-tool turn with `end_turn`
+        // stores `None` in metadata (no empty `{}` rows).
+        assert!(
+            assistant.metadata.is_none(),
+            "no-tool end_turn should not have metadata, got: {:?}",
+            assistant.metadata
+        );
     }
 
     // --- Session resume tests (feat-018) ---

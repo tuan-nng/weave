@@ -340,10 +340,16 @@ fn convert_content_block(block: &ContentBlock) -> serde_json::Value {
         ContentBlock::ToolResult {
             tool_use_id,
             content,
+            is_error,
         } => serde_json::json!({
             "type": "tool_result",
             "tool_use_id": tool_use_id,
             "content": content,
+            // Anthropic's `tool_result` blocks accept an `is_error` boolean. Surfacing
+            // it on the wire lets the model distinguish a successful tool return from
+            // a tool that failed (validation, exec error, timeout, etc.) so it can
+            // try a different tool or argument instead of looping blindly.
+            "is_error": is_error,
         }),
         ContentBlock::Thinking { text } => serde_json::json!({
             "type": "thinking",
@@ -418,12 +424,14 @@ mod tests {
             content: Content::Blocks(vec![ContentBlock::ToolResult {
                 tool_use_id: "tu_1".into(),
                 content: "file contents".into(),
+                is_error: false,
             }]),
         };
         let wire = convert_message(&msg);
         let arr = wire.content.as_array().unwrap();
         assert_eq!(arr[0]["type"], "tool_result");
         assert_eq!(arr[0]["tool_use_id"], "tu_1");
+        assert_eq!(arr[0]["is_error"], false);
     }
 
     #[test]

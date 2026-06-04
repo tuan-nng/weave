@@ -17,6 +17,10 @@ use crate::store::traces::{FileAction, TraceEvent, TraceEventKind, TraceStore};
 ///
 /// Holds the sender half of an mpsc channel. The receiver half is owned by
 /// the background flush task. Constructed once per session in `run_prompt_task`.
+/// Cheap to clone — the underlying `UnboundedSender` is `Clone`, so the
+/// session streaming loop and the per-iteration tool context can share
+/// the same handle (feat-037).
+#[derive(Clone)]
 pub struct TraceCollector {
     tx: tokio::sync::mpsc::UnboundedSender<TraceEvent>,
 }
@@ -41,6 +45,10 @@ impl TraceCollector {
 ///
 /// Returns an empty vec for tools that don't modify files.
 /// Called in the session streaming loop when `ToolResult` arrives.
+#[allow(dead_code)] // Unused after feat-037 refactor; the agent_loop now
+                    // uses `ToolOutcome` and emits its own `TraceEvent`s.
+                    // Kept because the public API is a useful primitive for
+                    // future tool profiles and for tests.
 pub fn extract_file_changes(
     session_id: &str,
     tool_name: &str,

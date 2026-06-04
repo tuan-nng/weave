@@ -91,6 +91,11 @@ pub enum StopReason {
     ToolUse,
     /// The request was cancelled by the user or system.
     Cancelled,
+    /// The agent loop hit the configured per-turn iteration cap (feat-037).
+    /// The model never produced a final `end_turn`; we stopped after `iterations`
+    /// tool rounds and surfaced a final assistant "Sorry, too many tool calls."
+    /// message so the user sees something coherent rather than an open stream.
+    LoopLimit { iterations: u32 },
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +165,11 @@ pub enum ContentBlock {
     ToolResult {
         tool_use_id: String,
         content: String,
+        /// Whether the tool reported a failure (validation, missing tool, exec error,
+        /// timeout, etc.). Mirrors Anthropic's `is_error` flag on `tool_result` blocks
+        /// so the model can react and try a different approach instead of looping
+        /// blindly on a tool that will keep failing.
+        is_error: bool,
     },
     /// Extended-thinking text.
     Thinking { text: String },
@@ -254,8 +264,9 @@ mod tests {
             StopReason::MaxTokens,
             StopReason::ToolUse,
             StopReason::Cancelled,
+            StopReason::LoopLimit { iterations: 8 },
         ];
-        assert_eq!(reasons.len(), 4, "StopReason must have exactly 4 variants");
+        assert_eq!(reasons.len(), 5, "StopReason must have exactly 5 variants");
     }
 
     #[test]
@@ -287,6 +298,7 @@ mod tests {
             StopReason::MaxTokens,
             StopReason::ToolUse,
             StopReason::Cancelled,
+            StopReason::LoopLimit { iterations: 8 },
         ] {
             let json = serde_json::to_string(&reason).expect("serialize");
             let deserialized: StopReason = serde_json::from_str(&json).expect("deserialize");

@@ -9,8 +9,8 @@ use crate::agent::{StopReason, StreamEvent};
 use crate::error::ProviderError;
 
 use super::types::{
-    AnthropicSseEvent, ContentBlock, ContentBlockDeltaData, ContentBlockStartData, Delta,
-    MessageDeltaData,
+    AnthropicSseEvent, ContentBlock, ContentBlockDeltaData, ContentBlockStartData,
+    ContentBlockStopData, Delta, MessageDeltaData,
 };
 
 // ---------------------------------------------------------------------------
@@ -118,20 +118,30 @@ pub(crate) fn interpret_event(raw: &RawSseEvent) -> Option<AnthropicSseEvent> {
 
 /// Stateful converter that maps Anthropic SSE events to [`StreamEvent`] items.
 ///
-/// Maintains minimal state across events: the current content block's tool_use
-/// ID (needed to route `input_json_delta` chunks to the correct `ToolUseDelta`).
+/// Maintains minimal state across events: for every in-flight tool_use content
+/// block, the converter remembers the assigned tool_use ID, the tool name,
+/// and the accumulating partial JSON input. `ToolUseStart` is *deferred* until
+/// the matching `ContentBlockStop` arrives, so the consumer always sees the
+/// fully reassembled `serde_json::Value` in `StreamEvent::ToolUseStart::input`
+/// rather than a stream of `{}` placeholders that have to be glued together
+/// downstream. (feat-037)
 pub(crate) struct EventConverter {
-    /// Tool use ID for the current content block (if it's a tool_use block).
-    current_tool_id: Option<String>,
     /// Map from content block index to tool_use ID.
     tool_ids: HashMap<usize, String>,
+    /// Map from content block index to the tool name, captured at block start
+    /// so we can emit it together with the assembled input at block stop.
+    pending_tool_names: HashMap<usize, String>,
+    /// Map from content block index to the accumulating partial JSON input.
+    /// Cleared on `ContentBlockStop` after the assembled `Value` is emitted.
+    pending_input_buffers: HashMap<usize, String>,
 }
 
 impl EventConverter {
     pub fn new() -> Self {
         Self {
-            current_tool_id: None,
             tool_ids: HashMap::new(),
+            pending_tool_names: HashMap::new(),
+            pending_input_buffers: HashMap::new(),
         }
     }
 
@@ -148,10 +158,7 @@ impl EventConverter {
             AnthropicSseEvent::MessageStart(_) => Ok(None),
             AnthropicSseEvent::ContentBlockStart(data) => self.convert_block_start(data),
             AnthropicSseEvent::ContentBlockDelta(data) => self.convert_block_delta(data),
-            AnthropicSseEvent::ContentBlockStop(_) => {
-                self.current_tool_id = None;
-                Ok(None)
-            }
+            AnthropicSseEvent::ContentBlockStop(data) => self.convert_block_stop(data),
             AnthropicSseEvent::MessageDelta(data) => self.convert_message_delta(data),
             AnthropicSseEvent::MessageStop => Ok(None),
             AnthropicSseEvent::Ping => Ok(None),
@@ -167,13 +174,14 @@ impl EventConverter {
     ) -> Result<Option<Vec<StreamEvent>>, ProviderError> {
         match data.content_block {
             ContentBlock::ToolUse { id, name } => {
+                // feat-037: register the tool_use in the per-block maps and seed
+                // an empty input buffer. We deliberately do NOT emit a
+                // `ToolUseStart` here — the consumer will get a single
+                // `ToolUseStart` with the assembled `Value` at `ContentBlockStop`.
                 self.tool_ids.insert(data.index, id.clone());
-                self.current_tool_id = Some(id.clone());
-                Ok(Some(vec![StreamEvent::ToolUseStart {
-                    id,
-                    name,
-                    input: serde_json::json!({}),
-                }]))
+                self.pending_tool_names.insert(data.index, name);
+                self.pending_input_buffers.insert(data.index, String::new());
+                Ok(None)
             }
             _ => Ok(None),
         }
@@ -186,7 +194,15 @@ impl EventConverter {
         match data.delta {
             Delta::TextDelta { text } => Ok(Some(vec![StreamEvent::TextDelta { text }])),
             Delta::InputJsonDelta { partial_json } => {
+                // feat-037: forward the chunk as a `ToolUseDelta` (so any
+                // out-of-band UI that wants the live partial input still
+                // sees something) AND accumulate into the per-block buffer
+                // that will be parsed into the final `Value` at block stop.
                 let id = self.tool_ids.get(&data.index).cloned().unwrap_or_default();
+                self.pending_input_buffers
+                    .entry(data.index)
+                    .or_default()
+                    .push_str(&partial_json);
                 Ok(Some(vec![StreamEvent::ToolUseDelta {
                     id,
                     delta: partial_json,
@@ -196,6 +212,43 @@ impl EventConverter {
                 Ok(Some(vec![StreamEvent::Thinking { text: thinking }]))
             }
         }
+    }
+
+    /// Emit the assembled `ToolUseStart` for a tool_use block when its
+    /// `ContentBlockStop` arrives. The input is parsed from the accumulated
+    /// partial JSON; on parse failure (which Anthropic guarantees shouldn't
+    /// happen for a well-formed tool call) we fall back to an empty object
+    /// so the loop driver can still match a tool_use_id and surface a
+    /// validation error downstream.
+    fn convert_block_stop(
+        &mut self,
+        data: ContentBlockStopData,
+    ) -> Result<Option<Vec<StreamEvent>>, ProviderError> {
+        let id = match self.tool_ids.remove(&data.index) {
+            Some(id) => id,
+            None => {
+                // Not a tool_use block (text/thinking) — emit nothing.
+                return Ok(None);
+            }
+        };
+        let name = self
+            .pending_tool_names
+            .remove(&data.index)
+            .unwrap_or_default();
+        let raw = self
+            .pending_input_buffers
+            .remove(&data.index)
+            .unwrap_or_default();
+        let input = serde_json::from_str(&raw).unwrap_or_else(|_| {
+            tracing::warn!(
+                tool_use_id = %id,
+                raw = %raw,
+                "Anthropic streamed a tool_use block with unparseable accumulated input JSON; \
+                 emitting empty object so the agent loop can still surface a validation error"
+            );
+            serde_json::json!({})
+        });
+        Ok(Some(vec![StreamEvent::ToolUseStart { id, name, input }]))
     }
 
     fn convert_message_delta(
@@ -337,7 +390,10 @@ event: message_stop\ndata: {}\n\n";
     fn test_convert_tool_use_lifecycle() {
         let mut converter = EventConverter::new();
 
-        // Tool use start
+        // Tool use start — registers the id/name/buffer but does NOT emit
+        // a StreamEvent. feat-037: the ToolUseStart is deferred to the
+        // matching ContentBlockStop so the consumer sees the fully
+        // reassembled input `Value`.
         let start = AnthropicSseEvent::ContentBlockStart(ContentBlockStartData {
             index: 1,
             content_block: ContentBlock::ToolUse {
@@ -345,26 +401,48 @@ event: message_stop\ndata: {}\n\n";
                 name: "read_file".into(),
             },
         });
-        let result = converter.convert(start).unwrap().unwrap();
-        assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0], StreamEvent::ToolUseStart { id, .. } if id == "tu_42"));
+        let result = converter.convert(start).unwrap();
+        assert!(
+            result.is_none(),
+            "ToolUseStart must be deferred to ContentBlockStop"
+        );
 
-        // Tool use delta
-        let delta = AnthropicSseEvent::ContentBlockDelta(ContentBlockDeltaData {
+        // First partial input chunk — emits a ToolUseDelta and accumulates.
+        let delta1 = AnthropicSseEvent::ContentBlockDelta(ContentBlockDeltaData {
             index: 1,
             delta: Delta::InputJsonDelta {
                 partial_json: r#"{"path":"/"#.into(),
             },
         });
-        let result = converter.convert(delta).unwrap().unwrap();
+        let result = converter.convert(delta1).unwrap().unwrap();
         assert_eq!(result.len(), 1);
         assert!(matches!(&result[0], StreamEvent::ToolUseDelta { id, delta }
             if id == "tu_42" && delta == r#"{"path":"/"#));
 
-        // Block stop
+        // Second partial input chunk — completes the JSON object.
+        let delta2 = AnthropicSseEvent::ContentBlockDelta(ContentBlockDeltaData {
+            index: 1,
+            delta: Delta::InputJsonDelta {
+                partial_json: r#"tmp/test.txt"}"#.into(),
+            },
+        });
+        let result = converter.convert(delta2).unwrap().unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], StreamEvent::ToolUseDelta { id, delta }
+            if id == "tu_42" && delta == r#"tmp/test.txt"}"#));
+
+        // Block stop — emits the single ToolUseStart with the assembled Value.
         let stop = AnthropicSseEvent::ContentBlockStop(ContentBlockStopData { index: 1 });
-        let result = converter.convert(stop).unwrap();
-        assert!(result.is_none());
+        let result = converter.convert(stop).unwrap().unwrap();
+        assert_eq!(result.len(), 1);
+        match &result[0] {
+            StreamEvent::ToolUseStart { id, name, input } => {
+                assert_eq!(id, "tu_42");
+                assert_eq!(name, "read_file");
+                assert_eq!(input, &serde_json::json!({"path": "/tmp/test.txt"}));
+            }
+            other => panic!("expected ToolUseStart, got {:?}", other),
+        }
     }
 
     #[test]
@@ -521,17 +599,22 @@ event: message_stop\ndata: {}\n\n";
             }
         }
 
-        // Verify the exact event sequence
+        // Verify the exact event sequence. feat-037 changed the lifecycle:
+        // the `ToolUseStart` for a tool_use block is now emitted on
+        // `ContentBlockStop` with the assembled `Value` (not eagerly at
+        // block-start with `{}`), so the sequence is now:
+        //   TextDelta → ToolUseDelta → ToolUseStart → Done
         assert_eq!(stream_events.len(), 4);
         assert!(
             matches!(&stream_events[0], StreamEvent::TextDelta { text } if text == "I'll read the file.")
         );
         assert!(
-            matches!(&stream_events[1], StreamEvent::ToolUseStart { id, name, .. } if id == "tu_test" && name == "read_file")
+            matches!(&stream_events[1], StreamEvent::ToolUseDelta { id, delta }
+            if id == "tu_test" && delta.contains("path"))
         );
         assert!(
-            matches!(&stream_events[2], StreamEvent::ToolUseDelta { id, delta }
-            if id == "tu_test" && delta.contains("path"))
+            matches!(&stream_events[2], StreamEvent::ToolUseStart { id, name, input }
+                if id == "tu_test" && name == "read_file" && input.get("path").is_some())
         );
         assert!(matches!(
             &stream_events[3],
