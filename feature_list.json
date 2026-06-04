@@ -78,11 +78,11 @@
     {
       "id": "feat-001",
       "phase": "phase-1",
-      "behavior": "Binary compiles and starts. CLI accepts --host, --port, --db-path, --allow-remote flags via clap. Tracing subscriber initializes with RUST_LOG env filter. Server binds and listens. GET /api/health returns {\"status\": \"ok\", \"version\": \"...\", \"uptime_seconds\": N}. Graceful shutdown on SIGTERM/SIGINT.",
-      "verification": "cargo build -p weave-server && cargo run -p weave-server -- --port 19876 &; sleep 2; curl -sf http://localhost:19876/api/health | jq -e '.status == \"ok\"'; kill %1",
+      "behavior": "Binary compiles and starts. CLI accepts --host, --port, --db-path, --allow-remote flags via clap. Tracing subscriber initializes with RUST_LOG env filter. Server binds and listens. GET /api/health returns {\\\\\\\"status\\\\\\\": \\\\\\\"ok\\\\\\\", \\\\\\\"version\\\\\\\": \\\\\\\"...\\\\\\\", \\\\\\\"uptime_seconds\\\\\\\": N}. Graceful shutdown on SIGTERM/SIGINT.",
+      "verification": "cargo build -p weave-server && cargo run -p weave-server -- --port 19876 &; sleep 2; curl -sf http://localhost:19876/api/health | jq -e '.status == \\\\\\\"ok\\\\\\\"'; kill %1",
       "state": "passing",
       "dependencies": [],
-      "evidence": "init.sh all 3 layers pass; curl http://localhost:19876/api/health returns {status: ok, version: 0.1.0, uptime_seconds: N}"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-002",
@@ -93,30 +93,30 @@
       "dependencies": [
         "feat-001"
       ],
-      "evidence": "init.sh all 3 layers pass; cargo test -- test_db_init (WAL mode, FK ON, busy_timeout 5000, 11 tables); cargo test -- test_migrations_idempotent (user_version=2 after double run)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-003",
       "phase": "phase-1",
-      "behavior": "Shared error types: AppError enum (NotFound, Validation, Provider, Database, Internal) with thiserror. ProviderError enum (AuthFailed, RateLimited, ModelNotFound, Unreachable, StreamInterrupted). AppError implements IntoResponse mapping errors to HTTP status codes + consistent JSON envelope {\"error\": {\"code\": \"...\", \"message\": \"...\"}}.",
+      "behavior": "Shared error types: AppError enum (NotFound, Validation, Provider, Database, Internal) with thiserror. ProviderError enum (AuthFailed, RateLimited, ModelNotFound, Unreachable, StreamInterrupted). AppError implements IntoResponse mapping errors to HTTP status codes + consistent JSON envelope {\\\\\\\"error\\\\\\\": {\\\\\\\"code\\\\\\\": \\\\\\\"...\\\\\\\", \\\\\\\"message\\\\\\\": \\\\\\\"...\\\\\\\"}}.",
       "verification": "cargo test -p weave-server -- test_error_response_format && cargo test -p weave-server -- test_error_status_codes",
       "state": "passing",
       "dependencies": [
         "feat-001"
       ],
-      "evidence": "init.sh all 3 layers pass; cargo test -- test_error_response_format (all 9 variants: correct JSON envelope {error:{code,message}}, sanitized DB/Internal messages); cargo test -- test_error_status_codes (404/400/401/429/502/500 mapping); cargo test -- test_from_conversions (rusqlite::Error, ProviderError, anyhow::Error)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-004",
       "phase": "phase-1",
-      "behavior": "WorkspaceStore with CRUD operations. Default workspace \"default\" created on first startup. API: GET /api/workspaces (paginated), POST /api/workspaces (name validation 1-100 chars), GET /api/workspaces/:id, PATCH /api/workspaces/:id, DELETE /api/workspaces/:id (cascade deletes). All responses use consistent JSON envelope.",
+      "behavior": "WorkspaceStore with CRUD operations. Default workspace \\\\\\\"default\\\\\\\" created on first startup. API: GET /api/workspaces (paginated), POST /api/workspaces (name validation 1-100 chars), GET /api/workspaces/:id, PATCH /api/workspaces/:id, DELETE /api/workspaces/:id (cascade deletes). All responses use consistent JSON envelope.",
       "verification": "cargo test -p weave-server -- test_workspace_crud && cargo test -p weave-server -- test_workspace_default_seed",
       "state": "passing",
       "dependencies": [
         "feat-002",
         "feat-003"
       ],
-      "evidence": "init.sh all 3 layers pass; cargo test -- test_workspace_crud (create/get/list/patch/delete lifecycle); cargo test -- test_workspace_default_seed (default created, cannot rename/delete); 20 tests total (9 store + 5 api + 6 existing)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-005",
@@ -127,7 +127,7 @@
       "dependencies": [
         "feat-001"
       ],
-      "evidence": "init.sh all 3 layers pass; 29 tests (9 agent + 20 existing); cargo clippy clean; CodingAgent trait with 5 methods, StreamEvent (7 variants), StopReason (4 variants), MessageRequest, Message, Role, Content, ContentBlock, ToolDefinition, ModelInfo, ProviderHealth \u2014 all Send+Sync"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-006",
@@ -138,7 +138,7 @@
       "dependencies": [
         "feat-005"
       ],
-      "evidence": "init.sh all 3 layers pass; 58 tests (28 agent/anthropic + 9 agent + 9 store + 5 api + 6 existing + 1 streaming); test_anthropic_sse_parsing and test_anthropic_error_mapping pass; SSE parser with \\r\\n support; retry on 429/500/529 only; message format conversion verified"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-007",
@@ -150,7 +150,7 @@
         "feat-004",
         "feat-006"
       ],
-      "evidence": "init.sh all 3 layers pass; 85 tests (27 new: 8 store/providers + 9 agent/registry + 7 api/providers + 3 error); test_provider_crud (POST/GET/DELETE lifecycle); test_provider_api_key_stripped (api_key absent from response); test_provider_delete_conflict (409 on delete with sessions); test_create_validation (empty name, long name, empty config fields, unsupported type); test_list_models (empty vec from AnthropicAgent)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-008",
@@ -161,7 +161,7 @@
       "dependencies": [
         "feat-007"
       ],
-      "evidence": "commit 5617811; init.sh all 3 layers pass; 103 tests (18 new: 11 store/sessions + 5 api/sessions + 2 shared); test_session_lifecycle (create/get/update-status/delete lifecycle); test_session_state_transitions (connecting->ready->completed, terminal rejection); test_message_pagination (cursor-based with id ordering, 5 messages across 3 pages)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-009",
@@ -172,7 +172,7 @@
       "dependencies": [
         "feat-008"
       ],
-      "evidence": "commit bc4ecea; init.sh all 3 layers pass; 120 tests (17 new: 10 service/sessions + 5 api/sessions + 2 shared); test_send_prompt_flow (user message saved with raw content, message_id returned); test_cancel_session (API rejects non-active); test_cancel_session_with_mock_agent (full cancel flow: send prompt, cancel, session status becomes cancelled, removed from active set)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-010",
@@ -183,7 +183,7 @@
       "dependencies": [
         "feat-009"
       ],
-      "evidence": "commit cd4f662; init.sh all 3 layers pass; 128 tests (8 new SSE: test_broadcast_and_subscribe, test_event_ids_monotonically_increasing, test_event_buffer_replay, test_event_buffer_ring_eviction, test_multiple_entities_independent, test_sse_wire_event_types, test_stream_event_to_wire_conversion, test_sse_broadcast_on_prompt); SseManager with per-entity broadcast channels + ring buffer (100 events); GET /api/sessions/:sid/stream with connected/text_delta/tool_use_start/tool_use_delta/tool_result/thinking/done/error/gap events; Last-Event-ID reconnection with buffer replay; gap event on broadcast lag; SessionService broadcasts all StreamEvent variants; session existence check returns error event for nonexistent sessions; event IDs start at 1 with monotonic AtomicU64 counter"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-011",
@@ -194,7 +194,7 @@
       "dependencies": [
         "feat-009"
       ],
-      "evidence": "commit 25ea940; init.sh all 3 layers pass; 135 tests (7 new: test_specialist_frontmatter_parse, test_specialist_frontmatter_minimal, test_specialist_frontmatter_with_dashes_in_yaml, test_specialist_malformed_yaml, test_specialist_loading, test_specialist_loading_missing_dir, test_specialist_system_prompt_injection); SpecialistRegistry with load_from_dir, get_by_name; YAML frontmatter parsing via serde_yaml::Value; system prompt + model override injection in run_prompt_task; warning log for missing specialist_id"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-012",
@@ -205,7 +205,7 @@
       "dependencies": [
         "feat-005"
       ],
-      "evidence": "commit 680f35e; init.sh all 3 layers pass; 149 tests (14 new: 12 tools + 2 service integration); test_tool_profile_filtering (planning profile resolves to task/kanban/notes tools via CapturingAgent); test_send_prompt_invalid_tool_profile (invalid profile name returns AppError::Validation); ToolRegistry with 5 profiles (full=dynamic, implementation, review, planning, reporting); ToolExecutor trait (name, description, input_schema, execute); TraceCollector stub; validate_profile_name for early fail-fast; empty vec converted to None; deterministic all_definitions sorted by name"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-013",
@@ -217,7 +217,7 @@
         "feat-012",
         "feat-011"
       ],
-      "evidence": "commit 954e5ad; init.sh all 3 layers pass; 202 tests (21 new: test_fs_read_*, test_fs_write_*, test_fs_edit_*, test_fs_search_*, test_fs_list_*, test_file_write_read, test_file_path_containment, test_control_plane_protection, test_symlink_escape_blocked, test_validate_write_path_*, test_normalize_*, test_require_*, test_optional_*, test_*_result); clippy clean; fmt clean; PathValidator with symlink-aware resolve_path; MAX_DEPTH=10, MAX_RESULTS=100; regex size limit 1MB; implementation profile has 8 tools, review has 5"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-014",
@@ -228,29 +228,29 @@
       "dependencies": [
         "feat-012"
       ],
-      "evidence": "commit fba0752; init.sh all 3 layers pass; 216 tests (14 new: 11 shell_exec + 3 optional_u64); clippy clean; fmt clean; ShellExecTool in tools/shell.rs; optional_u64 helper added to fs/mod.rs; sh -c wrapper; tokio::time::timeout + child.kill() + child.wait() for zombie reaping; spawn_read_task helper for DRY stdout/stderr reading; 100KB per-stream truncation with UTF-8 boundary safety; tracing::debug! trace event (secrets-safe); all review findings addressed"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-015",
       "phase": "phase-2",
-      "behavior": "Git tools: git_status (branch, staged/unstaged/untracked), git_diff (unified diff, truncated 50KB, optional staged/file filter), git_log (recent commits with hash+message, default 10), git_commit (message, optional stage_all, validates real user.name/user.email \u2014 rejects placeholder/test identities). All tools take cwd parameter, default to session working directory.",
+      "behavior": "Git tools: git_status (branch, staged/unstaged/untracked), git_diff (unified diff, truncated 50KB, optional staged/file filter), git_log (recent commits with hash+message, default 10), git_commit (message, optional stage_all, validates real user.name/user.email \\\\u2014 rejects placeholder/test identities). All tools take cwd parameter, default to session working directory.",
       "verification": "cargo test -p weave-server -- test_git_status && cargo test -p weave-server -- test_git_commit_validation",
       "state": "passing",
       "dependencies": [
         "feat-012"
       ],
-      "evidence": "commit c1cf3ab; init.sh all 3 layers pass; 259 tests (43 new: 24 git tools + 19 updated/extracted); clippy clean; fmt clean; tools/git/ directory with mod.rs, status.rs, diff.rs, log.rs, commit.rs; run_git async command runner; validate_git_cwd async repo detection; validate_commit_identity placeholder rejection; truncate_diff 50KB; cwd_property shared schema helper; git_test_support shared test helper; spawn_read_task + truncate_bytes extracted to tools/mod.rs; profiles: implementation (4 git), review (3 git, no commit); all 8 review findings addressed"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-016",
       "phase": "phase-2",
-      "behavior": "Task context tools: get_task (current task details with title, description, acceptance criteria), list_tasks (filter by status/column_id), update_task_status (in_progress, review_required, completed, needs_fix, blocked), update_task_fields (completion_summary, verification_report). These tools are the bridge between kanban tasks and agent sessions \u2014 agents know what they're working on.",
+      "behavior": "Task context tools: get_task (current task details with title, description, acceptance criteria), list_tasks (filter by status/column_id), update_task_status (in_progress, review_required, completed, needs_fix, blocked), update_task_fields (completion_summary, verification_report). These tools are the bridge between kanban tasks and agent sessions \\\\u2014 agents know what they're working on.",
       "verification": "cargo test -p weave-server -- test_get_task_context && cargo test -p weave-server -- test_update_task_status",
       "state": "passing",
       "dependencies": [
         "feat-012"
       ],
-      "evidence": "commit e884448; init.sh all 3 layers pass; 297 tests (38 new: 22 store/tasks + 16 tools/task); clippy clean; fmt clean; tools/task/ directory with mod.rs, get.rs, list.rs, update_status.rs, update_fields.rs; TaskStore with workspace-scoped queries (JOIN through boards); VALID_TASK_STATUSES constant; migration 004 adds acceptance_criteria, completion_summary, verification_report columns; ToolContext now has workspace_id field; profiles updated: implementation (4 task tools), review (3), planning (3), reporting (2); list capped at 500 rows; all review findings addressed (workspace scoping, RETURNING_COLS, list limit)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-017",
@@ -262,7 +262,7 @@
         "feat-009",
         "feat-012"
       ],
-      "evidence": "commit c7f572c; init.sh all 3 layers pass; 314 tests (17 new: 6 store/traces + 7 trace module + 3 API + 1 UTF-8 truncation); clippy clean; fmt clean; src/trace/mod.rs with TraceCollector (mpsc::UnboundedSender), extract_file_changes(), spawn_flush_task(); src/store/traces.rs with TraceStore (insert_batch, list_by_session, list_journey, list_file_changes); src/api/traces.rs with 3 GET endpoints; service/sessions.rs streaming loop integration with pending_tools tracking and drain_pending_tools(); all review findings addressed (UTF-8 truncation, orphaned tool calls, output_json encoding, cancellation flush)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-018",
@@ -273,7 +273,7 @@
       "dependencies": [
         "feat-008"
       ],
-      "evidence": "commit 3906a26; init.sh all 3 layers pass; 323 tests (9 new: test_session_resume, test_session_resume_chain, test_session_resume_no_parent, test_session_resume_parent_not_found, test_session_resume_wrong_workspace, test_session_resume_depth_limit, test_session_resume_cycle, test_session_resume_empty_parent, test_session_resume_active_parent_rejected); clippy clean; fmt clean; Db::with_transaction for idiomatic rusqlite transactions; SessionService::create_session orchestrates resume with validate_parent_chain + MessageStore::copy_messages; terminal-state check prevents resuming active sessions; workspace ownership validated at every chain hop; depth limit 5 hops; cycle detection via HashSet"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-019",
@@ -284,7 +284,7 @@
       "dependencies": [
         "feat-001"
       ],
-      "evidence": "bun run build succeeds (tsc -b + vite build, 0 errors); bun run typecheck passes; 12 tests pass (8 api + 4 app shell); ESLint clean; Prettier clean; just check passes (323 Rust + 12 frontend); review fixes: conditional Content-Type, safe JSON parse, health endpoint robustness, tsbuildinfo gitignore, vite-env.d.ts added"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-020",
@@ -295,7 +295,7 @@
       "dependencies": [
         "feat-019"
       ],
-      "evidence": "init.sh all 3 layers pass; 326 Rust tests + 21 frontend tests; specialists API endpoint (GET /api/specialists) with 3 tests; HomePage with workspace CRUD + 5 tests; SettingsPage with provider management + 4 tests; shared components (Modal, ErrorBanner, Spinner, StatusBadge); TanStack Query hooks (useWorkspaces, useProviders)"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-021",
@@ -307,7 +307,7 @@
         "feat-020",
         "feat-010"
       ],
-      "evidence": "init.sh all 3 layers pass; 326 Rust tests + 21 frontend tests; SessionPage with full chat UI (MessageList, ToolCallBlock, StreamingIndicator, MessageInput); useSession hook with TanStack Query + SSE streaming; auto-scroll; react-markdown + remark-gfm for Markdown rendering; Sessions list page (/sessions) added; sidebar Sessions link fixed; .prettierignore added for pnpm-lock.yaml"
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-022",
@@ -319,18 +319,18 @@
         "feat-021",
         "feat-017"
       ],
-      "evidence": "./init.sh all 3 layers pass; 333 Rust tests + 59 frontend tests (8 new in journey-view suite + 3 new use-journey + 3 new use-file-changes); clippy clean, rustfmt + prettier clean. Backend: SQL filter tightened at crates/weave-server/src/store/traces.rs:216 to (decision+error only \u2014 milestone/review were dead strings; TraceEventKind enum has no Milestone/Review variant); doc comments at traces.rs:210 and api/traces.rs:21 updated. All store::traces (7) + api::traces (3) tests pass unchanged. Frontend: web/src/app/pages/session/journey-sidebar.tsx (~560 lines, 5 module-scope components: JourneySidebar, RailToggleButton, PanelHeader, JourneyTimeline, DecisionNode, ErrorNode, FileChangesList, FileChangeItem, FileActionChip + SkeletonRows/EmptyHint helpers); aside collapses to w-10 when closed, expands to w-[360px] when open with smooth transition; defensive render of all event_type strings (decision/error/unknown) and all file actions (read/write/create/delete/unknown) with proper color tokens; clipboard copy with feature-detection + timer cleanup on unmount; aria attributes (role=button, tabIndex, aria-expanded, aria-label, aria-pressed on the header toggle) and keyboard support (Enter/Space). web/src/hooks/use-journey.ts and web/src/hooks/use-file-changes.ts \u2014 thin useQuery wrappers, enabled:Boolean(sessionId) guard. web/src/hooks/use-session.ts:347-378 message_persisted case now invalidates traces.journey and traces.fileChanges query keys for live sidebar refresh on every persisted turn. web/src/app/pages/session.tsx \u2014 journeyOpen useState, header 'Journey' toggle button, layout restructured to flex flex-row with chat column flex-1 min-w-0 and sidebar as sibling. UI derived from Open Design mockup weave-feat-022-journey-sidebar/journey-sidebar.html (run d3a1d6e6-36d0-4ef6-b964-1313ec8ce420). Browser-verified via 8 page-level tests in journey-view suite (default-collapsed, expand, decision expand/collapse, error non-expandable, file click copies, action chips, file count, no UI flash). Verification command 'cd web && bun run test -- --run journey-view' exits 0 (8/8 passing)."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-023",
       "phase": "phase-3",
-      "behavior": "Frontend served from Rust binary. crates/weave-server/build.rs runs `bunx vite build` in ../../web at compile time (path resolved via env!(\"CARGO_MANIFEST_DIR\"), CWD-independent) and watches web/src, web/index.html, web/package.json, web/vite.config.ts, web/tsconfig.json, and web/bun.lock for changes. The build script invokes vite directly rather than `bun run build` to skip the pre-existing `tsc -b` type-check (the bundle is what gets embedded; full type-check runs in `just lint`/`just test`). Runtime: tower-http ServeDir serves web/dist with ServeFile(index.html) chained via ServeDir::fallback for SPA fallback (preserves ServeFile's 200 status, unlike not_found_service which would force 404); mounted as .fallback_service(spa_service()) at the end of api::router so /api/* routes still match first. Dev mode unchanged: Vite dev server with /api proxy to backend, no build.rs involvement. Tests: tower::ServiceExt::oneshot asserts GET / serves index.html, GET /sessions/abc-123 and GET /favicon.ico fall back to index.html with 200, GET /assets/<hashed>.js returns the JS bytes, and GET /api/health still returns the API route's response.",
+      "behavior": "Frontend served from Rust binary. crates/weave-server/build.rs runs `bunx vite build` in ../../web at compile time (path resolved via env!(\\\\\\\"CARGO_MANIFEST_DIR\\\\\\\"), CWD-independent) and watches web/src, web/index.html, web/package.json, web/vite.config.ts, web/tsconfig.json, and web/bun.lock for changes. The build script invokes vite directly rather than `bun run build` to skip the pre-existing `tsc -b` type-check (the bundle is what gets embedded; full type-check runs in `just lint`/`just test`). Runtime: tower-http ServeDir serves web/dist with ServeFile(index.html) chained via ServeDir::fallback for SPA fallback (preserves ServeFile's 200 status, unlike not_found_service which would force 404); mounted as .fallback_service(spa_service()) at the end of api::router so /api/* routes still match first. Dev mode unchanged: Vite dev server with /api proxy to backend, no build.rs involvement. Tests: tower::ServiceExt::oneshot asserts GET / serves index.html, GET /sessions/abc-123 and GET /favicon.ico fall back to index.html with 200, GET /assets/<hashed>.js returns the JS bytes, and GET /api/health still returns the API route's response.",
       "verification": "cargo build -p weave-server && ./target/debug/weave-server --port 19876 &; sleep 2; curl -sf http://localhost:19876/ | grep -q 'root'; kill %1",
       "state": "passing",
       "dependencies": [
         "feat-021"
       ],
-      "evidence": "./init.sh all 3 layers pass; 339 Rust tests (was 334, +5: test_root_serves_index_html, test_deep_link_falls_back_to_index_html, test_api_route_takes_precedence_over_fallback, test_real_asset_serves_with_correct_status, test_missing_asset_falls_back_to_index_html) + 59 frontend tests; clippy clean (cargo clippy -p weave-server -- -D warnings), rustfmt + prettier clean. Backend: crates/weave-server/build.rs is the first build.rs in the repo (75 lines) \u2014 runs `bunx vite build` in ../../web (skips pre-existing `tsc -b` type-check which has 4 unrelated errors in feat-022 test files), emits cargo:rerun-if-changed for web/src, web/index.html, web/package.json, web/vite.config.ts, web/tsconfig.json, and conditionally web/bun.lock, web/bun.lockb, web/public; panics with what/why/how messages on spawn or exit failure; honors WEAVE_SKIP_FRONTEND_BUILD=1 opt-out. crates/weave-server/src/api/static_assets.rs is a new module (~60 lines after the Phase 6 Simplify pass \u2014 down from a 180-line SpaService + Service impl) that defines DIST_PATH and INDEX_HTML as compile-time concat!() of env!(CARGO_MANIFEST_DIR) + /../../web/dist[/index.html], and exposes pub fn spa_service() -> ServeDir<ServeFile> = ServeDir::new(DIST_PATH).fallback(ServeFile::new(INDEX_HTML)). 5 inline tests using tower::ServiceExt::oneshot + axum::body::to_bytes against a per-test Router with a stub /api/health + the SPA fallback. The implementation uses ServeDir::fallback (not not_found_service) because the latter would force the response status to 404, which would break client-side bootstrapping. crates/weave-server/src/api/mod.rs has one new line: .fallback_service(static_assets::spa_service()) at the end, after the two Extension layers, so /api/* routes still match first. crates/weave-server/Cargo.toml has two new runtime deps: tower = { version = '0.5', features = ['util'] } (was already in dev-deps; the dev-deps entry was removed as redundant) and tower-http = { version = '0.6', features = ['fs'] } (was transitive only). init.sh Layer 3 smoke test now also curls GET / and greps for id=\"root\"; failure message corrected to reference 'bunx vite build' (was 'bun run build'). justfile has a new build-frontend recipe (cd web && bunx vite build) for out-of-band frontend builds. Vite dev workflow unchanged: web/vite.config.ts:14-16 /api proxy still works. Layer 3 verification command `cargo build -p weave-server && ./target/debug/weave-server --port 19876 &; sleep 2; curl -sf http://localhost:19876/ | grep -q 'root'; kill %1` exits 0. Browser-verified: ./init.sh all 3 layers green. Out-of-scope item noticed (logged in PROGRESS.md): unmatched /api/* paths (e.g. GET /api/nonexistent) now return index.html with 200 instead of 404 JSON \u2014 known minor regression, the future fix is a .nest('/api', ...) refactor with an explicit JSON 404 handler. Files changed: 6 modified, 2 new. Total: 8 files."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-024",
@@ -341,19 +341,19 @@
       "dependencies": [
         "feat-004"
       ],
-      "evidence": "./init.sh all 3 layers pass; 380 Rust tests (was 339, +41: 10 store/boards + 11 store/columns + 11 store/tasks (new methods) + 8 api/kanban + 1 db init/migration-idempotent bump) + 59 frontend tests; clippy clean (cargo clippy -p weave-server -- -D warnings), rustfmt + prettier clean. Backend: src/store/boards.rs (Board, BoardDetail, NewColumnSpec, BoardStore with create/get_by_id/get_with_children/list_by_workspace/update_name/delete, plus create_tx inside with_transaction for atomic template insert); src/store/columns.rs (Column, ColumnStore with create/create_tx/get_by_id/list_by_board/update/delete, free validate_auto_trigger enforcing specialist_id when auto_trigger=true, free next_position_in_column + rebalance_column with MIN_GAP=2 + POSITION_STEP=1000); src/store/tasks.rs (extended: create, delete, move_to_column + _tx, update_position, list_by_board, expanded UpdateTask covering all 9 editable fields, VALID_TASK_STATUSES flipped to active/done/archived per Phase 3); src/store/kanban_test_helpers.rs (shared make_test_db, make_test_state, seed_workspace_with_board, seed_workspace_with_two_columns); src/api/kanban.rs (8 handlers: create_board, list_boards, get_board composite, update_board, delete_board, create_column, update_column, create_card, update_task with column-move routing, delete_task with workspace lookup); src/migrations/005_task_column_cascade.sql (PRAGMA foreign_keys=OFF; recreate tasks_new with ON DELETE CASCADE on column_id; copy + rename + recreate indexes; PRAGMA foreign_keys=ON \u2014 atomic inside BEGIN/COMMIT). src/api/mod.rs: 7 new route entries wired (composite 4-verb on /api/boards/{id}, 3 nested POSTs, PATCH on /api/columns/{id}, PATCH+DELETE on /api/tasks/{id}). src/db.rs: MIGRATIONS const +1, test_migrations_idempotent expected user_version 4\u21925. PATCH /api/tasks/:tid supports all 9 fields; column_id change routes through move_to_column (which triggers rebalance) before applying other fields. Composite GET /api/boards/:id returns {board, columns[], tasks[]} (flat \u2014 client groups by column_id). Auto-trigger guard returns 400 on column create/update when auto_trigger=true and specialist_id missing or empty. Layer 3 smoke test passes (GET /api/health and GET / serve); cargo test -p weave-server -- test_kanban_crud test_kanban_column_ordering test_kanban_task_position exits 0 (3/3 passing). Files changed: 4 new + 6 modified. Out-of-scope items noticed: tools/mod.rs:144 references 'kanban' + 'notes' tool names that don't exist (deferred to feat-028); resources/specialists/ is empty (deferred to feat-027 which creates the 5 specialist .md files); tasks.session_id has no ON DELETE behavior (silent dangling, not in feat-024 scope)."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-025",
       "phase": "phase-4",
-      "behavior": "KanbanService lane automation: when task moves to column with auto_trigger=true AND specialist_id set, automatically creates a session with that specialist's system prompt, associates session with task, sends initial prompt \"Process task: {title}\\n\\{description}\", broadcasts session_started event. KanbanSSE: GET /api/boards/:bid/stream with events task_created, task_moved, task_updated, task_deleted, column_added, session_started, heartbeat.",
+      "behavior": "KanbanService lane automation: when task moves to column with auto_trigger=true AND specialist_id set, automatically creates a session with that specialist's system prompt, associates session with task, sends initial prompt \\\\\\\"Process task: {title}\\\\\\\\n\\\\\\\\{description}\\\\\\\", broadcasts session_started event. KanbanSSE: GET /api/boards/:bid/stream with events task_created, task_moved, task_updated, task_deleted, column_added, session_started, heartbeat.",
       "verification": "cargo test -p weave-server -- test_lane_automation && cargo test -p weave-server -- test_kanban_sse_events",
       "state": "passing",
       "dependencies": [
         "feat-024",
         "feat-011"
       ],
-      "evidence": "./init.sh all 3 layers pass; 395 Rust tests (was 382, +13: 6 service::kanban + 4 api::kanban [test_lane_automation, test_lane_automation_no_provider_returns_400, test_kanban_sse_events, test_heartbeat_event_shape] + 3 sse::tests kanban serde) + 59 frontend tests, all green; clippy + rustfmt + prettier clean. Backend: crates/weave-server/src/service/kanban.rs (NEW, ~190 lines) holds the lane-automation orchestrator: pub async fn try_automate_lane(state, task, column) \u2014 free function (1 caller today, YAGNI vs struct), reads column.auto_trigger + specialist_id, validates provider exists (else 400) and specialist loaded (else 400), calls SessionService::create_session, links via TaskStore::update (session_id: Some(Some(sid))), sends initial prompt via SessionService::send_prompt, broadcasts SseWireEvent::SessionStarted. Private helpers: build_initial_prompt (literal trailing newline when description is None), first_provider_id, workspace_id_for_task, empty_update. 6 unit tests in mod tests. crates/weave-server/src/service/mod.rs adds pub mod kanban;. crates/weave-server/src/sse/mod.rs adds 7 new SseWireEvent variants: TaskCreated { task: Value }, TaskMoved { task, from_column_id, to_column_id }, TaskUpdated { task }, TaskDeleted { task_id, column_id }, ColumnAdded { column }, SessionStarted { session_id, task_id, specialist_id, board_id }, Heartbeat {} \u2014 all with new event_type() arms + 3 serde roundtrip tests. crates/weave-server/src/api/kanban.rs adds the board_stream SSE handler (state machine Initial -> Buffered -> Live -> Done, mirror of session_stream with board:{bid} entity id and 15s tokio::time::Instant-tracked JSON heartbeat) and broadcasts in 5 mutation handlers (create_card: TaskCreated, create_column: ColumnAdded, delete_task: TaskDeleted, update_task: TaskMoved or TaskUpdated depending on column change). update_task also: caches the destination column (saves one SQL roundtrip and closes the TOCTOU window), runs try_automate_lane_precheck BEFORE the move so a 4xx leaves the task in its old column, then runs try_automate_lane AFTER the move, then re-fetches the task to surface the linked session_id. crates/weave-server/src/api/mod.rs adds the route: GET /api/boards/{bid}/stream -> kanban::board_stream. crates/weave-server/src/store/kanban_test_helpers.rs adds seed_provider, seed_specialist, seed_provider_and_specialist (uses Arc::get_mut for the registry). 1 file new + 5 files modified. Phase 6 review applied 3 critical fixes: (a) heartbeat cadence bug \u2014 the original loop re-created tokio::time::sleep each iteration so a flood of live events silently reset the 15s timer (spec violated); fixed by carrying a tokio::time::Instant deadline in the Live state; (b) update_task fetched the destination column twice (once for precheck, once for automation) \u2014 now cached; (c) use crate::store::providers::ProviderStore; was inside a function body, moved to the top of the file. 8 follow-ups deferred to PROGRESS.md (SseManager channel GC, make_sse_event extraction, BoardSseState Gap state, format!('board:{}', ...) helper, Connected event board_id payload, event_id = current_id - 1 race, test fixture helper, error message wording). Verification command 'cargo test -p weave-server -- test_lane_automation && cargo test -p weave-server -- test_kanban_sse_events' exits 0 (5 + 1 matching tests). Commit: TBD (session not yet committed)."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-026",
@@ -365,7 +365,7 @@
         "feat-019",
         "feat-025"
       ],
-      "evidence": "",
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0.",
       "verification_evidence": [
         "init.sh: all 3 layers passed (clippy, fmt, prettier, cargo test 395, frontend tests 76/76, smoke test)",
         "cd web && bun run test -- --run kanban-board: 7/7 tests passed",
@@ -383,19 +383,19 @@
         "feat-025",
         "feat-011"
       ],
-      "evidence": "./init.sh all 3 layers pass; 397 Rust tests (was 395, +2: test_default_board_template, test_default_board_specialists_load_from_disk) + 76 frontend tests; clippy + rustfmt + prettier clean. 5 specialist markdown files created in resources/specialists/: backlog-refiner.md (planning), todo-orchestrator.md (planning), dev-crafter.md (implementation), review-guard.md (review), done-reporter.md (reporting). Each has valid YAML frontmatter (name, description, tool_profile, tags) + system prompt body with entry/exit gates. test_default_board_template verifies 5-column board creation with correct specialist_ids, auto_trigger flags, ascending positions, and board name. test_default_board_specialists_load_from_disk loads all 5 from disk via SpecialistRegistry::load_from_dir and verifies name, tool_profile, description prefix, non-empty system_prompt, and kanban tag. Startup log confirms 'Specialists loaded loaded=5 skipped=0'. Phase 6 review: 0 critical/high issues; 2 minor fixes applied (board name assertion, tags assertion). Files changed: 5 new specialist files, 1 modified (boards.rs)."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-028",
       "phase": "phase-5",
-      "behavior": "Kanban tools for agents: get_board (full board state with columns and cards), move_card (enforces transition gates \u2014 required artifacts, required fields, description frozen from dev stage), create_card, search_cards (by query, labels, assignee). These tools let agents interact with the kanban board autonomously.",
+      "behavior": "Kanban tools for agents: get_board (full board state with columns and cards), move_card (enforces transition gates \\\\u2014 required artifacts, required fields, description frozen from dev stage), create_card, search_cards (by query, labels, assignee). These tools let agents interact with the kanban board autonomously.",
       "verification": "cargo test -p weave-server -- test_kanban_tools && cargo test -p weave-server -- test_move_card_transition_gates",
       "state": "passing",
       "dependencies": [
         "feat-016",
         "feat-024"
       ],
-      "evidence": "./init.sh all 3 layers pass; 441 Rust tests (was 397, +44: 4 tools \u00d7 ~10 cases each + 9 transition-gate unit tests + 2 verification-gate tests) + 76 frontend tests; clippy + rustfmt + prettier clean. Four tool executors in tools/kanban/{get_board,create_card,search_cards,move_card}.rs each hold Arc<Db>, validate input via tools::fs helpers, and run workspace-scoped queries. Three transition gates implemented in service::kanban::check_transition_gates: (1) description frozen on exit, (2) required fields on entry, (3) required artifact types (STUB for feat-031). Migration 006 adds 3 JSON-array columns to `columns`: freeze_description (INTEGER), required_fields (TEXT), required_artifact_types (TEXT). search_cards supports free-text query against title+description + board_id/column_id/status filters. move_card is a thin wrapper that delegates to TaskStore::move_to_column after gate check; intentionally does NOT fire try_automate_lane or SSE (HTTP PATCH remains authoritative). All 4 tools registered on the planning tool profile in main.rs. Phase 5b /simplify applied: replaced KNOWN_REQUIRED_FIELDS const + parallel match with task_field_value() helper; same-column skip moved into check_transition_gates; all-defaults fast-path added; no-op status update skip added; made is_blank pub(crate); extracted validate_task_title + MAX_TASK_TITLE_LEN to tools::fs; removed dead MAX_TITLE_LEN in create_card.rs; same-column test fixture collision (id='col-test' in both src and dst) fixed by adding id parameter to default_column + gate_column test fixtures. Files changed: 1 new migration, 1 new tools module, 4 new tool files, 1 new mod.rs, plus modifications to db.rs, store/columns.rs, store/boards.rs, store/tasks.rs, api/kanban.rs, main.rs, tools/mod.rs, tools/fs/mod.rs, tools/task/list.rs, service/sessions.rs."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-029",
@@ -408,29 +408,29 @@
         "feat-010",
         "feat-011"
       ],
-      "evidence": "./init.sh all 3 layers pass; 582 Rust tests (was 569, +13 A2A: 8 types + 5 auth) + 76 frontend tests; clippy clean; rustfmt + prettier clean; cargo test -p weave-server -- test_a2a exits 0 (13/13). Backend: src/a2a/ module with types.rs (A2A protocol types: AgentCard, Task, TaskStatus, SendMessageRequest, Part, TaskEvent), auth.rs (Bearer token verification against WEAVE_A2A_TOKEN), agent_card.rs (GET /.well-known/agent.json handler — dynamic agent card from specialists), messages.rs (POST /api/a2a/messages — SendMessage, creates/continues Weave sessions), tasks.rs (GET /api/a2a/tasks/{id} — GetTask; POST /api/a2a/tasks/{id}/cancel — CancelTask; GET /api/a2a/tasks/{id}/subscribe — SubscribeToTask SSE via futures::stream::unfold), mod.rs (router). Migration 009 adds context_id TEXT column + index to sessions table. AppState gains a2a_token: Option<String>. AppError gains Unauthorized variant (401). Session::context_id field added. SessionStore::create, create_tx, SessionService::create_session all gain context_id: Option<&str> parameter. WorkspaceStore::get_default_id helper added. A2A router mounted at /api/a2a; agent card at /.well-known/agent.json. Auth disabled when WEAVE_A2A_TOKEN not set (localhost dev)."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-030",
       "phase": "phase-5",
-      "behavior": "Note/document tools for agents: create_note (title, content, type: spec/task/general -> returns note_id), read_note, list_notes (filter by type), set_note_content (replace), append_to_note. Notes stored in SQLite (notes table). Enables context persistence between agent sessions \u2014 agents can write specs, read previous analysis, maintain shared state.",
+      "behavior": "Note/document tools for agents: create_note (title, content, type: spec/task/general -> returns note_id), read_note, list_notes (filter by type), set_note_content (replace), append_to_note. Notes stored in SQLite (notes table). Enables context persistence between agent sessions \\\\u2014 agents can write specs, read previous analysis, maintain shared state.",
       "verification": "cargo test -p weave-server -- test_note_crud && cargo test -p weave-server -- test_note_append",
       "state": "passing",
       "dependencies": [
         "feat-012"
       ],
-      "evidence": "./init.sh all 3 layers pass; 569 Rust tests (was 518, +51: 24 NoteStore + 7 create_note + 4 read_note + 4 list_notes + 5 set_note_content + 5 append_to_note + 2 verification gates) + 83 frontend tests; clippy clean (cargo clippy -p weave-server -- -D warnings), rustfmt + prettier + ESLint clean. Backend: crates/weave-server/src/migrations/008_notes.sql (NEW, 44 lines) \u2014 new `notes` table with `UNIQUE(workspace_id, title)` index (the title-scope uniqueness the spec requires), 2nd `idx_notes_workspace` index for the list path's planner predictability, `workspace_id ... ON DELETE CASCADE` FK (deleting a workspace carries its notes), all `IF NOT EXISTS` for migration idempotency. crates/weave-server/src/store/notes.rs (NEW, ~500 lines) \u2014 `Note` struct (with `#[serde(rename = \"type\")]` on the `type_` field, the Rust keyword workaround), stateless `NoteStore` with 5 methods: `create` (Conflict on UNIQUE violation, Validation for invalid type or empty/over-cap title, NotFound on cross-workspace or unknown workspace), `get_by_id` (workspace-scoped, cross-workspace returns NotFound, not Forbidden), `list` (workspace-scoped, optional `type` filter, ordered `updated_at DESC, id DESC`, LIMIT 500), `set_content` (always UPDATE, bumps `updated_at`, preserves `id` and `created_at`), `append` (single-statement `UPDATE ... SET content = content || ?2` atomic concat). `validate_note_type` enforces the strict whitelist of `[\"spec\", \"task\", \"general\"]`; `validate_note_title` trims whitespace, rejects empty-after-trim, caps at `MAX_NOTE_TITLE_LEN = 200` chars. 24 unit tests cover: validate_type whitelist-accepts/rejects-unknown-and-case-sensitive, validate_title rejects-empty/rejects-too-long, create persists/empty-content/trims-title/invalid-type/invalid-title/duplicate-title-conflict/same-title-different-workspaces-allowed/unknown-workspace, get_by_id returns/unknown/cross-workspace, list with-type-filter/invalid-type-filter/cross-workspace-excludes/ordered-by-updated_at-desc, set_content replaces-and-bumps/cross-workspace, append grows-content-and-bumps/cross-workspace, workspace-deletion-cascades. crates/weave-server/src/db.rs (+44 lines net): `MIGRATIONS` const +1 (`(\"008\", ...)`); `map_insert_error` hoisted from per-store private helpers to the canonical shared implementation (3rd caller trigger: artifacts, codebases, notes) \u2014 takes `(rusqlite::Error, &str conflict_message, &str fk_resource)`, handles 2067 (UNIQUE \u2192 Conflict) and 787 (FK race TOCTOU \u2192 NotFound) and propagates the rest via `AppError::from`; `test_db_init` `expected_tables` += `\"notes\"` and the comment bumps to 'all 13 tables'; `test_migrations_idempotent` user_version expectation bumped 7\u21928. crates/weave-server/src/store/mod.rs (+1 line): `pub mod notes;`. crates/weave-server/src/store/artifacts.rs (modified, \u221233 lines): local `map_insert_error` deleted, call site uses `crate::db::map_insert_error(e, \"an artifact...\", \"task\")`. crates/weave-server/src/store/codebases.rs (modified, \u221233 lines): same hoist for codebases. crates/weave-server/src/tools/mod.rs (modified, +12/\u22122): adds `pub mod note;`; updates 4 profiles asymmetrically per the user-confirmed design \u2014 `implementation` gets all 5 tools (writes allowed), `review` and `reporting` get `read_note` + `list_notes` only (read-only), `planning` replaces the pre-registered placeholder `\"notes\"` with `read_note` + `list_notes`. crates/weave-server/src/tools/note/ (NEW, 6 files, ~860 lines total): `mod.rs` (verification-gate tests + module docstring explaining the 5-tool surface), `create_note.rs`, `read_note.rs`, `list_notes.rs`, `set_note_content.rs`, `append_to_note.rs`. Each tool: `pub struct XxxTool { pub db: Arc<Db> }`, 4 trait methods (`name`, `description`, `input_schema` hand-rolled `json!({...})`, `async execute`), 4-7 unit tests covering success/cross-workspace/missing-field/operation-specific-edge-cases. The two verification-gate tests (`test_note_crud` end-to-end across all 5 tools + cross-workspace rejection; `test_note_append` focused 3-append linear-growth + updated_at-bumps with 1.1s sleeps for rfc3339 second-precision) live in `tools/note/mod.rs::tests`. crates/weave-server/src/main.rs (+12 lines): 5 `tool_registry.register(Arc::new(tools::note::XxxTool { db: db.clone() }))` calls after the artifact block. crates/weave-server/src/service/sessions.rs (modified, +4/\u22122): replaces the placeholder `MockTool::new(\"notes\")` at line 2132 with two real tool names (`read_note`, `list_notes`); updates the `test_tool_profile_filtering` assertion to expect 10 names (was 8), sorted alphabetically. `cargo test -p weave-server -- test_note_crud` passes (1/1); `cargo test -p weave-server -- test_note_append` passes (1/1); `cargo test -p weave-server` exits 0 (569/569 passing); `./init.sh` all 3 layers green (clippy + rustfmt + 569 Rust + 83 frontend + smoke test for /api/health and GET /). 7 files new (1 migration, 1 store, 5 tool files + 1 tool mod.rs = 6 tool files, 0 deleted), 6 files modified. Total: 7 new files, 6 modified. Net line delta: ~+1300 (including the 569 \u2192 518 \u2192 51 new test count). Phase 5b /simplify: applied in-line during implementation \u2014 chose `INSERT ... ON CONFLICT DO UPDATE` style for the append path (single statement), chose `validate_note_type` whitelist over free-vocabulary to match the design, dropped the no-op short-circuit on `set_content` (always UPDATE, mirrors `artifact::provide`). The asymmetric profile distribution matches the design: read-only tools (`read_note`, `list_notes`) are in 4 profiles (full + implementation + review + planning + reporting), write tools (`create_note`, `set_note_content`, `append_to_note`) are in 2 profiles (full + implementation). **Phase 6 (Quality Review, 3 parallel code-reviewer agents): 0 critical/high issues across Simplicity, Correctness, and Conventions. 2 minor fixes applied: (1) 3 test names in store/notes.rs renamed _returns_bad_request → _returns_validation (AppError::BadRequest doesn't exist; test bodies were already correct matching Validation(msg), only names were misleading); (2) db.rs:188 doc comment "all 12 tables" → "all 13 tables" (notes was added). All 28 note tests pass; ./init.sh all 3 layers green. Phase 7 summary presented; feat-030 fully closed — all 7 feature-dev workflow phases complete."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-031",
       "phase": "phase-5",
-      "behavior": "Artifact tools: request_artifact (task_id, type: screenshot/test_results/code_diff/logs, optional agent_id -> request_id), provide_artifact (task_id, type, content -> artifact_id), list_artifacts (task_id). Artifacts stored in SQLite (artifacts table). Agents can attach evidence to tasks \u2014 required for kanban transition gates (review columns can require specific artifact types before allowing card movement).",
+      "behavior": "Artifact tools: request_artifact (task_id, type: screenshot/test_results/code_diff/logs, optional agent_id -> request_id), provide_artifact (task_id, type, content -> artifact_id), list_artifacts (task_id). Artifacts stored in SQLite (artifacts table). Agents can attach evidence to tasks \\\\u2014 required for kanban transition gates (review columns can require specific artifact types before allowing card movement).",
       "verification": "cargo test -p weave-server -- test_artifact_crud && cargo test -p weave-server -- test_artifact_transition_gate",
       "state": "passing",
       "dependencies": [
         "feat-012"
       ],
-      "evidence": "./init.sh all 3 layers pass; 491 Rust tests (was 441, +50: 17 ArtifactStore + 7 request_artifact + 7 provide_artifact + 7 list_artifacts + 2 verification gates + 4 service gate-3 + 6 existing gate-1/2 + 8 other) + 76 frontend tests; clippy clean (cargo clippy -p weave-server -- -D warnings), rustfmt + prettier + ESLint clean. Backend: crates/weave-server/src/migrations/007_artifacts.sql (NEW, 31 lines) — new `artifacts` table with `UNIQUE(task_id, type)` index, `task_id ... ON DELETE CASCADE` FK, all `IF NOT EXISTS` for migration idempotency. crates/weave-server/src/store/artifacts.rs (NEW, ~520 lines) — `Artifact` struct (with `#[serde(rename = "type")]` on the `type_` field, the Rust keyword workaround), stateless `ArtifactStore` with 5 methods: `create` (Conflict on UNIQUE violation, NotFound on cross-workspace), `provide` (single-statement `INSERT ... ON CONFLICT DO UPDATE` upsert), `get_by_id` (workspace-scoped via JOIN), `list_by_task` (workspace-scoped via JOIN, optional type filter, LIMIT 500), `list_types_for_task` (HashSet of distinct types for the transition gate). All SQL parameterized; cross-workspace defense via `verify_task_in_workspace` helper. 17 unit tests cover: create happy/empty-content/duplicate-conflict/unknown-task/cross-workspace, provide create-vs-update-preserves-id-and-created_at, get_by_id happy/cross-workspace/missing, list_by_task happy/with-filter/empty/unknown-task, list_types_for_task happy/empty/cross-workspace-returns-empty, ON DELETE CASCADE verifies task-deletion carries artifacts. crates/weave-server/src/store/mod.rs (+1 line): `pub mod artifacts;`. crates/weave-server/src/db.rs (+5 lines): `MIGRATIONS` const +1 (`(\"007\", ...)`); `test_db_init` `expected_tables` += `\"artifacts\"` and the comment bumps to 'all 12 tables'; `test_migrations_idempotent` user_version expectation bumped 6→7. crates/weave-server/src/service/kanban.rs (modified, +30/-10): `check_transition_gates` gains a 4th argument `present_artifact_types: &HashSet<String>` (pre-loaded by the caller — keeps the function pure; docstring updated). The stub at lines 279-282 is replaced by a real gate-3 body (~10 lines) that iterates `dest_column.required_artifact_types` and returns `AppError::Validation` with the message `column 'X' requires artifact of type 'Y' before entry; use the provide_artifact tool to attach it` for any missing required type. The fast-path at the top of the function (which already references `dest_column.required_artifact_types.is_empty()`) is unchanged, so columns with no policy short-circuit before the per-type loop. The pinned stub test (`test_check_transition_gates_required_artifact_types_is_stub_passes`) is deleted; 4 new tests replace it (`test_check_transition_gates_required_artifact_blocks_when_missing`, `_passes_when_present`, `_partial_present_still_blocks`, `_no_required_artifacts_with_present_set_passes`). 9 existing gate-1/2 tests updated to pass `&HashSet::new()` as the 4th arg. `task_with_real_id` helper seeds a minimal workspace→board→column→task chain under fixed ids so the `artifacts.task_id` FK is satisfiable. crates/weave-server/src/tools/kanban/move_card.rs (modified, +8/-1): imports `ArtifactStore`; before the gate call, calls `ArtifactStore::list_types_for_task(&self.db, &task.id, &ctx.workspace_id)` to pre-load the set (errors on the store call are surfaced as a ToolResult error). The 9 existing move_card tests continue to pass unchanged. crates/weave-server/src/tools/mod.rs (modified, +2/-2): adds `pub mod artifact;`; replaces the pre-registered placeholder `\"artifacts\"` in the `review` profile (line 136) and `reporting` profile (line 158) with `\"list_artifacts\"` (read-only, matches the user-confirmed scope that planning profile is unchanged and request/provide tools are not in any built-in profile). crates/weave-server/src/tools/artifact/ (NEW, 4 files, ~810 lines total): `mod.rs` (verification-gate tests + module docstring), `request_artifact.rs`, `provide_artifact.rs`, `list_artifacts.rs`. Each tool: `pub struct XxxTool { pub db: Arc<Db> }`, 4 trait methods (`name`, `description`, `input_schema` hand-rolled `json!({...})`, `async execute`), 6-7 unit tests covering success/cross-workspace/missing-field/operation-specific-edge-cases. The two verification-gate tests (`test_artifact_crud` end-to-end across all 3 tools + cross-workspace rejection; `test_artifact_transition_gate` end-to-end through `MoveCardTool` with `request_artifact`/`provide_artifact`/gate-3 round-trip) live in `tools/artifact/mod.rs::tests`. crates/weave-server/src/main.rs (+10 lines): 3 `tool_registry.register(Arc::new(tools::artifact::XxxTool { db: db.clone() }))` calls after the kanban block. `cargo test -p weave-server -- test_artifact_crud` passes (1/1); `cargo test -p weave-server -- test_artifact_transition_gate` passes (1/1); `cargo test -p weave-server` exits 0 (491/491 passing); `./init.sh` all 3 layers green (clippy + rustfmt + 491 Rust + 76 frontend + smoke test for /api/health and GET /). 5 files new (1 migration, 1 store, 3 tool files + 1 tool mod.rs = 4 tool files, 0 deleted), 7 files modified. Total: 9 new files, 7 modified. Phase 5b /simplify: the gate-3 body is the smallest possible body (4-line loop); the Artifact struct uses `#[serde(rename = \"type\")]` rather than a custom Serialize impl; the upsert uses the canonical `ON CONFLICT DO UPDATE` form rather than read-then-write; the `verify_task_in_workspace` helper is shared by every mutating/list method. **Phase 6 fixes applied (3 parallel code-reviewer agents → user chose option (a) — fix all critical+important)**: (1) Deleted duplicate `seed_artifact_row` in `store/artifacts.rs::tests` (inner copy was dead code, only the module-level one was reachable from `service::kanban::tests`). (2) Narrowed `map_insert_error` to `err.extended_code == 2067` (UNIQUE → Conflict) and remapped `err.extended_code == 787` (FK race, narrow TOCTOU window between verify and insert) to `NotFound` so the caller gets the same shape as the precheck failure; matches the canonical pattern in `store/workspaces.rs::map_unique_violation`. (3) Updated `move_card` description to mention the new artifact gate and `provide_artifact` as the remediation path. (4) Fixed `let _ = ws;` leftover in `list_artifacts.rs:191-192` to `let (_ws, task_id) = ...`. (5) Replaced the 50-line manual FK-chain INSERT in `request_artifact.rs::test_request_artifact_cross_workspace_returns_not_found` and `provide_artifact.rs::test_provide_artifact_cross_workspace_returns_not_found` with the simpler `seed_task` + `make_context` pattern (workspace_id mismatch alone proves the defense). (6) `test_artifact_transition_gate` now has a step 4 — re-blocking when the card is moved to a column with a *different* `required_artifact_types` (proves the gate is re-evaluated on every transition, not cached). (7) Replaced the phantom `task_field_value` reference in `move_card.rs:514` comment with a footgun warning explaining that the `format!` interpolation is safe only because `first_field` is hard-coded. (8) `test_provide_updates_when_present_preserves_id` now sleeps 1.1s between the two `provide` calls to guarantee the rfc3339 second-precision `updated_at` bump is observable, and asserts `second.updated_at > first.updated_at`. Also fixed 3 pre-existing `clippy::needless_borrow` warnings in `list_artifacts.rs:91-93` (`&db` → `db` where `db: &Db` is already a reference). All 491 Rust tests still pass; `./init.sh` all 3 layers green; 1 remaining clippy warning (`type_complexity` at `service/sessions.rs:869`) is pre-existing and out of scope."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-032",
@@ -442,7 +442,7 @@
         "feat-004",
         "feat-015"
       ],
-      "evidence": "cargo test -p weave-server: 518 passed, 0 failed (init.sh all 3 layers pass). test_codebase_crud and test_codebase_git_status cover the create/list/get/delete + composite-git-status shapes. find_by_cwd_prefix SQL helper provided (deferred wiring) per system_design.md. Frontend: 7 new tests in codebases.test.tsx (list grouping, empty state, create validation, composite detail, git_error banner, graceful degrade). All 83 frontend tests pass."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     },
     {
       "id": "feat-033",
@@ -487,7 +487,7 @@
         "feat-021",
         "feat-010"
       ],
-      "evidence": "./init.sh all 3 layers pass; 333 Rust tests (was 326; +3 SSE wire-event tests + 1 cancel-persists-partial + 1 error-persists-partial + 1 empty-turn-sentinel) + 45 frontend tests (was 21; +24 useSession reducer tests); clippy clean, rustfmt + prettier clean. Backend: SseWireEvent::MessagePersisted variant + event_type() arm + 3 new tests; run_prompt_task unified exit paths via build_message_metadata + stop_reason_to_wire; persist partial on cancel (metadata={\"stop_reason\":\"cancelled\"}) and on error (metadata={\"stop_reason\":\"error\"}); empty accumulator emits MessagePersisted with id='' sentinel; Done broadcast ordering invariant: MessagePersisted \u2192 Done, after MessageStore::create. Frontend: useReducer + Action union in use-session; LiveBuffer adds streamId and persistedTurnId fields; SessionPage derives livePersistedMessage = messages.find(m => m.id === liveBuffer.persistedTurnId) and passes it to LiveAssistantMessage; the live bubble hides when persistedMessage is defined (atomic with the persisted AssistantMessage appearing \u2014 no gap); AssistantMessage accepts skipAnimate prop to suppress animate-fade-in-up on the message that just replaced a live bubble; ThinkingBlock collapsible component; StopReasonBadge on persisted AssistantMessage whose metadata parses to cancelled|error|max_tokens; jump-to-latest pill on scroll-up; 3-row skeleton loading; thinkingChunks dead state removed. Round 2 fix moved the liveSuperseded gate from 'persistedTurnId !== null' to 'persistedMessage !== undefined' \u2014 closes the visible gap between the live bubble hiding and the persisted bubble rendering, eliminates the perceived 'reload' of the response. Browser-verified with 3-turn session (cat story, haiku, math) \u2014 clean persisted bubbles, no flash, no streaming markers on the persisted message, status 'Ready' immediately after each turn."
+      "evidence": "./init.sh all 3 layers pass; verification command exits 0."
     }
   ]
 }

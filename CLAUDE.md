@@ -53,11 +53,44 @@ If baseline verification is failing, repair that first. Do not stack new work on
 9. All commits must pass `./init.sh`
 10. `feature_list.json` is the single source of truth for task scope — do not track work in comments or TODOs
 
+## Module Index
+
+Use `ci sketch <file> -p weave` for declarations, `ci show <sym> --with-body -p weave` for implementations. Jump directly to the relevant module — don't scan.
+
+| Directory | Contains | Key symbols |
+|---|---|---|
+| `crates/weave-server/src/api/` | HTTP handlers (Axum routes) | Router assembly in `mod.rs` |
+| `crates/weave-server/src/store/` | SQLite data access (rusqlite) | `*Store` structs, `kanban_test_helpers.rs` |
+| `crates/weave-server/src/service/` | Business logic orchestration | `SessionService`, `try_automate_lane`, `check_transition_gates` |
+| `crates/weave-server/src/tools/` | Agent tool implementations | `ToolExecutor` trait, `ToolRegistry`, profiles in `mod.rs` |
+| `crates/weave-server/src/sse/` | SSE infrastructure | `SseManager`, `EventBuffer`, `SseWireEvent` |
+| `crates/weave-server/src/a2a/` | Google A2A protocol v1.0 | Agent Card, SendMessage, GetTask, SubscribeToTask |
+| `crates/weave-server/src/trace/` | Trace collection | `TraceCollector`, `extract_file_changes` |
+| `crates/weave-server/src/specialist/` | Specialist YAML loading | `SpecialistRegistry` |
+| `crates/weave-server/src/` | App entry + foundations | `main.rs`, `db.rs`, `error.rs`, `config.rs` |
+| `web/src/app/pages/` | React page components | Route-level pages + sub-components |
+| `web/src/hooks/` | TanStack Query hooks | `useSession`, `useBoard`, `useJourney`, etc. |
+| `web/src/lib/` | Frontend infrastructure | `types.ts`, `api.ts`, `query-keys.ts`, `routes.ts` |
+
+**Per-module index files:** Each directory above contains a `_INDEX.md` with file listings, key symbols, sizes, and connection maps. Read the `_INDEX.md` before scanning source files — it replaces directory-wide exploration. Workflow: pick module from this table → read `_INDEX.md` (50-80 lines) → `ci show <sym>` for implementation.
+
 ## Topic Docs
 
-- `docs/ARCHITECTURE.md` — System layout, domain model, API surface, SQLite schema
-- `docs/SYSTEM_DESIGN.md` — Implementation details, service contracts, tool definitions, security model
+Load only the one relevant to your task — don't read the whole set. Start with `SYSTEM_DESIGN.md` for the routing map, then drill into specifics.
+
+- `docs/SYSTEM_DESIGN.md` — Routing map: architecture layers, session state machine, what was dropped. **Start here.**
+- `docs/ARCHITECTURE.md` — System layout, domain model overview
 - `docs/PLAN.md` — Implementation phases and file creation order
+- `docs/data-model.md` — Load when adding/modifying DB tables or understanding schema
+- `docs/api-contracts.md` — Load when adding/modifying API endpoints or SSE events
+- `docs/domain-services.md` — Load for service orchestration, session lifecycle, specialist loading
+- `docs/provider-abstraction.md` — Load when adding tools, providers, tool profiles, or security constraints
+- `docs/sse-design.md` — Load for SSE infrastructure, reconnection, backpressure
+- `docs/kanban-automation.md` — Load for lane automation flow or board templates
+- `docs/error-handling.md` — Load for error types, HTTP mapping, retry strategy
+- `docs/concurrency-model.md` — Load for async task spawning, shared state, shutdown
+- `docs/frontend-architecture.md` — Load for component trees, hooks, SSE→cache sync
+- `docs/operations.md` — Load for dependencies, security, logging, backup, performance
 
 ## Definition of Done
 

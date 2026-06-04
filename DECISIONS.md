@@ -50,6 +50,17 @@ Newest at the top.
 - **Constraints introduced:** `StreamEvent` enum is the universal streaming contract. Providers must implement `send_message`, `list_models`, `health_check`.
 - **Revisit when:** Second provider is added — validate the trait shape still fits.
 
+## 2026-06-04: Split SYSTEM_DESIGN.md into per-topic docs
+
+- **Decision:** Split the 2,083-line monolithic `docs/SYSTEM_DESIGN.md` into 10 focused topic docs (average 150 lines each) plus a 127-line routing map. Delete §3 (Module Design) — now covered by 14 `_INDEX.md` files co-located with source.
+- **Reason:** A 2,083-line monolithic doc suffers from "lost in the middle" (§§8-15 were in the weakest attention zone), mixed granularity (reference material next to design rationale), and duplication with per-module `_INDEX.md` files. The split follows harness engineering principle §4: each topic doc is 50-150 lines, loaded only when relevant.
+- **Rejected alternatives:**
+  - Keep as-is — rejected: 2,083 lines = 14x the recommended topic doc size, middle sections ignored, guaranteed divergence from co-located `_INDEX.md` files
+  - Add a table of contents — rejected: doesn't fix lost-in-the-middle, still a context bomb when loaded
+  - Split into fewer docs — rejected: provider abstraction at 425 lines alone needed its own doc
+- **Constraints introduced:** Topic docs must stay focused on their domain. New system-level design content goes into the appropriate topic doc, not appended to SYSTEM_DESIGN.md. CLAUDE.md lists all topic docs with applicability conditions (when to load each).
+- **Revisit when:** SYSTEM_DESIGN.md routing map exceeds 200 lines or any topic doc exceeds 250 lines — split further or audit for overlap.
+
 ## 2026-05-31: Workspace-scoped resources
 
 - **Decision:** Every resource (sessions, boards, providers) belongs to a workspace. Default workspace created on first startup.
