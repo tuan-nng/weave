@@ -9,14 +9,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-05
-- **Latest commit:** feat-061 (+ New Session button on /sessions)
-- **Active feature:** none (feat-062 marked passing; implementation in working tree, awaiting commit + manual agent-browser validation by the user)
-- **Build status:** green for layers 1 (lint) + 2 (tests) via `just check`. Layer 3 (system smoke) pending the user's `./init.sh` run.
+- **Latest commit:** feat-062 (attach codebase to session as FS sandbox)
+- **Active feature:** none (feat-062 committed; manual agent-browser validation still pending the user)
+- **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 616 Rust tests + 90 frontend tests pass (7 new for feat-062)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** feat-037 (from prior session) + feat-062 (this session).
+- **Uncommitted:** none.
 
-### feat-062 — Attach codebase to session (passing; commit + manual smoke by user)
+### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
 Attach a registered codebase (git repo) to a session at creation time. The session's `cwd` is the codebase's `path`; the FS-tool sandbox (fs_read/fs_list/fs_search + the explicit-cwd form of shell_exec/git_*) is contained within the repo, and the FS walkers deliberately do NOT follow symlinks (so `ln -s /etc <repo>/etc_link` cannot be used to escape).
 
