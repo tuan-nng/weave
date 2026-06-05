@@ -19,16 +19,26 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-/// Cap on how long `run()` waits for in-flight requests to drain after a
-/// shutdown signal before the HTTP server returns. Once the cap elapses,
-/// axum drops the connection for any request still in flight. The cleanup
-/// task continues independently and has its own budget (see
-/// `CLEANUP_BUDGET`).
+/// Optional wall-clock cap on the graceful-shutdown future. Read from the
+/// `WEAVE_SHUTDOWN_DRAIN_CAP_SECS` env var on every `run()` call. Returns
+/// `None` (no cap) when the env var is unset, empty, "0", or unparseable —
+/// dev is the default case and dev should keep running until SIGINT. Set
+/// this in CI / orchestrators that may detach and lose the PID, so an
+/// orphaned server still self-terminates within a bounded window.
 ///
-/// Spec value from feat-034 ("30s timeout"). Kept as a const so tests can
-/// exercise the timeout path by spawning `run()` with a long cap and
-/// dropping the signal after a brief sleep.
-pub const SHUTDOWN_DRAIN_CAP: Duration = Duration::from_secs(30);
+/// The cap is a *trigger* that ends `axum::serve` after the duration, not
+/// a bound on the cleanup phase (that's `CLEANUP_BUDGET`). Replaces the
+/// feat-034 hard-coded 30s, which always fired in dev (no TTY) and caused
+/// cargo watch to restart the server every 30s.
+fn shutdown_drain_cap_from_env() -> Option<Duration> {
+    let raw = std::env::var("WEAVE_SHUTDOWN_DRAIN_CAP_SECS").ok()?;
+    let secs: u64 = raw.parse().ok()?;
+    if secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(secs))
+    }
+}
 
 /// Cap on how long the cleanup task is allowed to run after the server has
 /// returned. Generous (5s) so a slow WAL checkpoint on a busy database
@@ -164,13 +174,18 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     // disconnect notices don't add latency to the shutdown window.
     let cleanup_handle = tokio::spawn(run_cleanup(state.clone()));
 
-    // Drive the server with a graceful-shutdown future that respects the
-    // drain cap. `shutdown_signal_with_cap` fires the token before
-    // returning so the cleanup task starts the moment a signal arrives —
-    // the two never wait on each other.
+    // Drive the server with a graceful-shutdown future. The drain cap is
+    // opt-in via WEAVE_SHUTDOWN_DRAIN_CAP_SECS; when absent the future
+    // only resolves on a real signal. `shutdown_signal_with_cap` fires the
+    // token before returning so the cleanup task starts the moment a
+    // signal arrives — the two never wait on each other.
+    let drain_cap = shutdown_drain_cap_from_env();
+    if let Some(c) = drain_cap {
+        info!(cap_secs = c.as_secs(), "Drain cap active");
+    }
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal_with_cap(
         shutdown_token.clone(),
-        SHUTDOWN_DRAIN_CAP,
+        drain_cap,
     ));
 
     server.await?;
@@ -241,15 +256,17 @@ fn build_tool_registry(db: Arc<db::Db>) -> tools::ToolRegistry {
     tool_registry
 }
 
-/// Wait for SIGTERM, SIGINT, or a wall-clock cap, whichever comes first.
+/// Wait for SIGTERM, SIGINT, or an optional wall-clock cap, whichever
+/// comes first.
 ///
 /// Fires `token` on every exit path so the cleanup task is always woken —
 /// even on the cap (we want a clean shutdown attempt even if the operator
-/// never signalled). The cap exists so a process that never receives a
-/// signal (e.g. an orchestrator that lost the PID) still terminates
-/// within `SHUTDOWN_DRAIN_CAP` of `axum::serve` returning. The structured
+/// never signalled). The cap is opt-in (via `WEAVE_SHUTDOWN_DRAIN_CAP_SECS`,
+/// see `shutdown_drain_cap_from_env`); when absent the future only
+/// resolves on a real signal, so a dev server attached to a non-TTY
+/// parent keeps running until the operator Ctrl-C's it. The structured
 /// `Shutdown signal received` log carries the reason for the operator.
-async fn shutdown_signal_with_cap(token: CancellationToken, cap: Duration) {
+async fn shutdown_signal_with_cap(token: CancellationToken, cap: Option<Duration>) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -267,10 +284,16 @@ async fn shutdown_signal_with_cap(token: CancellationToken, cap: Duration) {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
 
-    let reason = tokio::select! {
-        _ = ctrl_c => "sigint",
-        _ = terminate => "sigterm",
-        _ = tokio::time::sleep(cap) => "drain_cap",
+    let reason = match cap {
+        Some(c) => tokio::select! {
+            _ = ctrl_c => "sigint",
+            _ = terminate => "sigterm",
+            _ = tokio::time::sleep(c) => "drain_cap",
+        },
+        None => tokio::select! {
+            _ = ctrl_c => "sigint",
+            _ = terminate => "sigterm",
+        },
     };
 
     info!(reason = reason, "Shutdown signal received");
@@ -383,15 +406,23 @@ mod tests {
     /// The cap branch of `shutdown_signal_with_cap` returns when the
     /// cap elapses and fires the token so the cleanup task still wakes
     /// up. We use a 50ms cap here to keep the test fast.
+    ///
+    /// The `None` path is a one-line difference (no `sleep` arm in the
+    /// `select!`); it can only resolve on a real OS signal, which is not
+    /// safe to deliver in a unit test, so it is covered by code review
+    /// rather than a separate test.
     #[tokio::test]
     async fn test_shutdown_signal_with_cap_fires_token_on_timeout() {
         let token = CancellationToken::new();
         let child = token.child_token();
         let cap = Duration::from_millis(50);
 
-        timeout(cap * 2, shutdown_signal_with_cap(token.clone(), cap))
-            .await
-            .expect("shutdown_signal_with_cap should return within 2x cap");
+        timeout(
+            cap * 2,
+            shutdown_signal_with_cap(token.clone(), Some(cap)),
+        )
+        .await
+        .expect("shutdown_signal_with_cap should return within 2x cap");
         assert!(child.is_cancelled(), "token should be fired on cap");
     }
 }
