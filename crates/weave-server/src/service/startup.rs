@@ -92,9 +92,18 @@ mod tests {
 
     /// Insert a session with the given status. Returns the session id.
     fn insert_session(db: &Db, workspace_id: &str, provider_id: &str, status: &str) -> String {
-        let session =
-            SessionStore::create(db, workspace_id, provider_id, None, None, None, None, None)
-                .expect("create session");
+        let session = SessionStore::create(
+            db,
+            workspace_id,
+            provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create session");
         // status is initially 'connecting'; transition to the requested
         // terminal/non-terminal state.
         if status != "connecting" {

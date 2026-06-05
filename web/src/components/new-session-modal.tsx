@@ -5,7 +5,7 @@
 //
 // Open/close control: parent owns `useState<string | null>(null)` and passes
 // `workspaceId={id-or-null}`. Matches the CreateBoardModal / CreateCodebaseModal
-// precedent (boards.tsx, codebases.tsx). Form state, provider/specialist
+// precedent (boards.tsx, codebases.tsx). Form state, provider/specialist/codebase
 // fetch, and the useCreateSession mutation are owned by this component.
 // Error is rendered inline so the modal is fully self-contained — no
 // parent-level banner required. The optional `onCreated` callback fires
@@ -13,10 +13,13 @@
 // what to do (typically: navigate to the new session's detail page).
 
 import { useEffect, useState } from "react";
+import { Link } from "react-router";
 import { Modal } from "./modal";
 import { useCreateSession } from "../hooks/use-workspaces";
 import { useProviders } from "../hooks/use-providers";
 import { useSpecialists } from "../hooks/use-specialists";
+import { useCodebases } from "../hooks/use-codebase";
+import { ROUTES } from "../lib/routes";
 import type { CreateSessionRequest, Session } from "../lib/types";
 
 interface NewSessionModalProps {
@@ -35,6 +38,13 @@ const LABEL_CLASS =
 export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionModalProps) {
   const { data: providers } = useProviders();
   const { data: specialists = [] } = useSpecialists();
+  // Codebase list is workspace-scoped. The hook is bound to the
+  // modal's workspace and only fires when the modal is open (i.e.
+  // workspaceId is non-null). The "" fallback keeps the rules of
+  // hooks happy while the modal is closed — the query is disabled
+  // in that case (see use-codebase.ts).
+  const { data: codebasesResp } = useCodebases(workspaceId ?? "");
+  const codebases = codebasesResp?.data ?? [];
   // useCreateSession is bound to a single workspace. We always call the
   // hook (rules of hooks) but pass "" while closed — the mutation is
   // only fired from inside handleSubmit, which re-checks workspaceId,
@@ -43,6 +53,7 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
 
   const [providerId, setProviderId] = useState("");
   const [specialistId, setSpecialistId] = useState(""); // "" = no specialist
+  const [codebaseId, setCodebaseId] = useState(""); // "" = no codebase
   const [model, setModel] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +63,7 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
     if (workspaceId !== null) {
       setProviderId("");
       setSpecialistId("");
+      setCodebaseId("");
       setModel("");
       setError(null);
     }
@@ -74,6 +86,7 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
       provider_id: providerId,
       specialist_id: specialistId === "" ? undefined : specialistId,
       model: trimmedModel === "" ? undefined : trimmedModel,
+      codebase_id: codebaseId === "" ? undefined : codebaseId,
     };
     createSession.mutate(payload, {
       onSuccess: (session) => {
@@ -158,6 +171,38 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
               </option>
             ))}
           </select>
+        </div>
+
+        {/* Codebase */}
+        <div>
+          <label className={LABEL_CLASS}>Codebase</label>
+          {codebases.length === 0 ? (
+            <>
+              <select className={FIELD_CLASS} disabled value="">
+                <option value="">No codebases registered</option>
+              </select>
+              <p className="mt-1.5 text-[11px] text-slate-500">
+                No codebases in this workspace.{" "}
+                <Link to={ROUTES.codebases} className="text-brand-blue-600 hover:underline">
+                  Register a codebase
+                </Link>{" "}
+                first, or continue without one.
+              </p>
+            </>
+          ) : (
+            <select
+              value={codebaseId}
+              onChange={(e) => setCodebaseId(e.target.value)}
+              className={FIELD_CLASS}
+            >
+              <option value="">No codebase (operate in workspace root)</option>
+              {codebases.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label ?? c.path}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
 
         {/* Model */}

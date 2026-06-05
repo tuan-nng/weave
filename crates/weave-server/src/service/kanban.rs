@@ -136,6 +136,7 @@ pub async fn try_automate_lane(
         None,
         None,
         None, // context_id — not used in kanban lane automation
+        None, // codebase_id — kanban auto-spawn does not pick a codebase; tasks don't yet carry one
     )?;
 
     // Link the session to the task. `session_id: Some(Some(sid))` is the

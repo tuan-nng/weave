@@ -834,6 +834,14 @@ export default function SessionPage() {
             {session?.model && (
               <span className="text-xs font-mono text-slate-400 ml-1">{session.model}</span>
             )}
+            {session?.cwd && (
+              <span
+                title={session.cwd}
+                className="text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200/60 rounded-md px-1.5 py-0.5 max-w-[18rem] truncate"
+              >
+                {session.cwd.split("/").filter(Boolean).pop() || session.cwd}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {(session?.status === "connecting" || session?.status === "ready") && (

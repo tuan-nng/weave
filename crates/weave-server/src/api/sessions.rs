@@ -38,6 +38,10 @@ pub struct CreateSessionRequest {
     pub model: Option<String>,
     pub cwd: Option<String>,
     pub parent_session_id: Option<String>,
+    /// Optional codebase binding. When set, the codebase must belong to
+    /// the same workspace, and the codebase's `path` is copied onto the
+    /// session's `cwd` (overriding any supplied `cwd`).
+    pub codebase_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +79,7 @@ pub async fn create_session(
         body.cwd.as_deref(),
         body.parent_session_id.as_deref(),
         None, // context_id — not set via the standard session API
+        body.codebase_id.as_deref(),
     )?;
 
     Ok((StatusCode::CREATED, Json(DataResponse { data: session })))

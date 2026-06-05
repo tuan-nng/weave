@@ -84,6 +84,7 @@ pub async fn send_message(
             None,                       // cwd — no filesystem context
             None,                       // parent_session_id — fresh session
             body.context_id.as_deref(), // context_id — A2A task linking
+            None,                       // codebase_id — A2A path doesn't pick a codebase
         )?
     };
 

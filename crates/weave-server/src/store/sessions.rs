@@ -27,6 +27,11 @@ pub struct Session {
     pub status: String,
     pub model: Option<String>,
     pub cwd: Option<String>,
+    /// Set when the session was created with `codebase_id` in the
+    /// create request. When the referenced codebase is deleted, the
+    /// FK is `ON DELETE SET NULL` — the row survives, the binding
+    /// is broken, the stored `cwd` is kept as-is.
+    pub codebase_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -108,9 +113,13 @@ impl SessionStore {
     ///
     /// Validates foreign keys: provider_id must reference an existing provider.
     /// parent_session_id (if set) must reference an existing session.
+    /// codebase_id (if set) must reference an existing codebase; the FK
+    /// column has `ON DELETE SET NULL`, so a deleted codebase unbinds
+    /// the session rather than removing it.
     ///
     /// Prefer `SessionService::create_session` for production code (supports resume).
     #[allow(dead_code)] // Used in tests; production code uses SessionService::create_session
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         db: &Db,
         workspace_id: &str,
@@ -120,6 +129,7 @@ impl SessionStore {
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
+        codebase_id: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -128,10 +138,12 @@ impl SessionStore {
             .query_row(
                 "INSERT INTO sessions
                      (id, workspace_id, provider_id, specialist_id,
-                      parent_session_id, context_id, status, model, cwd, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?9)
+                      parent_session_id, context_id, status, model, cwd, codebase_id,
+                      created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?10)
                  RETURNING id, workspace_id, provider_id, specialist_id,
-                           parent_session_id, context_id, status, model, cwd, created_at, updated_at",
+                           parent_session_id, context_id, status, model, cwd, codebase_id,
+                           created_at, updated_at",
                 rusqlite::params![
                     id,
                     workspace_id,
@@ -141,6 +153,7 @@ impl SessionStore {
                     context_id,
                     model,
                     cwd,
+                    codebase_id,
                     now,
                 ],
                 Self::map_row,
@@ -153,7 +166,8 @@ impl SessionStore {
         db.conn()
             .query_row(
                 "SELECT id, workspace_id, provider_id, specialist_id,
-                        parent_session_id, context_id, status, model, cwd, created_at, updated_at
+                        parent_session_id, context_id, status, model, cwd, codebase_id,
+                        created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 [id],
                 Self::map_row,
@@ -181,7 +195,8 @@ impl SessionStore {
         let conn = db.conn();
         let mut stmt = conn.prepare(
             "SELECT id, workspace_id, provider_id, specialist_id,
-                    parent_session_id, context_id, status, model, cwd, created_at, updated_at
+                    parent_session_id, context_id, status, model, cwd, codebase_id,
+                    created_at, updated_at
              FROM sessions
              WHERE workspace_id = ?1 AND id > ?2
              ORDER BY id ASC
@@ -225,7 +240,8 @@ impl SessionStore {
             "UPDATE sessions SET status = ?1, updated_at = ?2
              WHERE id = ?3 AND status NOT IN ('completed', 'cancelled', 'error')
              RETURNING id, workspace_id, provider_id, specialist_id,
-                       parent_session_id, context_id, status, model, cwd, created_at, updated_at",
+                       parent_session_id, context_id, status, model, cwd, codebase_id,
+                       created_at, updated_at",
             rusqlite::params![new_status, now, id],
             Self::map_row,
         );
@@ -273,14 +289,18 @@ impl SessionStore {
             status: row.get(6)?,
             model: row.get(7)?,
             cwd: row.get(8)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
+            codebase_id: row.get(9)?,
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
         })
     }
 
     /// Insert a new session within an existing transaction.
     ///
     /// Same as `create` but takes `&Connection` for use inside `Db::with_transaction`.
+    /// `codebase_id` is bound as `?9`; the FK has `ON DELETE SET NULL`, so a
+    /// deleted codebase unbinds the session rather than removing it.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_tx(
         conn: &Connection,
         workspace_id: &str,
@@ -290,6 +310,7 @@ impl SessionStore {
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
+        codebase_id: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -297,10 +318,12 @@ impl SessionStore {
         conn.query_row(
             "INSERT INTO sessions
                  (id, workspace_id, provider_id, specialist_id,
-                  parent_session_id, context_id, status, model, cwd, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?9)
+                  parent_session_id, context_id, status, model, cwd, codebase_id,
+                  created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?10)
              RETURNING id, workspace_id, provider_id, specialist_id,
-                       parent_session_id, context_id, status, model, cwd, created_at, updated_at",
+                       parent_session_id, context_id, status, model, cwd, codebase_id,
+                       created_at, updated_at",
             rusqlite::params![
                 id,
                 workspace_id,
@@ -310,6 +333,7 @@ impl SessionStore {
                 context_id,
                 model,
                 cwd,
+                codebase_id,
                 now,
             ],
             Self::map_row,
@@ -556,6 +580,7 @@ pub(crate) mod tests {
             Some("/tmp"),
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -588,8 +613,18 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         // Valid transitions from 'connecting'
-        let s =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(s.status, "connecting");
 
         let s = SessionStore::update_status(&db, &s.id, "ready").unwrap();
@@ -615,14 +650,34 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         // cancelled is terminal
-        let s =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let s = SessionStore::update_status(&db, &s.id, "cancelled").unwrap();
         assert!(SessionStore::update_status(&db, &s.id, "ready").is_err());
 
         // error is terminal
-        let s =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let s = SessionStore::update_status(&db, &s.id, "error").unwrap();
         assert!(SessionStore::update_status(&db, &s.id, "ready").is_err());
     }
@@ -633,7 +688,18 @@ pub(crate) mod tests {
         let (ws_id, provider_id) = seed_deps(&db);
 
         for _ in 0..5 {
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+            SessionStore::create(
+                &db,
+                &ws_id,
+                &provider_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
 
         let page1 = SessionStore::list_by_workspace(&db, &ws_id, None, 2).unwrap();
@@ -701,6 +767,7 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         );
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -716,8 +783,18 @@ pub(crate) mod tests {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
 
-        let parent =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let parent = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let child = SessionStore::create(
             &db,
             &ws_id,
@@ -727,10 +804,99 @@ pub(crate) mod tests {
             None,
             Some(&parent.id),
             None,
+            None, // codebase_id
         )
         .unwrap();
 
         assert_eq!(child.parent_session_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    /// Session with `codebase_id` round-trips through INSERT/SELECT,
+    /// preserving the binding alongside `cwd`.
+    #[test]
+    fn test_session_with_codebase_id() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Register a real (git-free is fine for this test) codebase.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let codebase = crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("test-codebase"),
+        )
+        .unwrap();
+
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            Some(tmp.path().to_str().unwrap()),
+            None,
+            None,
+            Some(&codebase.id),
+        )
+        .unwrap();
+
+        assert_eq!(session.codebase_id.as_deref(), Some(codebase.id.as_str()));
+        assert_eq!(session.cwd.as_deref(), Some(tmp.path().to_str().unwrap()));
+
+        // Round-trip via get_by_id
+        let fetched = SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(fetched.codebase_id.as_deref(), Some(codebase.id.as_str()));
+
+        // Round-trip via list_by_workspace
+        let page = SessionStore::list_by_workspace(&db, &ws_id, None, 50).unwrap();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(
+            page.data[0].codebase_id.as_deref(),
+            Some(codebase.id.as_str())
+        );
+    }
+
+    /// ON DELETE SET NULL: deleting a codebase unbinds the session
+    /// but does not delete the session row. The `cwd` we copied in
+    /// remains — the session just becomes detached.
+    #[test]
+    fn test_session_codebase_delete_sets_null() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let codebase = crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("to-delete"),
+        )
+        .unwrap();
+
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            Some(tmp.path().to_str().unwrap()),
+            None,
+            None,
+            Some(&codebase.id),
+        )
+        .unwrap();
+        assert!(session.codebase_id.is_some());
+
+        // Delete the codebase
+        crate::store::codebases::CodebaseStore::delete(&db, &codebase.id).unwrap();
+
+        // Session survives, binding is gone, cwd remains
+        let fetched = SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert!(fetched.codebase_id.is_none());
+        assert_eq!(fetched.cwd.as_deref(), Some(tmp.path().to_str().unwrap()));
     }
 
     // --- Message tests ---
@@ -739,8 +905,18 @@ pub(crate) mod tests {
     fn test_message_pagination() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
-        let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Create 5 messages
         for i in 0..5 {
@@ -800,8 +976,18 @@ pub(crate) mod tests {
     fn test_message_list_orders_by_created_at_not_id() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
-        let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Create 4 messages in order. We use the `id` field of the returned
         // Message to assert that the *insertion* order is preserved by the
@@ -831,8 +1017,18 @@ pub(crate) mod tests {
     fn test_message_create_and_fetch() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
-        let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let msg = MessageStore::create(
             &db,
@@ -857,8 +1053,18 @@ pub(crate) mod tests {
     fn test_message_list_empty() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
-        let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let page = MessageStore::list_by_session(&db, &session.id, None, 10).unwrap();
         assert!(page.data.is_empty());
@@ -869,8 +1075,18 @@ pub(crate) mod tests {
     fn test_session_delete_cascades_messages() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
-        let session =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         MessageStore::create(&db, &session.id, "user", r#"{"text":"hi"}"#, None).unwrap();
         MessageStore::create(&db, &session.id, "assistant", r#"{"text":"hello"}"#, None).unwrap();
@@ -898,19 +1114,59 @@ pub(crate) mod tests {
             .id;
 
         // ws1: 2 active, 1 terminal
-        let s1a =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
-        let s1b =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
-        let s1t =
-            SessionStore::create(&db, &ws_id, &provider_id, None, None, None, None, None).unwrap();
+        let s1a = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let s1b = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let s1t = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         SessionStore::update_status(&db, &s1a.id, "ready").unwrap();
         SessionStore::update_status(&db, &s1b.id, "ready").unwrap();
         SessionStore::update_status(&db, &s1t.id, "completed").unwrap();
 
         // ws2: 1 active
-        let s2a =
-            SessionStore::create(&db, &ws2_id, &provider_id, None, None, None, None, None).unwrap();
+        let s2a = SessionStore::create(
+            &db,
+            &ws2_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         SessionStore::update_status(&db, &s2a.id, "ready").unwrap();
 
         let map = SessionStore::count_active_by_workspace(&db).expect("count");

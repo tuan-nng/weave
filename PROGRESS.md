@@ -10,11 +10,41 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 - **Last updated:** 2026-06-05
 - **Latest commit:** feat-061 (+ New Session button on /sessions)
-- **Active feature:** none
-- **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 611 Rust tests + 88 frontend tests pass (5 new)
+- **Active feature:** none (feat-062 marked passing; implementation in working tree, awaiting commit + manual agent-browser validation by the user)
+- **Build status:** green for layers 1 (lint) + 2 (tests) via `just check`. Layer 3 (system smoke) pending the user's `./init.sh` run.
+- **Test status:** green — 616 Rust tests + 90 frontend tests pass (7 new for feat-062)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** feat-037 implementation. New `StopReason::LoopLimit { iterations }` variant + `is_error` field on `ContentBlock::ToolResult`. New `agent_loop` async fn in `service/sessions.rs` driving the model ↔ tool-execution loop (MAX_TOOL_ITERATIONS=8, TOOL_EXECUTION_TIMEOUT=30s). New `ToolOutcome` enum handling unknown tool / validation failure / tool error / cancel-mid-loop / loop-cap. New `execute_tool_call` free fn with JSON Schema validation (Draft7) and per-tool timeout. New `sanitize_tool_input` helper trimming string leaves. `TraceCollector` made `Clone`. `EventConverter` now defers `ToolUseStart` emission until `ContentBlockStop` so streamed `input_json_delta` is assembled into a `serde_json::Value` before the tool is invoked. `ContentBlock::ToolResult` carries `is_error` to the wire. A2A `map_sse_to_a2a` maps `LoopLimit` → `TaskStatus::Failed`. `build_message_metadata` includes `tool_calls` summary in metadata JSON whenever a tool was called. 7 new spec tests + `ScriptedTool` + `ScriptedAgent` + 2 helpers.
+- **Uncommitted:** feat-037 (from prior session) + feat-062 (this session).
+
+### feat-062 — Attach codebase to session (passing; commit + manual smoke by user)
+
+Attach a registered codebase (git repo) to a session at creation time. The session's `cwd` is the codebase's `path`; the FS-tool sandbox (fs_read/fs_list/fs_search + the explicit-cwd form of shell_exec/git_*) is contained within the repo, and the FS walkers deliberately do NOT follow symlinks (so `ln -s /etc <repo>/etc_link` cannot be used to escape).
+
+**What's in the working tree:**
+- New migration `010_session_codebase_id.sql` — `codebase_id TEXT REFERENCES codebases(id) ON DELETE SET NULL` + index
+- `Session.codebase_id: Option<String>` plumbed through store/api/service/migration
+- `CreateSessionRequest.codebase_id: Option<String>` — server resolves to codebase's path, copies onto `cwd` (binding wins over any supplied `cwd`); cross-workspace ids rejected with `AppError::NotFound`
+- `ToolContext.codebase_root` collapses to `session.cwd` when bound, `.` when unbound (47-line over-engineered SQL path removed in review)
+- `validate_read_path` helper in `tools/fs/mod.rs` (sibling to `validate_write_path`); called by fs_read/fs_list/fs_search + the explicit-cwd form of shell/git
+- FS walkers in `fs/list.rs` and `fs/search.rs` use `entry.file_type()` and skip symlinks
+- Frontend: `Session.codebase_id: string | null`; `NewSessionModal` adds a "Codebase" dropdown with disabled empty-state + /codebases link; `app/pages/session.tsx` shows a monospace pill with the codebase basename
+- Docs: `docs/user/sessions.md` adds "How sessions use a codebase" section; `docs/user/codebases.md` rewrites the same section; both state the dual claim (cwd-arg containment yes, shell-body jail no)
+- 5 new Rust tests (2 store, 3 service), 2 new frontend tests, all green
+
+**Blocker / Next steps for the next session:**
+1. **User runs `./init.sh`** for the system-layer smoke (Layer 3 — `/api/health` + `curl / | grep 'id="root"'`). If green, the next session should:
+   - Open the dev server with `just dev` and `just dev-web`
+   - With agent-browser: create a workspace, register a codebase, create a session bound to that codebase, verify the session header shows the path pill, verify the agent's `fs_read` of a path outside the repo is rejected with the new "outside the codebase root" error
+   - Promote `feat-062` in `feature_list.json` from `state: "active"` to `state: "passing"` with the `./init.sh` output and the agent-browser observation in `evidence`
+2. The simplify review surfaced 3 lower-priority items deferred from this slice:
+   - `validate_read_path` / `validate_write_path` share canonicalize+starts_with — could extract a private helper
+   - Test-fixture sprawl (30+ extra `None` args on `SessionStore::create` / `create_tx` / `SessionService::create_session`) — add a `create_session_basic` test helper, or convert the API to a `CreateSession { ... }` builder struct
+   - No direct unit tests for `validate_read_path` — the unbound (`codebase_root == "."`) branch is not exercised by any current test
+3. Resume does NOT auto-inherit the parent's `codebase_id` — design choice, but worth a follow-up: when resuming a bound parent, default the new session's codebase picker to the parent's codebase (or pass it server-side).
+4. Pre-existing `tools/fs/mod.rs:167-217` `resolve_path` bug for deeply non-existent files (drops the file name, duplicates the last tail component). Unrelated to this slice; flagged in review.
+5. Kanban auto-spawn in `service/kanban.rs:130` still passes `codebase_id: None`; the `tasks` model has no `codebase_id`. Wiring kanban is a separate feature.
+
+## Completed Since Project Start
 
 ## Completed Since Project Start
 

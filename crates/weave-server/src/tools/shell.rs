@@ -61,20 +61,29 @@ impl ToolExecutor for ShellExecTool {
         };
 
         let cwd = match optional_string(&input, "cwd") {
-            Some(path_str) => match PathValidator::require_absolute(&path_str) {
-                Ok(p) => p,
-                Err(e) => return e,
-            },
+            Some(path_str) => {
+                let raw = match PathValidator::require_absolute(&path_str) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
+                // Existence/type check first so a non-existent cwd
+                // gets the "does not exist" error rather than a
+                // containment error.
+                if !raw.is_dir() {
+                    return error(format!(
+                        "Working directory '{}' does not exist or is not a directory.",
+                        raw.display()
+                    ));
+                }
+                // Bound sessions enforce cwd containment. Unbound stay
+                // permissive (model can `cd /` and run any shell).
+                match PathValidator::validate_read_path(&raw, &ctx.codebase_root) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                }
+            }
             None => ctx.cwd.clone(),
         };
-
-        // Validate cwd exists and is a directory
-        if !cwd.is_dir() {
-            return error(format!(
-                "Working directory '{}' does not exist or is not a directory.",
-                cwd.display()
-            ));
-        }
 
         let timeout_ms = optional_u64(&input, "timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS);
 

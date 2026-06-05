@@ -62,19 +62,43 @@ the directory on disk — your git repo is unchanged.
 
 ## How sessions use a codebase
 
-Sessions do not auto-bind to a codebase. The session page does not show
-"current codebase" anywhere. What actually happens is:
+Sessions can be **bound** to a codebase at creation time. The `New
+Session` modal has a `Codebase` dropdown listing every registered
+codebase in the workspace. When you pick one:
 
-- the session's working directory defaults to the workspace root;
-- if a session is auto-triggered from a Kanban card, the card's
-  `description` and `acceptance_criteria` are what the agent reads to
-  decide what to do, and the agent figures out the relevant path from
-  tool calls (`fs_read`, `shell_exec pwd`, `git log`).
+- the session's working directory (`cwd`) is set to the codebase's
+  `path`;
+- the session's `codebase_id` is recorded, so the binding survives
+  across the lifetime of the session;
+- the session page header shows the codebase's basename, with the
+  full path on hover;
+- the agent's `fs_read`/`fs_list`/`fs_search` and the explicit-`cwd`
+  form of `shell_exec`/`git_*` are contained: any request to operate
+  outside the repo root returns a clear error.
 
-If you want the agent to operate on a specific repo, your prompt should
-name the path. *"Read `/home/me/projects/weave/Cargo.toml` and..."* is
-unambiguous; *"Read the project config"* is not, if there is more than
-one codebase registered.
+The sandbox is on **the working-directory argument, not the shell
+command body**. `fs_read {path}` and `shell_exec {cwd}` cannot escape
+the repo, but the shell command itself (after `sh -c`) can do
+anything the server process can — including `cat /etc/passwd` or
+`ln -s /etc <repo>/etc_link`. Symlinks inside the codebase are
+deliberately not followed by the FS walkers (`fs_list`, `fs_search`),
+so the second trick does not work either. Think of the binding as a
+permission boundary on the cwd, not as a jail on the shell.
+
+If you don't pick a codebase, the session starts unbound: `cwd` falls
+back to the workspace root, and the FS tools stay permissive (they
+can read any absolute path the server can reach). Picking a codebase
+is the explicit opt-in to sandboxing.
+
+Kanban auto-spawned sessions do not yet pick a codebase — the
+`tasks` model has no `codebase_id`, and the auto-spawn falls back to
+the legacy "operate in the workspace root" behavior. Re-binding
+requires a new session.
+
+If a codebase is deleted while sessions are still bound to it, the
+binding is broken (`codebase_id` becomes `null`) but the sessions
+survive. The runtime falls back to the session's stored `cwd` as
+the containment root, so the sandbox stays active.
 
 ## When to register a codebase
 
@@ -106,8 +130,9 @@ changes (so the working tree is clean) or revert them with `git
 checkout`.
 
 **"I registered a codebase but my session does not see it."** Sessions
-do not bind to codebases automatically. Pass the path in the prompt, or
-set the session's `cwd` to the codebase root.
+no longer auto-bind to codebases. Pick the codebase from the
+`Codebase` dropdown in the `New Session` modal, or pass its path in
+the prompt.
 
 **"Branch is wrong."** The branch is captured at registration time and
 is not auto-refreshed. Delete and re-register the codebase against the

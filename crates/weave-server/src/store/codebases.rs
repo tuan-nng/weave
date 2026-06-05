@@ -158,9 +158,13 @@ impl CodebaseStore {
         Ok(rows)
     }
 
-    /// Hard delete a codebase. Sessions are not touched (sessions ↔
-    /// codebase association is purely runtime via `cwd` prefix match;
-    /// there is no FK on `sessions.cwd`).
+    /// Hard delete a codebase. Any `sessions.codebase_id` referencing
+    /// this row is set to `NULL` (the FK declares `ON DELETE SET NULL`,
+    /// migration 010); the session rows themselves survive with their
+    /// `cwd` unchanged. The session's runtime sandbox stays active
+    /// because the runtime falls back to `session.cwd` as the
+    /// containment root whenever the binding is set — see
+    /// `run_prompt_task` in `service::sessions`.
     pub fn delete(db: &Db, codebase_id: &str) -> Result<(), AppError> {
         let rows_affected = db
             .conn()
@@ -188,7 +192,7 @@ impl CodebaseStore {
     /// but NOT `/home/u/repo-other`. The SQL fragment is fixed (no
     /// user input) — `?1 = path OR ?1 LIKE path || '/%'` — so the
     /// literal `/` is safe.
-    #[allow(dead_code)] // wired up in a follow-up when sessions integrate
+    #[allow(dead_code)] // Kept for the future "cwd is a subdir of a registered codebase" use case.
     pub fn find_by_cwd_prefix(
         db: &Db,
         workspace_id: &str,

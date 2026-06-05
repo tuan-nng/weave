@@ -125,12 +125,18 @@ pub(crate) async fn run_git(args: &[&str], cwd: &PathBuf) -> Result<GitOutput, T
 /// Validate that `cwd` is absolute, exists, and is inside a git repository.
 ///
 /// Async — uses `run_git` to avoid blocking the tokio runtime.
+///
+/// For bound sessions, the explicit `cwd` arg (when supplied) must
+/// resolve inside the codebase root. Unbound sessions stay permissive.
 pub(crate) async fn validate_git_cwd(
     input: &Value,
     ctx: &ToolContext,
 ) -> Result<PathBuf, ToolResult> {
     let cwd = match optional_string(input, "cwd") {
-        Some(path_str) => PathValidator::require_absolute(&path_str)?,
+        Some(path_str) => {
+            let raw = PathValidator::require_absolute(&path_str)?;
+            PathValidator::validate_read_path(&raw, &ctx.codebase_root)?
+        }
         None => ctx.cwd.clone(),
     };
 

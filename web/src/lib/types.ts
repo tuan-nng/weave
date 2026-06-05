@@ -20,6 +20,11 @@ export interface Session {
   status: SessionStatus;
   model: string | null;
   cwd: string | null;
+  /// When set, the session is bound to a registered codebase. The
+  /// session's `cwd` mirrors the codebase's path (the binding wins at
+  /// create time, overriding any `cwd` arg). When the referenced
+  /// codebase is deleted, this becomes `null` (`ON DELETE SET NULL`).
+  codebase_id: string | null;
   created_at: string;
   updated_at: string;
 }

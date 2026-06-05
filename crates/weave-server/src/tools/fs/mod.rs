@@ -120,6 +120,45 @@ impl PathValidator {
         Ok(canonical_path)
     }
 
+    /// Read-path validation: absolute + within codebase_root. Reads of
+    /// control-plane files (CLAUDE.md, Cargo.toml, etc.) are allowed —
+    /// they are project context, not secrets. Only writes need the
+    /// control-plane guard (see `validate_write_path`).
+    ///
+    /// When `codebase_root` is `.` (unbound session), no containment is
+    /// applied — this matches the legacy "read tools can read anywhere"
+    /// behavior, and is the explicit opt-in design of the codebase
+    /// binding (binding to a codebase is what turns the sandbox on).
+    pub fn validate_read_path(path: &Path, codebase_root: &Path) -> Result<PathBuf, ToolResult> {
+        // No binding — legacy permissive behavior.
+        if codebase_root == Path::new(".") {
+            return Self::resolve_path(path);
+        }
+
+        let canonical_root = codebase_root.canonicalize().map_err(|e| {
+            error(format!(
+                "Cannot resolve codebase root '{}': {}",
+                codebase_root.display(),
+                e
+            ))
+        })?;
+
+        let canonical_path = Self::resolve_path(path)?;
+
+        if !canonical_path.starts_with(&canonical_root) {
+            return Err(error(format!(
+                "Path '{}' is outside the codebase root '{}'. \
+                 This session is bound to a codebase; reads are restricted to it. \
+                 Detach the binding (recreate the session without a codebase) \
+                 to operate outside the codebase.",
+                path.display(),
+                canonical_root.display()
+            )));
+        }
+
+        Ok(canonical_path)
+    }
+
     /// Resolve a path through the filesystem (following symlinks).
     ///
     /// For existing files, this is equivalent to `canonicalize`. For

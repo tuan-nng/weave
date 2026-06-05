@@ -36,6 +36,11 @@ time. The list updates live — new sessions appear without a refresh.
      the dropdown (e.g. `dev-crafter`, `review-guard`) to inject a system
      prompt. Leave on "No specialist" to skip. See
      [Specialists](./specialists) for the full list and what each one does.
+   - **Codebase** — optional. Pick a registered codebase to attach the
+     session to. The agent's working directory becomes the codebase's
+     path, and the agent's `fs_read`/`fs_list`/`shell`/`git` tools
+     default to operating inside the repo. See
+     [How sessions use a codebase](#how-sessions-use-a-codebase) below.
    - **Model** — optional. Leave empty to use the provider's default.
 3. Click `Create Session`. The session page opens automatically and is
    already ready to receive a prompt.
@@ -101,6 +106,39 @@ to read what was produced so far.
 From the workspace overview or the `Sessions` list, click the row's delete
 action. The session and all its messages are removed. The
 [Journey sidebar](./journey) trace is also removed.
+
+## How sessions use a codebase
+
+When you pick a codebase at session creation, the session is **bound**
+to it. The binding means:
+
+- The session's working directory is the codebase's `path`. The
+  agent's shell and git tools start in that directory.
+- `fs_read`, `fs_list`, `fs_search`, and the explicit-`cwd` form of
+  `shell_exec` / `git_*` are sandboxed to the codebase: a request to
+  operate outside the repo root returns a clear error.
+- The session page header shows the codebase's basename (full path on
+  hover), so you can confirm the binding at a glance.
+
+The sandbox is on **the working-directory argument, not the shell
+command body**. `fs_read {path}` and `shell_exec {cwd}` cannot escape
+the repo, but the shell command itself (after `sh -c`) can do
+anything the server process can — including `cat /etc/passwd` or
+`ln -s /etc <repo>/etc_link`. Symlinks inside the codebase are
+deliberately not followed by the FS walkers (`fs_list`, `fs_search`),
+so the second trick does not work either. Think of the binding as a
+permission boundary on the cwd, not as a jail on the shell.
+
+If you don't pick a codebase, the session starts in the workspace root
+and the FS tools stay permissive (they can read any absolute path the
+server can reach). Picking a codebase is the explicit opt-in to
+sandboxing.
+
+If a codebase is deleted while sessions are still bound to it, the
+binding is broken (`codebase_id` is set to `null`) but the sessions
+survive and the sandbox stays active — the agent is still operating
+in the same directory, so containment continues against the stored
+`cwd`. Re-binding requires a new session.
 
 ## Statuses you will see
 

@@ -65,6 +65,15 @@ impl SessionService {
     ///
     /// Only the direct parent's messages are copied — if the parent was itself
     /// resumed, it already contains its ancestors' messages.
+    ///
+    /// `codebase_id` is resolved against the workspace: it must reference an
+    /// existing codebase in the same workspace. When supplied, the codebase's
+    /// `path` is copied onto the session's `cwd` so the agent's shell/git
+    /// tools default to operating inside the registered repo. The caller may
+    /// also pass `cwd` directly (advanced: pointing at a subdir); the two
+    /// fields compose, but `codebase_id` wins when both are present (the
+    /// resolved path from the codebase overrides any supplied `cwd`).
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         db: &Db,
         workspace_id: &str,
@@ -74,9 +83,25 @@ impl SessionService {
         cwd: Option<&str>,
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
+        codebase_id: Option<&str>,
     ) -> Result<crate::store::sessions::Session, AppError> {
         // Validate workspace exists
         crate::store::workspaces::WorkspaceStore::get_by_id(db, workspace_id)?;
+
+        // Resolve codebase_id → path. The FK has ON DELETE SET NULL but we
+        // also want to reject cross-workspace references up front (the FK
+        // would technically permit a different workspace's codebase, but the
+        // design contract is workspace-scoped). Look the row up explicitly
+        // so the error message is actionable.
+        let resolved_cwd: Option<String> = if let Some(cid) = codebase_id {
+            let codebase =
+                crate::store::codebases::CodebaseStore::get_in_workspace(db, cid, workspace_id)?;
+            // Codebase binding wins — the agent's working directory is the
+            // registered repo root, regardless of any supplied `cwd`.
+            Some(codebase.path.clone())
+        } else {
+            cwd.map(|s| s.to_string())
+        };
 
         // Validate parent chain and load direct parent's messages
         let parent_messages = if let Some(pid) = parent_session_id {
@@ -104,9 +129,10 @@ impl SessionService {
                 provider_id,
                 specialist_id,
                 model,
-                cwd,
+                resolved_cwd.as_deref(),
                 parent_session_id,
                 context_id,
+                codebase_id,
             )?;
 
             if !parent_messages.is_empty() {
@@ -425,15 +451,40 @@ async fn run_prompt_task(
     // passed to every tool invocation inside the loop, so a tool that
     // records a file change or a network call sees a consistent
     // workspace_root / cwd / trace_collector across iterations.
+    //
+    // `cwd` is the session's working directory (set at create time
+    // from the bound codebase's path, or from an explicit `cwd` arg,
+    // or unset — in which case the server's CWD is the default).
+    //
+    // `codebase_root` is the FS-tool containment boundary. It is set
+    // to the session's `cwd` whenever the session is **bound** to a
+    // registered codebase (via `codebase_id`); for unbound sessions
+    // (the legacy / explicit-opt-out case), the field is set to `.`
+    // and the FS read tools stay permissive.
+    //
+    // Note: when the bound codebase is deleted mid-session, the FK
+    // `ON DELETE SET NULL` clears `codebase_id` but leaves `cwd`
+    // intact. We deliberately keep the containment active in that
+    // case — the agent is still operating in the same directory, so
+    // the sandbox should not silently flip off. The user can recreate
+    // the session to rebind.
+    let session_cwd: std::path::PathBuf = session
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+    let codebase_root: std::path::PathBuf = if session.codebase_id.is_some() {
+        session_cwd.clone()
+    } else {
+        std::path::PathBuf::from(".")
+    };
+
     let tool_ctx = crate::tools::ToolContext {
         session_id: session_id.to_string(),
         workspace_id: session.workspace_id.clone(),
-        cwd: session
-            .cwd
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(".")),
-        codebase_root: std::path::PathBuf::from("."),
+        cwd: session_cwd,
+        codebase_root,
         trace_collector: std::sync::Arc::new(trace_collector.clone()),
     };
 
@@ -1366,6 +1417,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1388,6 +1440,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1420,6 +1473,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1458,6 +1512,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1508,6 +1563,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1550,6 +1606,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1585,6 +1642,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1712,6 +1770,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -1846,6 +1905,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2039,6 +2099,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2193,6 +2254,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2340,6 +2402,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2501,6 +2564,7 @@ You are a senior Rust engineer."#,
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2609,6 +2673,7 @@ You are a planning specialist."#,
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2698,6 +2763,7 @@ You are broken."#,
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -2920,6 +2986,7 @@ You are broken."#,
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
 
@@ -3477,6 +3544,7 @@ You are broken."#,
             None,
             parent_session_id,
             None,
+            None, // codebase_id
         )
         .unwrap()
     }
@@ -3599,6 +3667,7 @@ You are broken."#,
             None,
             Some("nonexistent-session-id"),
             None,
+            None, // codebase_id
         );
 
         match result {
@@ -3631,6 +3700,7 @@ You are broken."#,
             None,
             Some(&parent.id),
             None,
+            None, // codebase_id
         );
 
         match result {
@@ -3677,6 +3747,7 @@ You are broken."#,
             None,
             Some(&deepest.id),
             None,
+            None, // codebase_id
         );
 
         match result {
@@ -3720,6 +3791,7 @@ You are broken."#,
             None,
             Some(&b.id),
             None,
+            None, // codebase_id
         );
 
         match result {
@@ -3769,6 +3841,7 @@ You are broken."#,
             None,
             Some(&parent.id),
             None,
+            None, // codebase_id
         );
 
         match result {
@@ -3776,6 +3849,157 @@ You are broken."#,
                 assert!(msg.contains("connecting"), "unexpected message: {}", msg);
             }
             other => panic!("expected Validation for active parent, got: {:?}", other),
+        }
+    }
+
+    // --- Codebase binding tests (feat-062) ---
+
+    /// `codebase_id` resolves to the codebase's path: the session's
+    /// `cwd` is set to the codebase's path, regardless of any
+    /// supplied `cwd` arg. The codebase binding wins.
+    #[test]
+    fn test_create_session_with_codebase_id_copies_path_to_cwd() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let ws_id = crate::store::workspaces::WorkspaceStore::list(&db, None, 50)
+            .unwrap()
+            .data
+            .remove(0)
+            .id;
+        let provider_id = crate::store::providers::ProviderStore::create(
+            &db,
+            "anthropic",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k"}"#,
+        )
+        .unwrap()
+        .id;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let codebase = crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("bind-target"),
+        )
+        .unwrap();
+
+        // Pass an explicit `cwd` AND a `codebase_id`. The binding wins
+        // and overrides the cwd.
+        let session = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            Some("/some/other/path"),
+            None,
+            None,
+            Some(&codebase.id),
+        )
+        .unwrap();
+
+        assert_eq!(session.codebase_id.as_deref(), Some(codebase.id.as_str()));
+        assert_eq!(session.cwd.as_deref(), Some(tmp.path().to_str().unwrap()));
+    }
+
+    /// An unknown `codebase_id` is rejected before the session is
+    /// created. The session row never lands in the DB.
+    #[test]
+    fn test_create_session_invalid_codebase_id_rejected() {
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let ws_id = crate::store::workspaces::WorkspaceStore::list(&db, None, 50)
+            .unwrap()
+            .data
+            .remove(0)
+            .id;
+        let provider_id = crate::store::providers::ProviderStore::create(
+            &db,
+            "anthropic",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k"}"#,
+        )
+        .unwrap()
+        .id;
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("nonexistent-codebase-id"),
+        );
+
+        match result {
+            Err(AppError::NotFound { resource, id }) => {
+                assert_eq!(resource, "codebase");
+                assert_eq!(id, "nonexistent-codebase-id");
+            }
+            other => panic!(
+                "expected NotFound for invalid codebase_id, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Cross-workspace codebase binding is rejected: a codebase in
+    /// workspace A cannot be attached to a session in workspace B.
+    /// The defense lives in `CodebaseStore::get_in_workspace`, called
+    /// from `SessionService::create_session`.
+    #[test]
+    fn test_create_session_cross_workspace_codebase_rejected() {
+        let db = test_db();
+        // Two workspaces
+        let ws_a = crate::store::workspaces::WorkspaceStore::create(&db, "ws-a").unwrap();
+        let ws_b = crate::store::workspaces::WorkspaceStore::create(&db, "ws-b").unwrap();
+        let provider_id = crate::store::providers::ProviderStore::create(
+            &db,
+            "anthropic",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k"}"#,
+        )
+        .unwrap()
+        .id;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Codebase registered under workspace A
+        let codebase = crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_a.id,
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("ws-a-codebase"),
+        )
+        .unwrap();
+
+        // Try to bind it to a session in workspace B
+        let result = SessionService::create_session(
+            &db,
+            &ws_b.id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&codebase.id),
+        );
+
+        match result {
+            Err(AppError::NotFound { resource, id }) => {
+                assert_eq!(resource, "codebase");
+                assert_eq!(id, codebase.id);
+            }
+            other => panic!(
+                "expected NotFound for cross-workspace codebase, got: {:?}",
+                other
+            ),
         }
     }
 }

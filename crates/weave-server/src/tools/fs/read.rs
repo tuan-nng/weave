@@ -31,7 +31,7 @@ impl ToolExecutor for FsReadTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         let path_str = match require_string(&input, "path") {
             Ok(s) => s,
             Err(e) => return e,
@@ -42,7 +42,32 @@ impl ToolExecutor for FsReadTool {
             Err(e) => return e,
         };
 
-        match std::fs::read_to_string(&path) {
+        // Existence/type checks happen on the raw path BEFORE
+        // containment, so non-existent files still produce a clear
+        // "Failed to read" error rather than a containment error.
+        if !path.exists() {
+            return error(format!(
+                "Failed to read '{}': file does not exist.",
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return error(format!(
+                "Failed to read '{}': not a regular file. \
+                 fs_read only works on files, not directories.",
+                path.display()
+            ));
+        }
+
+        // Bound sessions enforce containment: reads must stay inside
+        // the registered codebase root. Unbound sessions (codebase_root
+        // == ".") keep legacy permissive behavior.
+        let canonical_path = match PathValidator::validate_read_path(&path, &ctx.codebase_root) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        match std::fs::read_to_string(&canonical_path) {
             Ok(content) => {
                 let bytes_read = content.len();
                 success(json!({

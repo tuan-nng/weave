@@ -35,6 +35,9 @@ vi.mock("../../lib/api", () => ({
     specialists: {
       list: vi.fn(),
     },
+    codebases: {
+      list: vi.fn(),
+    },
   },
 }));
 
@@ -70,6 +73,7 @@ const mockSessions = [
     status: "completed",
     model: "claude-sonnet-4-5",
     cwd: null,
+    codebase_id: null,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-01T00:00:00Z",
   },
@@ -131,6 +135,9 @@ beforeEach(() => {
   );
   mockApi.providers.list.mockResolvedValue(mockProviders);
   mockApi.specialists.list.mockResolvedValue(mockSpecialists);
+  // Default: no codebases registered. Each test that exercises the
+  // codebase picker can override with `mockApi.codebases.list.mockResolvedValueOnce(...)`.
+  mockApi.codebases.list.mockResolvedValue({ data: [] });
 });
 
 afterEach(() => {
@@ -195,6 +202,7 @@ describe("sessions list", () => {
       status: "connecting",
       model: null,
       cwd: null,
+      codebase_id: null,
       created_at: "2026-06-01T00:00:00Z",
       updated_at: "2026-06-01T00:00:00Z",
     };
@@ -233,6 +241,91 @@ describe("sessions list", () => {
     });
     await waitFor(() => {
       expect(router.state.location.pathname).toBe("/sessions/new-session-id");
+    });
+  });
+
+  it("the codebase picker shows a disabled empty state with a /codebases link when no codebases are registered", async () => {
+    // Default beforeEach: mockApi.codebases.list returns { data: [] }
+    renderList();
+    const button = await screen.findByRole("button", {
+      name: /\+ New Session in Backend/i,
+    });
+    fireEvent.click(button);
+
+    // The dropdown is disabled and reads "No codebases registered".
+    const disabledSelect = (await screen.findByDisplayValue(
+      "No codebases registered",
+    )) as HTMLSelectElement;
+    expect(disabledSelect).toBeInTheDocument();
+    expect(disabledSelect).toBeDisabled();
+    // The hint copy points at /codebases.
+    expect(screen.getByText(/register a codebase/i)).toBeInTheDocument();
+  });
+
+  it("submitting with a selected codebase sends codebase_id in the create payload", async () => {
+    const mockCodebases = [
+      {
+        id: "cb1",
+        workspace_id: "w2",
+        path: "/home/u/repo-a",
+        branch: null,
+        label: "Repo A",
+        created_at: "2026-06-01T00:00:00Z",
+      },
+      {
+        id: "cb2",
+        workspace_id: "w2",
+        path: "/home/u/repo-b",
+        branch: null,
+        label: "Repo B",
+        created_at: "2026-06-01T00:00:00Z",
+      },
+    ];
+    mockApi.codebases.list.mockResolvedValueOnce({ data: mockCodebases });
+
+    const newSession = {
+      id: "new-session-id-2",
+      workspace_id: "w2",
+      provider_id: "p1",
+      specialist_id: null,
+      parent_session_id: null,
+      status: "connecting",
+      model: null,
+      cwd: "/home/u/repo-b",
+      codebase_id: "cb2",
+      created_at: "2026-06-01T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+    };
+    mockApi.sessions.create.mockResolvedValueOnce(newSession);
+
+    const { router } = renderList();
+    const button = await screen.findByRole("button", {
+      name: /\+ New Session in Backend/i,
+    });
+    fireEvent.click(button);
+
+    // Wait for the codebase list query to populate the dropdown.
+    const codebaseSelect = (await screen.findByDisplayValue(
+      "No codebase (operate in workspace root)",
+    )) as HTMLSelectElement;
+    expect(codebaseSelect.querySelectorAll("option")).toHaveLength(1 + mockCodebases.length);
+
+    // Pick the provider, the codebase, submit.
+    const providerSelect = screen.getByDisplayValue("Select provider…") as HTMLSelectElement;
+    fireEvent.change(providerSelect, { target: { value: "p1" } });
+    fireEvent.change(codebaseSelect, { target: { value: "cb2" } });
+
+    const submit = screen.getByRole("button", { name: /create session/i });
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(mockApi.sessions.create).toHaveBeenCalledWith("w2", {
+        provider_id: "p1",
+        codebase_id: "cb2",
+      });
+    });
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/sessions/new-session-id-2");
     });
   });
 });

@@ -52,10 +52,21 @@ impl ToolExecutor for FsSearchTool {
         let search_path_str = optional_string(&input, "path");
 
         let search_path = match search_path_str {
-            Some(ref p) => match PathValidator::require_absolute(p) {
-                Ok(pb) => pb,
-                Err(e) => return e,
-            },
+            Some(ref p) => {
+                let raw = match PathValidator::require_absolute(p) {
+                    Ok(pb) => pb,
+                    Err(e) => return e,
+                };
+                // Bound sessions enforce containment on explicit search
+                // paths. Unbound stay permissive.
+                match PathValidator::validate_read_path(&raw, &ctx.codebase_root) {
+                    Ok(pb) => pb,
+                    Err(e) => return e,
+                }
+            }
+            // Default search root: already the codebase_root. When
+            // unbound (`codebase_root == "."`), this walks from the
+            // server's CWD — matching pre-binding behavior.
             None => ctx.codebase_root.clone(),
         };
 
@@ -118,9 +129,23 @@ fn walk_and_search(
             return;
         }
 
+        // Use file_type() (does NOT follow symlinks) and skip
+        // symlinks entirely. This is the load-bearing piece of the
+        // bound-session sandbox: a symlink inside the codebase that
+        // points outside (e.g. `ln -s /etc <repo>/etc_link`) cannot
+        // be traversed to read its target. The tradeoff: legitimate
+        // symlinks inside a repo are also skipped.
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+
         let path = entry.path();
 
-        if path.is_dir() {
+        if file_type.is_dir() {
             // Skip hidden directories (starting with '.').
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with('.') {
@@ -128,7 +153,7 @@ fn walk_and_search(
                 }
             }
             walk_and_search(&path, regex, glob, depth + 1, results);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             check_file(&path, regex, glob, results);
         }
     }

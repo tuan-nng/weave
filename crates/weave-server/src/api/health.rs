@@ -225,6 +225,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
         let s_b = crate::store::sessions::SessionStore::create(
@@ -236,6 +237,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
         let s_c = crate::store::sessions::SessionStore::create(
@@ -247,6 +249,7 @@ mod tests {
             None,
             None,
             None,
+            None, // codebase_id
         )
         .unwrap();
         crate::store::sessions::SessionStore::update_status(&state.db, &s_b.id, "ready").unwrap();
