@@ -28,11 +28,13 @@ time. The list updates live — new sessions appear without a refresh.
 ### Create a session
 
 1. From `Home`, open a workspace. Or, from the `Sessions` list, click
-   `+ New Session` in the page header.
+   `+ New Session` next to the workspace name where you want to start a
+   session.
 2. In the modal:
    - **Provider** — required. Pick from the configured providers.
-   - **Specialist** — optional free text. Type one of the bundled specialist
-     IDs (e.g. `dev-crafter`, `review-guard`) to inject a system prompt. See
+   - **Specialist** — optional. Pick one of the bundled specialists from
+     the dropdown (e.g. `dev-crafter`, `review-guard`) to inject a system
+     prompt. Leave on "No specialist" to skip. See
      [Specialists](./specialists) for the full list and what each one does.
    - **Model** — optional. Leave empty to use the provider's default.
 3. Click `Create Session`. The session page opens automatically and is

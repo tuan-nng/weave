@@ -44,7 +44,8 @@
         "feat-021",
         "feat-022",
         "feat-023",
-        "feat-036"
+        "feat-036",
+        "feat-061"
       ]
     },
     {
@@ -873,6 +874,17 @@
         "feat-051"
       ],
       "evidence": ""
+    },
+    {
+      "id": "feat-061",
+      "phase": "phase-3",
+      "behavior": "`docs/user/sessions.md` instructs the user to 'from the `Sessions` list, click `+ New Session` in the page header', but `web/src/app/pages/sessions.tsx` has no such button. Add a per-workspace `+ New Session` action to the Sessions list page so the doc matches the UI. Implementation: (1) Extract the inline New Session modal + form state from `web/src/app/pages/workspace.tsx` (the `<Modal>` block at the bottom plus the form state, providers fetch, and `useCreateSession` mutation) into a reusable `NewSessionModal` component in `web/src/components/new-session-modal.tsx`. The component takes `{ workspaceId, open, onClose, onCreated?(session) }` as props and owns the Provider / Specialist / Model form fields and the `useCreateSession` mutation. (2) Refactor `workspace.tsx` to use the extracted component for the existing page-level `+ New Session` button; behavior unchanged. (3) In `sessions.tsx`, render the modal once per `WorkspaceSessions` block; add a small `+ New Session` button next to the workspace heading that opens the modal pre-bound to that workspace's id; on success, navigate to `ROUTES.session(session.id)`. (4) Empty-state copy in `sessions.tsx` ('Create a workspace first to start sessions') stays as is — a workspace with no sessions should still show the per-workspace section so the button is reachable, not a global empty state. (5) The Provider dropdown is populated from `useProviders()` (already used by `workspace.tsx`); reuse the same hook in the new component. Acceptance: navigating to `/sessions` shows a visible per-workspace `+ New Session` action; clicking it opens a modal with that workspace's context; submitting creates a session and lands on `/sessions/:id`; the `workspace.tsx` `+ New Session` button still works; tsc + frontend lint clean.",
+      "verification": "cd web && bun run test && cd web && bun run lint && cd web && bun run typecheck",
+      "state": "passing",
+      "dependencies": [
+        "feat-020"
+      ],
+      "evidence": "./init.sh all 3 layers pass: 611 Rust tests + 88 frontend tests (5 new) all green, clippy/fmt/prettier/ESLint clean. New page test web/src/app/__tests__/sessions.test.tsx (5 cases) covers: no-workspaces empty state, per-workspace + New Session button visible when workspace has zero sessions, session rows + button coexist, click button opens the NewSessionModal, submit form calls api.sessions.create with the right payload and navigates to /sessions/:id. New component web/src/components/new-session-modal.tsx owns the form + useProviders + useSpecialists (specialist is now a dropdown, was free text) + useCreateSession mutation + inline role=alert error. workspace.tsx refactored to use the new component (page shrank 344 → 220 lines). docs/user/sessions.md updated to say 'next to the workspace name' and to describe the specialist as a dropdown. Implementation note: the spec said 'render the modal once per WorkspaceSessions block' but the implementation uses one shared modal at page level (matches boards/codebases precedent, avoids N mutation instances, TanStack Query dedupes the providers/specialists queries)."
     }
   ]
 }

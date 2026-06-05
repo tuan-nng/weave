@@ -1,53 +1,23 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { useCreateSession, useWorkspaceSessions, useWorkspaces } from "../../hooks/use-workspaces";
-import { useProviders } from "../../hooks/use-providers";
+import { useWorkspaceSessions, useWorkspaces } from "../../hooks/use-workspaces";
 import { ROUTES } from "../../lib/routes";
-import { Modal } from "../../components/modal";
-import { ErrorBanner } from "../../components/error-banner";
+import { NewSessionModal } from "../../components/new-session-modal";
 import { Spinner } from "../../components/spinner";
 import { StatusBadge } from "../../components/status-badge";
-import type { CreateSessionRequest } from "../../lib/types";
 
 export default function WorkspacePage() {
   const { id: workspaceId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: workspacesResp } = useWorkspaces();
   const { data: sessionsResp, isLoading, error } = useWorkspaceSessions(workspaceId!);
-  const { data: providers } = useProviders();
 
   const workspaces = workspacesResp?.data;
   const sessions = sessionsResp?.data;
-  const createSession = useCreateSession(workspaceId!);
 
   const [showNewSession, setShowNewSession] = useState(false);
-  const [bannerError, setBannerError] = useState<string | null>(null);
-  const [form, setForm] = useState<CreateSessionRequest>({
-    provider_id: "",
-    specialist_id: undefined,
-    model: undefined,
-  });
 
   const workspace = workspaces?.find((w) => w.id === workspaceId);
-
-  const handleCreateSession = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.provider_id) {
-      setBannerError("Provider is required");
-      return;
-    }
-
-    createSession.mutate(form, {
-      onSuccess: (session) => {
-        setShowNewSession(false);
-        setForm({ provider_id: "", specialist_id: undefined, model: undefined });
-        navigate(ROUTES.session(session.id));
-      },
-      onError: (err) => {
-        setBannerError(err instanceof Error ? err.message : "Failed to create session");
-      },
-    });
-  };
 
   if (isLoading) return <Spinner />;
 
@@ -57,8 +27,6 @@ export default function WorkspacePage() {
 
   return (
     <div className="max-w-6xl mx-auto px-8 py-8 lg:px-12 lg:py-10">
-      {bannerError && <ErrorBanner message={bannerError} onDismiss={() => setBannerError(null)} />}
-
       {/* Back navigation */}
       <Link
         to={ROUTES.home}
@@ -242,103 +210,11 @@ export default function WorkspacePage() {
       )}
 
       {/* New Session modal */}
-      <Modal open={showNewSession} onClose={() => setShowNewSession(false)}>
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="text-lg font-semibold text-slate-900">New Session</h3>
-          <button
-            onClick={() => setShowNewSession(false)}
-            className="text-slate-400 hover:text-slate-600 transition-colors"
-          >
-            <svg
-              className="w-5 h-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <form onSubmit={handleCreateSession} className="space-y-4">
-          {/* Provider */}
-          <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-              Provider <span className="text-brand-red-500">*</span>
-            </label>
-            <select
-              value={form.provider_id}
-              onChange={(e) => setForm((f) => ({ ...f, provider_id: e.target.value }))}
-              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-              required
-            >
-              <option value="">Select provider...</option>
-              {providers?.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Specialist */}
-          <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-              Specialist
-            </label>
-            <input
-              type="text"
-              value={form.specialist_id ?? ""}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  specialist_id: e.target.value || undefined,
-                }))
-              }
-              placeholder="Leave empty for none"
-              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-            />
-          </div>
-
-          {/* Model */}
-          <div>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-              Model
-            </label>
-            <input
-              type="text"
-              value={form.model ?? ""}
-              onChange={(e) =>
-                setForm((f) => ({
-                  ...f,
-                  model: e.target.value || undefined,
-                }))
-              }
-              placeholder="Leave empty for provider default"
-              className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-            />
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => setShowNewSession(false)}
-              className="h-10 px-4 text-sm font-medium text-slate-700 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 transition-all duration-150"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={createSession.isPending}
-              className="h-10 px-4 text-sm font-medium text-white bg-brand-blue-500 rounded-xl hover:bg-brand-blue-600 transition-all duration-150 disabled:opacity-50"
-            >
-              Create Session
-            </button>
-          </div>
-        </form>
-      </Modal>
+      <NewSessionModal
+        workspaceId={showNewSession ? workspaceId! : null}
+        onClose={() => setShowNewSession(false)}
+        onCreated={(session) => navigate(ROUTES.session(session.id))}
+      />
     </div>
   );
 }

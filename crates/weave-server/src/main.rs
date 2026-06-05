@@ -183,10 +183,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     if let Some(c) = drain_cap {
         info!(cap_secs = c.as_secs(), "Drain cap active");
     }
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal_with_cap(
-        shutdown_token.clone(),
-        drain_cap,
-    ));
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal_with_cap(shutdown_token.clone(), drain_cap));
 
     server.await?;
     info!("HTTP server returned, awaiting cleanup task");
@@ -417,12 +415,9 @@ mod tests {
         let child = token.child_token();
         let cap = Duration::from_millis(50);
 
-        timeout(
-            cap * 2,
-            shutdown_signal_with_cap(token.clone(), Some(cap)),
-        )
-        .await
-        .expect("shutdown_signal_with_cap should return within 2x cap");
+        timeout(cap * 2, shutdown_signal_with_cap(token.clone(), Some(cap)))
+            .await
+            .expect("shutdown_signal_with_cap should return within 2x cap");
         assert!(child.is_cancelled(), "token should be fired on cap");
     }
 }

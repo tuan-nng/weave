@@ -8,11 +8,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-04
-- **Latest commit:** 026ac45 (feat-034 graceful shutdown)
-- **Active feature:** none — feat-037 (native Anthropic tool-execution loop) is now `passing`; multi-runtime foundation phase-6 prerequisite complete; phase-7 (feat-038..042) is now unblocked
+- **Last updated:** 2026-06-05
+- **Latest commit:** feat-061 (+ New Session button on /sessions)
+- **Active feature:** none
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 611 Rust tests + 83 frontend tests pass
+- **Test status:** green — 611 Rust tests + 88 frontend tests pass (5 new)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
 - **Uncommitted:** feat-037 implementation. New `StopReason::LoopLimit { iterations }` variant + `is_error` field on `ContentBlock::ToolResult`. New `agent_loop` async fn in `service/sessions.rs` driving the model ↔ tool-execution loop (MAX_TOOL_ITERATIONS=8, TOOL_EXECUTION_TIMEOUT=30s). New `ToolOutcome` enum handling unknown tool / validation failure / tool error / cancel-mid-loop / loop-cap. New `execute_tool_call` free fn with JSON Schema validation (Draft7) and per-tool timeout. New `sanitize_tool_input` helper trimming string leaves. `TraceCollector` made `Clone`. `EventConverter` now defers `ToolUseStart` emission until `ContentBlockStop` so streamed `input_json_delta` is assembled into a `serde_json::Value` before the tool is invoked. `ContentBlock::ToolResult` carries `is_error` to the wire. A2A `map_sse_to_a2a` maps `LoopLimit` → `TaskStatus::Failed`. `build_message_metadata` includes `tool_calls` summary in metadata JSON whenever a tool was called. 7 new spec tests + `ScriptedTool` + `ScriptedAgent` + 2 helpers.
 
@@ -55,10 +55,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - [x] **feat-034**: Graceful shutdown — SIGTERM/SIGINT/drain-cap race, parent CancellationToken in AppState, ActiveSessions::cancel_all, SseWireEvent::Shutdown + SseManager::broadcast_shutdown, Db::checkpoint (TRUNCATE), service::startup::reap_orphans (transactional mark-as-error), spawn cleanup task, run() extracted from main(). 12 new tests.
 - [x] **feat-036**: Session chat re-implementation (message_persisted SSE, useReducer, id-based handoff)
 - [x] **feat-037**: Native Anthropic tool-execution loop (agent_loop, ToolOutcome, JSON Schema validation, sanitize_tool_input, EventConverter deferred-emit, LoopLimit stop_reason). 7 spec tests cover basic happy path, unknown tool, validation error, exec error, loop limit, cancel mid-loop, and no-tool passthrough.
+- [x] **feat-061**: `+ New Session` button on `web/src/app/pages/sessions.tsx`. Extracted the inline New Session modal from `workspace.tsx` into `web/src/components/new-session-modal.tsx` (Provider select + Specialist dropdown via `useSpecialists` + Model input + inline `role="alert"` error, contract `{ workspaceId: string | null, onClose, onCreated? }` matching `CreateBoardModal` precedent). Refactored `workspace.tsx` to use the new component (page shrank 344 → 220 lines, ~124 net lines removed). Added a per-workspace `+ New Session in {name}` button to `sessions.tsx` (slate-secondary style matching boards/codebases) that opens the shared modal pre-bound to that workspace. Restructured `WorkspaceSessions` so a workspace with zero sessions still shows the heading + button (per the user's "show heading+button on empty" requirement). Updated `docs/user/sessions.md` to say "next to the workspace name" (placement) and to describe the specialist as a dropdown. 5 new page tests in `__tests__/sessions.test.tsx`. **Spec deviation**: the spec said "render the modal once per `WorkspaceSessions` block"; the implementation uses one shared modal at page level (matches boards/codebases precedent, TanStack Query dedupes the providers/specialists queries, the page-level modal control state is simpler).
 
 ## In Progress
 
-(none — all features in phases 1-5 are passing)
+(none — all features in phases 1-5 + phase-6 + feat-061 are passing)
 
 ## Blocked
 
@@ -169,6 +170,15 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - Key commitments baked into the breakdown: `TurnContext` extends the `CodingAgent` trait (not `MessageRequest`); `cli_resume_id` lives inside `runtime_metadata_json` (generic per-runtime column, not CLI-specific); `attended` mode is rejected at session creation until Phase 11; adapter conformance suite (feat-057) is a hard gate for Codex/OpenCode.
 - Detailed per-feature task descriptions (engineering handoff format) live at `docs/road-map/multi-runtime-tasks.md` (created in this session).
 - `feature_list.json` validated: 11 phases, 60 features, all phase refs resolve, all dependency targets exist, states preserved. JSON load test passed.
+
+### 2026-06-05 — UI validation session (`docs/user/sessions.md` walkthrough)
+- Discovered runtime bug: `SHUTDOWN_DRAIN_CAP = 30s` (feat-034) always fired in dev (no TTY), so `just dev` restarted the server every 30s. **Fixed in `84a5621`**: cap is now opt-in via `WEAVE_SHUTDOWN_DRAIN_CAP_SECS` env var (unset = no cap = new dev default). `shutdown_signal_with_cap` takes `Option<Duration>` and skips the cap branch when `None`. 611 tests still pass.
+- Walked `docs/user/sessions.md` end-to-end via agent-browser at `http://localhost:5173/`. Found one real doc/UI gap: **"+ New Session" button missing on `web/src/app/pages/sessions.tsx`** — the doc says it's in the page header; the page only renders a heading and per-workspace session lists. Create entry point exists only on `workspace.tsx`. Logged as `feat-061` in `feature_list.json` (phase-3, deps: feat-020) for pickup via /feature-dev. Other doc claims verified ✓.
+- No regressions observed. Decision fragmentation visible in Journey sidebar is historical (sessions dated 6/1 predating the 6/2 feat-022 coalesce fix); no post-fix data to test against.
+
+### 2026-06-05 — feat-061 (+ New Session button on /sessions)
+- Implemented via /feature-dev workflow. Extracted `web/src/components/new-session-modal.tsx` from the inline modal in `workspace.tsx`; refactored `workspace.tsx` to use it (page shrank 344 → 220 lines, removed `useProviders`/`useCreateSession`/`Modal`/`ErrorBanner` imports and ~100 lines of form/modal/state). Added per-workspace `+ New Session in {name}` button to `sessions.tsx`; restructured `WorkspaceSessions` so a workspace with zero sessions still shows the heading + button (a deliberate divergence from boards/codebases which still hide on empty — logged as a follow-up). Specialist input upgraded from free text to `<select>` populated by `useSpecialists()`. Updated `docs/user/sessions.md:30-31, 34-36` to match. 5 new page tests in `__tests__/sessions.test.tsx` cover: no-workspaces empty state, per-workspace button visible on zero sessions, session rows + button coexist, click button opens modal, submit creates session and navigates to `/sessions/:id`. `./init.sh` all 3 layers green. Simplify pass extracted `FIELD_CLASS`/`LABEL_CLASS` constants and removed a redundant `setCreateWorkspaceId(null)` (modal already calls `onClose()` first). 611 Rust + 88 frontend tests pass.
+- Follow-ups logged (out of scope for this PR): the per-workspace `+ New {entity} in {name}` button is now triplicated across sessions/boards/codebases (extract `<PerWorkspaceCreateButton>`); the X close-icon SVG is now in 7 places (extract `<CloseButton>` or `<ModalHeader>`); the form input/label/button class strings are duplicated 13+ times across all forms (extract `web/src/lib/form-classes.ts`); the test-render QueryClient+MemoryRouter boilerplate is the 5th copy (extract `web/src/__tests__/test-render.tsx`); boards/codebases still hide the per-workspace section when empty (the new sessions.tsx pattern should be ported — extract `<WorkspaceListSection>` to enforce the invariant once); `workspace.tsx` page has no test (pre-existing coverage gap).
 
 ### 2026-06-04 — Doc reorganization into `docs/road-map/`
 - Moved `docs/PLAN.md` and `docs/multi-runtime-strategy.md` into `docs/road-map/`. PLAN moved via `git mv` (rename preserved in history); strategy moved via plain `mv` (was untracked).
