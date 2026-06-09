@@ -8,14 +8,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09 (fix-068 — reap_orphans stops nuking multi-turn `ready` sessions on restart)
-- **Latest commit:** `bed99ea` fix: Journey sidebar shows tool_call events (fix-066)
+- **Last updated:** 2026-06-09 (fix-068 committed; fix-067 still in flight)
+- **Latest commit:** `1cd4ab7` fix: reap_orphans only reaps connecting sessions (preserves multi-turn ready)
 - **Active feature:** none
-- **In-flight (uncommitted):** fix-067 (Journey detail Decisions/Errors + tool-call correlation) and fix-068 (reap_orphans narrow filter + 18-session data recovery).
+- **In-flight (uncommitted):** fix-067 — Journey detail Decisions/Errors + historical tool-call trace correlation.
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 623 Rust tests + 109 frontend tests pass (+1 Rust regression test for `ready` surviving `reap_orphans` across repeated restarts).
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** fix-067 (5 files in `web/` + `crates/weave-server/src/service/sessions.rs`) and fix-068 (1 file: `crates/weave-server/src/service/startup.rs`).
+- **Uncommitted:** fix-067 (5 files: `crates/weave-server/src/service/sessions.rs`, `web/src/app/pages/session.tsx`, `web/src/hooks/use-session.ts`, `web/src/hooks/__tests__/use-session.test.ts`, and new `web/src/app/__tests__/session-traces.test.tsx`).
 
 ### Data cleanup 2026-06-09 (out-of-band admin action, not a feature)
 
@@ -33,7 +33,7 @@ User-requested one-off cleanup of the dev SQLite database. Direct `sqlite3` writ
 2. **No code or schema changes.** This was a data-only cleanup — `git status` is still clean, `feature_list.json` is unchanged, no test or lint regressions to chase.
 3. **If the user wants a recurring reset, ask first before automating.** A `just db:reset` recipe (drop + re-run migrations + re-seed default workspace) would be a feature, not an admin action — it belongs in `feature_list.json` with a verification command. Do not just add it inline.
 
-### fix-068 — `reap_orphans` no longer nukes multi-turn `ready` sessions on restart (uncommitted; this session)
+### fix-068 — `reap_orphans` no longer nukes multi-turn `ready` sessions on restart (committed `1cd4ab7`; this session)
 
 User bug report: at `http://localhost:5173/sessions`, **every** session in the default workspace was labeled `Error`. Clicked one (e.g. `c122fbc1-...` — the same one we validated at the top of this session) and it had a clean successful 4-message history (user "hello" → assistant greeting, user "what is this repo" → assistant with 2 tool calls). Nothing about the data said "error" — yet the DB said `status = "error"` and the badge said `Error`.
 
@@ -72,6 +72,24 @@ User bug report: at `http://localhost:5173/sessions`, **every** session in the d
 
 - The renamed test still uses `insert_session` which goes through `SessionStore::create` (which seeds `connecting`) and then `update_status` to walk to the target state. That helper is fine — the renamed test now asserts the correct post-condition. No need to add a separate test for `connecting` since it's already covered by the renamed test.
 - No code change to `SessionStore::update_status`, `run_prompt_task`, or the state machine. The bug was localized to the single function `reap_orphans`.
+
+## Next Steps for the Next Session
+
+1. **Decide on fix-067 commit.** fix-067 is the Journey detail Decisions/Errors + historical tool-call trace work left over from the previous session. 5 files in the working tree:
+   - `crates/weave-server/src/service/sessions.rs` (+287 lines: `emit_error_trace` + `provider_error_trace_message` + 3 new error-path emissions in `agent_loop` + 3 new regression tests)
+   - `web/src/hooks/use-session.ts` (+39/-18: extracted `invalidateCommittedTraceQueries` so `message_persisted` invalidates `journey` + `fileChanges` + `toolCalls` together)
+   - `web/src/hooks/__tests__/use-session.test.ts` (+30/-? new assertion: invalidation covers all 3 sidebar groups)
+   - `web/src/app/pages/session.tsx` (+92/-? `correlateTraces` and `parseTraceToolCallPayload` exported + tested; historical `tool_call` traces attach to the correct assistant turn)
+   - `web/src/app/__tests__/session-traces.test.tsx` (new, 7 regression tests for trace-to-message correlation, multi-turn boundary, non-tool filtering, current/legacy payload parsing, corrupt `data_json` fallback)
+   - Suggested commit message: `fix: Journey detail shows error traces and historical tools` (matches the prior PROGRESS.md note). Re-run `./init.sh` after staging.
+
+2. **Browser-validate fix-067 on a real error session.** The current dev DB has no genuine error sessions left (all 18 are now `ready`). To fully exercise the new `emit_error_trace` path end-to-end, either wait for a real provider error during normal use, or trigger one (e.g. temporarily set an invalid `x-api-key` on the provider and send a prompt — observe that the Journey "Decisions & Errors" section now shows the sanitized `Provider stream interrupted` row).
+
+3. **Clean up the data-recovery backup file.** `weave.db.bak.20260609-160418` (790,528 bytes, the pre-`BEGIN IMMEDIATE` byte-for-byte copy from the 18-session recovery) is sitting untracked at the repo root. Confirm it can be deleted (or move to a more permanent location like `~/backups/`), then `rm weave.db.bak.20260609-160418`. The earlier `weave.db.bak.20260609-110204` (the 2026-06-09 xiaomi cleanup) is also still untracked and may be a candidate for the same cleanup.
+
+4. **Restart the dev server cleanly.** The new weave-server is running (pid 48273 area, uptime ~3 min at session end), but `cargo watch` (pids 19633/19634) is still watching the repo. After fix-067 is committed, the cargo watch will rebuild on the next source change. If you want a clean restart from scratch, kill the cargo watch shim and the server, then `just dev` (or `just dev-web` for the Vite side).
+
+5. **Out-of-scope items noticed (logged in fix-068 entry, not fixed):** none new this session. The pre-existing `type_complexity` clippy warning in `service/sessions.rs:1436` (test helper) is unchanged — it doesn't fail `just lint` because lint runs without `--all-targets`.
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
