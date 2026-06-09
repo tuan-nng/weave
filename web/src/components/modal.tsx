@@ -4,14 +4,29 @@ import type { ReactNode } from "react";
 interface ModalProps {
   open: boolean;
   onClose: () => void;
+  /**
+   * If false, Escape does NOT close this modal. Used to implement
+   * nested modals: the outer modal passes `closeOnEscape={false}` while
+   * the inner one is open, so Escape only closes the inner one (the
+   * inner modal's own listener fires second but the outer one's
+   * `useEffect` already returned early on the same event).
+   * Default: true.
+   */
+  closeOnEscape?: boolean;
+  /**
+   * Stack order for nested modals. Default: 50. Pass a higher value
+   * (e.g. 60) for a modal rendered inside another so it visually
+   * sits on top of the outer's backdrop.
+   */
+  zIndex?: number;
   children: ReactNode;
 }
 
-export function Modal({ open, onClose, children }: ModalProps) {
+export function Modal({ open, onClose, closeOnEscape = true, zIndex = 50, children }: ModalProps) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !closeOnEscape) return;
 
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -19,14 +34,15 @@ export function Modal({ open, onClose, children }: ModalProps) {
 
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [open, onClose]);
+  }, [open, onClose, closeOnEscape]);
 
   if (!open) return null;
 
   return (
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      style={{ zIndex }}
+      className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={(e) => {
         if (e.target === backdropRef.current) onClose();
       }}

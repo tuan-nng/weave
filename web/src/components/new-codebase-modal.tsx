@@ -20,6 +20,13 @@ interface NewCodebaseModalProps {
   /** null = closed; non-null = open and bound to this workspace. */
   workspaceId: string | null;
   onClose: () => void;
+  /**
+   * Stack order. Default: 50. When the NewCodebaseModal is rendered
+   * INSIDE another modal (e.g. NewSessionModal) the caller should pass
+   * a higher value (e.g. 60) so it visually sits on top of the
+   * outer's backdrop.
+   */
+  zIndex?: number;
   /** Fires AFTER the modal has closed on a successful create. */
   onCreated?: (codebase: Codebase) => void;
 }
@@ -29,7 +36,12 @@ const FIELD_CLASS =
 const LABEL_CLASS =
   "block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5";
 
-export function NewCodebaseModal({ workspaceId, onClose, onCreated }: NewCodebaseModalProps) {
+export function NewCodebaseModal({
+  workspaceId,
+  onClose,
+  zIndex,
+  onCreated,
+}: NewCodebaseModalProps) {
   // useCreateCodebase is bound to a single workspace. We always call the
   // hook (rules of hooks) but pass "" while closed — the mutation is
   // only fired from inside handleSubmit, which re-checks workspaceId,
@@ -79,7 +91,7 @@ export function NewCodebaseModal({ workspaceId, onClose, onCreated }: NewCodebas
   }
 
   return (
-    <Modal open={workspaceId !== null} onClose={handleClose}>
+    <Modal open={workspaceId !== null} onClose={handleClose} zIndex={zIndex}>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-lg font-semibold text-slate-900">New Codebase</h3>

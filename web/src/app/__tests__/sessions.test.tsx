@@ -37,6 +37,7 @@ vi.mock("../../lib/api", () => ({
     },
     codebases: {
       list: vi.fn(),
+      create: vi.fn(),
     },
   },
 }));
@@ -137,7 +138,9 @@ beforeEach(() => {
   mockApi.specialists.list.mockResolvedValue(mockSpecialists);
   // Default: no codebases registered. Each test that exercises the
   // codebase picker can override with `mockApi.codebases.list.mockResolvedValueOnce(...)`.
-  mockApi.codebases.list.mockResolvedValue({ data: [] });
+  // `api.codebases.list` returns Codebase[] (apiFetch unwraps the envelope),
+  // so the mock returns the array directly.
+  mockApi.codebases.list.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -244,8 +247,8 @@ describe("sessions list", () => {
     });
   });
 
-  it("the codebase picker shows a disabled empty state with a /codebases link when no codebases are registered", async () => {
-    // Default beforeEach: mockApi.codebases.list returns { data: [] }
+  it("the codebase picker shows a disabled empty state with a Register-a-codebase button when no codebases are registered", async () => {
+    // Default beforeEach: mockApi.codebases.list returns []
     renderList();
     const button = await screen.findByRole("button", {
       name: /\+ New Session in Backend/i,
@@ -258,8 +261,62 @@ describe("sessions list", () => {
     )) as HTMLSelectElement;
     expect(disabledSelect).toBeInTheDocument();
     expect(disabledSelect).toBeDisabled();
-    // The hint copy points at /codebases.
-    expect(screen.getByText(/register a codebase/i)).toBeInTheDocument();
+    // The hint copy exposes a button (not a link) that opens a nested
+    // NewCodebaseModal so the user can register a codebase without
+    // leaving the New Session flow.
+    const registerButton = screen.getByRole("button", { name: /register a codebase/i });
+    expect(registerButton).toBeInTheDocument();
+  });
+
+  it("clicking Register-a-codebase opens a nested NewCodebaseModal; submitting it auto-selects the new codebase in the dropdown", async () => {
+    // First list call (when the modal opens) returns empty; second call
+    // (after the create mutation invalidates) returns the new codebase.
+    const newCodebase = {
+      id: "cb-new",
+      workspace_id: "w2",
+      path: "/home/u/repo-new",
+      branch: null,
+      label: "Repo New",
+      created_at: "2026-06-09T00:00:00Z",
+    };
+    mockApi.codebases.list.mockResolvedValueOnce([]).mockResolvedValueOnce([newCodebase]);
+    mockApi.codebases.create.mockResolvedValueOnce(newCodebase);
+
+    renderList();
+    const openButton = await screen.findByRole("button", {
+      name: /\+ New Session in Backend/i,
+    });
+    fireEvent.click(openButton);
+
+    // Click "Register a codebase" → the nested NewCodebaseModal opens.
+    const registerButton = await screen.findByRole("button", { name: /register a codebase/i });
+    fireEvent.click(registerButton);
+
+    // The NewCodebaseModal is now open (asserts via the modal heading).
+    expect(await screen.findByRole("heading", { name: "New Codebase" })).toBeInTheDocument();
+    // The New Session modal is still open behind it.
+    expect(screen.getByRole("heading", { name: "New Session" })).toBeInTheDocument();
+
+    // Fill the path and submit.
+    const pathInput = screen.getByPlaceholderText("/Users/me/projects/my-app") as HTMLInputElement;
+    fireEvent.change(pathInput, { target: { value: newCodebase.path } });
+    const createCodebaseButton = screen.getByRole("button", { name: /create codebase/i });
+    fireEvent.click(createCodebaseButton);
+
+    // The mutation fires, the nested modal closes, the codebase list
+    // refetches, the dropdown updates, and the new codebase is auto-selected.
+    await waitFor(() => {
+      expect(mockApi.codebases.create).toHaveBeenCalledWith("w2", {
+        path: newCodebase.path,
+      });
+    });
+    // The NewCodebaseModal is gone; the NewSessionModal is still open.
+    expect(screen.queryByRole("heading", { name: "New Codebase" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "New Session" })).toBeInTheDocument();
+    // The dropdown is now populated and shows the new codebase as selected.
+    const codebaseSelect = (await screen.findByDisplayValue("Repo New")) as HTMLSelectElement;
+    expect(codebaseSelect).toBeInTheDocument();
+    expect(codebaseSelect.value).toBe("cb-new");
   });
 
   it("submitting with a selected codebase sends codebase_id in the create payload", async () => {
@@ -281,7 +338,7 @@ describe("sessions list", () => {
         created_at: "2026-06-01T00:00:00Z",
       },
     ];
-    mockApi.codebases.list.mockResolvedValueOnce({ data: mockCodebases });
+    mockApi.codebases.list.mockResolvedValueOnce(mockCodebases);
 
     const newSession = {
       id: "new-session-id-2",

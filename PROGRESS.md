@@ -11,11 +11,11 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Last updated:** 2026-06-09
 - **Latest commit:** feat-062 (attach codebase to session as FS sandbox)
 - **Active feature:** none
-- **In-flight (uncommitted):** feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. See note below.
+- **In-flight (uncommitted):** (a) feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. (b) fix: New Session modal — inline codebase creation (this session). Ready to commit. See notes below.
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 616 Rust tests + 98 frontend tests pass (8 new for feat-063: 2 for /codebases, 6 for /boards)
+- **Test status:** green — 616 Rust tests + 99 frontend tests pass (9 new since last entry: 8 for feat-063 + 1 for the New Session inline-create fix; 1 existing test flipped from link→button expectation)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** `web/src/components/new-codebase-modal.tsx` (new), `web/src/components/new-board-modal.tsx` (new), `web/src/app/pages/codebases.tsx` (rewritten), `web/src/app/pages/boards.tsx` (rewritten), `web/src/hooks/use-board.ts` (added `useCreateBoard`), `web/src/app/__tests__/codebases.test.tsx` (updated), `web/src/app/__tests__/boards.test.tsx` (new).
+- **Uncommitted:** feat-063 (7 files: 2 new modals, 2 rewritten pages, 1 hook addition, 2 test files) + the New Session inline-create fix (4 files: `web/src/components/modal.tsx` +2 props, `web/src/components/new-codebase-modal.tsx` 1 prop, `web/src/components/new-session-modal.tsx` nested-modal + bug fix, `web/src/app/__tests__/sessions.test.tsx` 1 test updated + 1 test added + 1 mock format fixed).
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
@@ -76,6 +76,38 @@ Drove agent-browser through every workspace-related surface (Home, `/workspaces/
    - Settings page: "Type" field is a non-editable-looking "Anthropic" label (no select for multi-type), Providers table ACTIONS column is empty (no edit/delete/test).
    - Sidebar has no workspace switcher, no global search, no notifications.
 4. **Pre-existing de-dup follow-ups (from feat-061, still pending):** the per-workspace `+ New {entity} in {name}` button is now triplicated across sessions/boards/codebases (extract `<PerWorkspaceCreateButton>`); the X close-icon SVG in the modal header is in 7 places (extract `<CloseButton>` or `<ModalHeader>`); the form input/label class strings are duplicated 13+ times (extract `web/src/lib/form-classes.ts`); the test-render QueryClient+MemoryRouter boilerplate is now in 5 places (extract `web/src/__tests__/test-render.tsx`).
+
+### fix: New Session modal — inline codebase creation (uncommitted; this session)
+
+User bug report: opening the New Session modal in a workspace with no codebases shows a disabled dropdown and a `<Link to={ROUTES.codebases}>` saying "Register a codebase" — the user has to navigate away to register one, losing the session-creation flow. Discovered via agent-browser (PROGRESS.md session: opened `/sessions`, clicked `+ New Session in default`, snapshot showed the disabled dropdown + navigation link).
+
+**Three changes (4 files):**
+
+1. `web/src/components/modal.tsx` — added two optional props: `closeOnEscape?: boolean` (default `true`, new use: ignore Escape when a nested modal is open) and `zIndex?: number` (default `50`, replaces the hard-coded `z-50` class via inline `style`). Both are backward-compatible; the 4 existing Modal callers (NewSessionModal, NewCodebaseModal, NewBoardModal, AddCardModal, AddColumnModal, settings) are unaffected.
+
+2. `web/src/components/new-codebase-modal.tsx` — accepts the new `zIndex` prop and forwards it to its internal `<Modal>`, so the NewSessionModal can pass `zIndex={60}` to stack the inner modal above the outer's backdrop.
+
+3. `web/src/components/new-session-modal.tsx`:
+   - The "Register a codebase" `<Link to={ROUTES.codebases}>` becomes a `<button onClick={() => setShowNewCodebase(true)}>` that opens a nested `<NewCodebaseModal>`.
+   - The outer `<Modal>` gets `closeOnEscape={!showNewCodebase}` so Escape closes the inner first.
+   - On successful codebase create, `onCreated={(cb) => setCodebaseId(cb.id)}` auto-selects the new codebase in the dropdown.
+   - **Bug fix surfaced during verification:** the consumer was doing `const codebases = codebasesResp?.data ?? [];` — but `api.codebases.list` returns `Codebase[]` directly (the `apiFetch` helper unwraps the `{data: T}` envelope), so `codebasesResp?.data` is always `undefined` in production. The dropdown never populated after a successful create. Changed to `const codebases = codebasesResp ?? [];`. The unit tests passed against the wrong mock format (`{ data: mockCodebases }`) and didn't catch this — the mock was the only thing that matched the buggy consumer. Tests now mock the unwrapped array.
+
+4. `web/src/app/__tests__/sessions.test.tsx`:
+   - Flipped the existing `codebases list > the codebase picker shows a disabled empty state with a /codebases link` test → button (same regex matches the new copy; assertion now checks for a button, not a link).
+   - Added a new test: click "Register a codebase" → nested NewCodebaseModal opens (asserts both "New Codebase" and "New Session" headings are present) → fill path + submit → mutation fires with the right payload → inner modal closes → outer stays open → dropdown is populated and the new codebase is the selected value.
+   - Updated all `mockApi.codebases.list.mockResolvedValue*` calls to return the unwrapped array (matches production).
+
+**Verification:**
+- `bun run test` → 99/99 frontend tests pass (was 98; +1 new test, 0 regressions).
+- `bun run lint` → clean. `bun run format:check` → clean.
+- agent-browser end-to-end: opened `/sessions`, clicked `+ New Session in fresh-test` (a workspace with 0 codebases), modal opened with the empty-state branch + Register button, clicked Register → nested NewCodebaseModal opened, filled `/tmp` + Create Codebase, inner modal closed, outer stayed open, CODEBASE dropdown now shows `/tmp` as the selected value. Pre-fix this exact flow ended with the dropdown still showing "No codebases registered" (the data-shape bug from #3 above).
+- Pre-existing typecheck error in `node_modules/@types/estree` (ArrowFunctionExpression body type mismatch) is unrelated to this fix — confirmed by stashing the changes and re-running.
+
+**Blocker / Next steps for the next session:**
+1. **Commit the 4 in-tree files** as a single fix: `fix: New Session modal — inline codebase creation`. Body should reference the feat-062 / feat-063 lineage and call out the 1 new test, 1 flipped test, and the 3 mocks re-formatted. Mention the Modal prop additions as the foundation for future nested-modal flows.
+2. **The DELETE codebase endpoint is not implemented** (verified via `curl -X DELETE → 405 Method Not Allowed`). Discovered while trying to reset the default workspace for the verification run; not in scope for this fix but worth a follow-up. Until it lands, the only way to remove a codebase is to wipe the DB.
+3. **Pre-existing de-dup follow-ups** from feat-061 still apply (now with one more occurrence of the per-workspace button and modal form-class strings).
 
 ## Completed Since Project Start
 

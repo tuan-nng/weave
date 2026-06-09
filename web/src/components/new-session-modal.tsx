@@ -13,13 +13,12 @@
 // what to do (typically: navigate to the new session's detail page).
 
 import { useEffect, useState } from "react";
-import { Link } from "react-router";
 import { Modal } from "./modal";
+import { NewCodebaseModal } from "./new-codebase-modal";
 import { useCreateSession } from "../hooks/use-workspaces";
 import { useProviders } from "../hooks/use-providers";
 import { useSpecialists } from "../hooks/use-specialists";
 import { useCodebases } from "../hooks/use-codebase";
-import { ROUTES } from "../lib/routes";
 import type { CreateSessionRequest, Session } from "../lib/types";
 
 interface NewSessionModalProps {
@@ -43,8 +42,12 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
   // workspaceId is non-null). The "" fallback keeps the rules of
   // hooks happy while the modal is closed — the query is disabled
   // in that case (see use-codebase.ts).
+  //
+  // `api.codebases.list` returns Codebase[] directly (the apiFetch
+  // helper unwraps the {data: T} envelope), so the hook's `data`
+  // is the array — there is no nested `.data` to reach into.
   const { data: codebasesResp } = useCodebases(workspaceId ?? "");
-  const codebases = codebasesResp?.data ?? [];
+  const codebases = codebasesResp ?? [];
   // useCreateSession is bound to a single workspace. We always call the
   // hook (rules of hooks) but pass "" while closed — the mutation is
   // only fired from inside handleSubmit, which re-checks workspaceId,
@@ -56,6 +59,12 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
   const [codebaseId, setCodebaseId] = useState(""); // "" = no codebase
   const [model, setModel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Inline-create affordance: when a workspace has zero codebases, the
+  // "Register a codebase" link is replaced by a button that opens the
+  // NewCodebaseModal as a nested modal — the user can register a
+  // codebase without leaving the New Session flow. On success the new
+  // codebase is auto-selected in the dropdown.
+  const [showNewCodebase, setShowNewCodebase] = useState(false);
 
   // Reset form + error on every open transition (mount, or null→id, or
   // id1→id2). Does not fire on close (id→null).
@@ -100,7 +109,7 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
   }
 
   return (
-    <Modal open={workspaceId !== null} onClose={handleClose}>
+    <Modal open={workspaceId !== null} onClose={handleClose} closeOnEscape={!showNewCodebase}>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-lg font-semibold text-slate-900">New Session</h3>
@@ -183,9 +192,13 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
               </select>
               <p className="mt-1.5 text-[11px] text-slate-500">
                 No codebases in this workspace.{" "}
-                <Link to={ROUTES.codebases} className="text-brand-blue-600 hover:underline">
+                <button
+                  type="button"
+                  onClick={() => setShowNewCodebase(true)}
+                  className="text-brand-blue-600 hover:underline"
+                >
                   Register a codebase
-                </Link>{" "}
+                </button>{" "}
                 first, or continue without one.
               </p>
             </>
@@ -236,6 +249,23 @@ export function NewSessionModal({ workspaceId, onClose, onCreated }: NewSessionM
           </button>
         </div>
       </form>
+
+      {/* Nested NewCodebaseModal: opens on top of this modal so the user
+          can register a codebase without leaving the New Session flow.
+          `zIndex={60}` stacks it above this modal's z-50 backdrop; the
+          outer's `closeOnEscape={!showNewCodebase}` ensures Escape only
+          closes the inner modal first. The NewCodebaseModal's own
+          useCreateCodebase invalidation causes useCodebases (above) to
+          refetch, populating the dropdown with the new entry; the
+          onCreated callback then auto-selects it. */}
+      {workspaceId !== null && (
+        <NewCodebaseModal
+          workspaceId={showNewCodebase ? workspaceId : null}
+          onClose={() => setShowNewCodebase(false)}
+          zIndex={60}
+          onCreated={(cb) => setCodebaseId(cb.id)}
+        />
+      )}
     </Modal>
   );
 }
