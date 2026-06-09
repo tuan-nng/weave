@@ -8,14 +8,55 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09 (fix-068 committed; fix-067 still in flight)
-- **Latest commit:** `1cd4ab7` fix: reap_orphans only reaps connecting sessions (preserves multi-turn ready)
+- **Last updated:** 2026-06-09 (fix-069 committed; fix-067 + fix-068 both committed earlier today)
+- **Latest commit:** (this session — see `fix-069` entry below)
 - **Active feature:** none
-- **In-flight (uncommitted):** fix-067 — Journey detail Decisions/Errors + historical tool-call trace correlation.
+- **In-flight (uncommitted):** none
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 623 Rust tests + 109 frontend tests pass (+1 Rust regression test for `ready` surviving `reap_orphans` across repeated restarts).
+- **Test status:** green — 623 Rust tests + 113 frontend tests pass (+4 frontend regression tests for the SSE `error` listener guard in `makeSseListener`).
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** fix-067 (5 files: `crates/weave-server/src/service/sessions.rs`, `web/src/app/pages/session.tsx`, `web/src/hooks/use-session.ts`, `web/src/hooks/__tests__/use-session.test.ts`, and new `web/src/app/__tests__/session-traces.test.tsx`).
+- **Uncommitted:** none
+
+### fix-069 — `useSession` SSE `"error"` listener no longer throws on built-in connection errors (this session)
+
+User bug report: opening `http://localhost:5173/sessions/6f46ff14-2f1f-4a81-93e8-40d3c27742d7` filled the browser console with `Failed to parse SSE event: error undefined {stack: "SyntaxError: \"undefined\" is not valid JSON"}` and the chat felt stuck. The session was `status: "ready"` and `/api/sessions/.../history` returned 25 messages with successful assistant turns, so the chat was actually functional — the noise was the only visible symptom.
+
+**Root cause:** `web/src/hooks/use-session.ts` registered a per-type SSE listener via `es.addEventListener(type, ...)` for each name in `["text_delta", "tool_use_start", ..., "error", "connected", "gap"]`. Per the EventSource spec, the `"error"` name is special: EventSource's **built-in** `error` event fires for connection-level problems (network drop, server close) — with `e.data === undefined` — AND the same name is also delivered for server-sent `event: error` SSE messages (e.g. `SseWireEvent::Error` for "session not found" or mid-stream provider errors) which carry JSON. The previous handler unconditionally ran `JSON.parse(e.data)`, threw on the connection-level case, the throw was swallowed by the surrounding `try/catch`, and the reducer never saw the event. The auto-reconnect logic in `es.onerror` (which has no `data` to parse) still ran, so the chat survived, but every reconnect cycle produced one warning. With a flapping connection the warnings piled up.
+
+**Fix (1 file modified + 1 test file extended):**
+
+- `web/src/hooks/use-session.ts`:
+  - Extracted the listener body into a named, exported function `makeSseListener(type, handleEvent)`. The function adds one guard at the top: `if (type === "error" && e.data == null) return;`. The connection-level case is now a no-op — `es.onerror` continues to manage auto-reconnect and the existing reducer logic is untouched. The server-sent `event: error` case still flows through the normal JSON path and the reducer's `ERROR` case (line 416, unchanged).
+  - Inline call site in the SSE `useEffect` is now `es.addEventListener(type, makeSseListener(type, handleEvent))` — no behavior change, just delegation.
+  - JSDoc on `makeSseListener` documents the two cases and why the guard exists, so a future maintainer doesn't "simplify" it back to the bug.
+- `web/src/hooks/__tests__/use-session.test.ts`:
+  - 4 new regression tests under `describe("makeSseListener", ...)`:
+    1. `'error'` with `e.data === undefined` does not call `handleEvent` and does not log a warning (the bug).
+    2. `'error'` with server-sent JSON is forwarded to `handleEvent` (preserved correct path).
+    3. `'text_delta'` with server-sent JSON is forwarded to `handleEvent` (sanity check for non-error types).
+    4. `'text_delta'` with invalid JSON logs the warning and does not call `handleEvent` (existing try/catch behavior pinned).
+  - Test 1 was written first and confirmed to FAIL on the unfixed code: the assertion `expect(warn).not.toHaveBeenCalled()` fails with the exact warning `Array ["[useSession] Failed to parse SSE event:", "error", undefined, [SyntaxError: "undefined" is not valid JSON]]` — i.e. the test reproduces the user's console symptom.
+
+**Why the existing tests didn't catch it:** the previous test file only covered the reducer and `invalidateCommittedTraceQueries` (both pure functions). The SSE listener was inline in a `useEffect` and never had a unit test — the gap that let the bug ship.
+
+**Verification:**
+
+- `bun run test` (web) → 113/113 pass (was 109; +4 for `makeSseListener`).
+- `cargo test -p weave-server` → 623/623 (unchanged — Rust unchanged).
+- `just lint` → clippy clean, ESLint clean.
+- `just fmt` → Rust fmt + Prettier clean.
+- `./init.sh` → all 3 layers pass.
+- Live browser verification (agent-browser on `http://localhost:5173/sessions/6f46ff14-2f1f-4a81-93e8-40d3c27742d7`):
+  - Before fix: `agent-browser console` showed repeated `[warning] [useSession] Failed to parse SSE event: error undefined {stack: "SyntaxError..."}` on every (re)connect.
+  - After fix: console clean (only `[vite] connecting...` and the React DevTools tip). No `error`/`undefined`/`SyntaxError` lines.
+  - Sent a test prompt (`fix-069 SSE error handler test`); assistant responded normally and the message landed in `/api/sessions/.../history` (29 messages total, +1 user + +1 assistant after the sanity check + this test).
+  - One intermediate transient: HMR reloaded the page with a stale module half-state, throwing `ReferenceError: makeSseListener is not defined` until a full reload. A hard `agent-browser close` + `open` cleared it. Not present in the cold-boot build served by `init.sh` (port 19876 smoke test). Logged in case the dev-server HMR catches anyone in the same state.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- Same `type_complexity` clippy warning in `service/sessions.rs:1436` (test helper) as in fix-068 — not addressed here, not in the touched files.
+- No change to `feature_list.json` (this is a bug fix, not a feature).
+
 
 ### Data cleanup 2026-06-09 (out-of-band admin action, not a feature)
 

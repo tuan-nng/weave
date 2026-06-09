@@ -4,6 +4,7 @@ import { queryKeys } from "../../lib/query-keys";
 import {
   EMPTY_LIVE_BUFFER,
   invalidateCommittedTraceQueries,
+  makeSseListener,
   reducer,
   type Action,
 } from "../use-session";
@@ -357,5 +358,73 @@ describe("useSession reducer", () => {
       expect(s.stopReason).toBe("cancelled");
       expect(s.textChunks).toEqual(["partial"]); // partial preserved
     });
+  });
+});
+
+/**
+ * makeSseListener regression tests.
+ *
+ * The `"error"` listener is the one that the previous bug bit:
+ * EventSource's built-in `error` event fires for connection-level
+ * problems with `e.data === undefined` AND for server-sent
+ * `event: error` SSE messages with data. The listener must
+ * distinguish the two: connection errors get dropped (the
+ * `es.onerror` handler manages reconnect), server errors get
+ * JSON-parsed and forwarded to the reducer.
+ */
+describe("makeSseListener", () => {
+  test("'error' with no data (built-in connection error) does not call handleEvent", () => {
+    const handleEvent = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listener = makeSseListener("error", handleEvent);
+
+    listener({ data: undefined } as MessageEvent);
+
+    expect(handleEvent).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  test("'error' with server-sent JSON is forwarded to handleEvent", () => {
+    const handleEvent = vi.fn();
+    const listener = makeSseListener("error", handleEvent);
+
+    listener({
+      data: JSON.stringify({ type: "error", message: "session not found" }),
+    } as MessageEvent);
+
+    expect(handleEvent).toHaveBeenCalledWith("error", {
+      type: "error",
+      message: "session not found",
+    });
+  });
+
+  test("'text_delta' with server-sent JSON is forwarded to handleEvent", () => {
+    const handleEvent = vi.fn();
+    const listener = makeSseListener("text_delta", handleEvent);
+
+    listener({ data: JSON.stringify({ type: "text_delta", text: "hi" }) } as MessageEvent);
+
+    expect(handleEvent).toHaveBeenCalledWith("text_delta", {
+      type: "text_delta",
+      text: "hi",
+    });
+  });
+
+  test("'text_delta' with invalid JSON logs a warning and does not call handleEvent", () => {
+    const handleEvent = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const listener = makeSseListener("text_delta", handleEvent);
+
+    listener({ data: "not json{" } as MessageEvent);
+
+    expect(handleEvent).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[useSession] Failed to parse SSE event:",
+      "text_delta",
+      "not json{",
+      expect.any(Error),
+    );
+    warn.mockRestore();
   });
 });

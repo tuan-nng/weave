@@ -296,6 +296,38 @@ export function invalidateCommittedTraceQueries(qc: QueryClient, sessionId: stri
   });
 }
 
+/**
+ * @internal
+ * Exported for unit testing only. Builds the listener attached to
+ * `EventSource.addEventListener` for each named SSE event.
+ *
+ * The `"error"` listener is special: EventSource's built-in `error` event
+ * fires for BOTH connection-level problems (network drop, server close)
+ * — where `e.data` is undefined — AND server-sent `event: error` SSE
+ * messages (e.g. "session not found" or mid-stream provider errors) —
+ * which carry JSON. The two share the listener. We must distinguish
+ * them: connection errors have no payload to parse, and the
+ * `es.onerror` handler below manages auto-reconnect. The server-sent
+ * `event: error` flows through the normal JSON path and the reducer's
+ * ERROR case.
+ */
+export function makeSseListener(
+  type: string,
+  handleEvent: (type: string, data: unknown) => void,
+): (e: MessageEvent) => void {
+  return (e: MessageEvent) => {
+    if (type === "error" && e.data == null) {
+      return;
+    }
+    try {
+      const data = JSON.parse(e.data);
+      handleEvent(type, data);
+    } catch (err) {
+      console.warn("[useSession] Failed to parse SSE event:", type, e.data, err);
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // useSession hook
 // ---------------------------------------------------------------------------
@@ -453,14 +485,7 @@ export function useSession(sessionId: string): UseSessionResult {
     ];
 
     for (const type of eventTypes) {
-      es.addEventListener(type, (e: MessageEvent) => {
-        try {
-          const data = JSON.parse(e.data);
-          handleEvent(type, data);
-        } catch (err) {
-          console.warn("[useSession] Failed to parse SSE event:", type, e.data, err);
-        }
-      });
+      es.addEventListener(type, makeSseListener(type, handleEvent));
     }
 
     es.onerror = () => {
