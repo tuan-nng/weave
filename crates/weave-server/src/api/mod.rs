@@ -87,6 +87,10 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             "/api/sessions/{sid}/trace/files",
             get(traces::get_session_file_changes),
         )
+        .route(
+            "/api/sessions/{sid}/trace/tools",
+            get(traces::get_session_tool_calls),
+        )
         // Kanban routes
         .route(
             "/api/workspaces/{wid}/boards",

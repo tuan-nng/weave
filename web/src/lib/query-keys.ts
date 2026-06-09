@@ -37,6 +37,7 @@ export const queryKeys = {
     journey: (sessionId: string) => [...queryKeys.traces.all(), "journey", sessionId] as const,
     fileChanges: (sessionId: string) =>
       [...queryKeys.traces.all(), "fileChanges", sessionId] as const,
+    toolCalls: (sessionId: string) => [...queryKeys.traces.all(), "toolCalls", sessionId] as const,
   },
 
   // Kanban boards (feat-026). Boards are workspace-scoped; the detail key

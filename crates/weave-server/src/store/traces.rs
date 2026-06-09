@@ -230,6 +230,30 @@ impl TraceStore {
         Ok(traces)
     }
 
+    /// Get tool call events for a session, ordered by timestamp.
+    ///
+    /// The Journey sidebar surfaces these as a third section ("Tools")
+    /// so a session that only used tools (no decisions, no file edits)
+    /// doesn't render as empty. Companion to `list_journey` /
+    /// `list_file_changes`; same shape, different filter.
+    pub fn list_tool_calls(db: &Db, session_id: &str) -> Result<Vec<TraceRow>, AppError> {
+        let conn = db.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TRACE_COLS} FROM traces
+                 WHERE session_id = ?1
+                   AND event_type = 'tool_call'
+                 ORDER BY timestamp"
+        ))?;
+
+        let rows = stmt.query_map(rusqlite::params![session_id], Self::map_trace_row)?;
+
+        let mut traces = Vec::new();
+        for row in rows {
+            traces.push(row?);
+        }
+        Ok(traces)
+    }
+
     /// Get deduplicated file changes for a session.
     ///
     /// Groups by path, collecting distinct actions and count.

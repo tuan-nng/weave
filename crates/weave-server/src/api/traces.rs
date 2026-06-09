@@ -28,6 +28,20 @@ pub async fn get_session_journey(
     Ok(Json(DataResponse { data: journey }))
 }
 
+/// GET /api/sessions/:sid/trace/tools
+///
+/// Returns tool_call events for a session, ordered by timestamp.
+/// The Journey sidebar renders these as a third section ("Tools")
+/// so a session that only used tools (e.g. list_notes, list_tasks)
+/// doesn't render as empty.
+pub async fn get_session_tool_calls(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<DataResponse<Vec<TraceRow>>>, AppError> {
+    let tool_calls = TraceStore::list_tool_calls(&state.db, &session_id)?;
+    Ok(Json(DataResponse { data: tool_calls }))
+}
+
 /// GET /api/sessions/:sid/trace/files
 ///
 /// Returns deduplicated file changes for a session, grouped by path.
@@ -104,6 +118,10 @@ mod tests {
             .route(
                 "/api/sessions/{sid}/trace/files",
                 axum::routing::get(super::get_session_file_changes),
+            )
+            .route(
+                "/api/sessions/{sid}/trace/tools",
+                axum::routing::get(super::get_session_tool_calls),
             )
             .layer(axum::Extension(state));
 
@@ -208,6 +226,78 @@ mod tests {
         assert_eq!(data.len(), 2);
         assert_eq!(data[0]["event_type"], "decision");
         assert_eq!(data[1]["event_type"], "error");
+    }
+
+    #[tokio::test]
+    async fn test_get_session_tool_calls() {
+        // Mixed events: the new endpoint should return only tool_call
+        // events (not decision/error/file_change), ordered by timestamp.
+        let events = vec![
+            TraceEvent {
+                session_id: "sess-1".to_string(),
+                kind: TraceEventKind::Decision {
+                    text: "ignored by tools endpoint".to_string(),
+                },
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            },
+            TraceEvent {
+                session_id: "sess-1".to_string(),
+                kind: TraceEventKind::ToolCall {
+                    tool_name: "list_notes".to_string(),
+                    input_json: "{}".to_string(),
+                    output_json: "{\"count\":0}".to_string(),
+                    duration_ms: 3,
+                },
+                timestamp: "2026-01-01T00:00:01Z".to_string(),
+            },
+            TraceEvent {
+                session_id: "sess-1".to_string(),
+                kind: TraceEventKind::Error {
+                    message: "also ignored".to_string(),
+                },
+                timestamp: "2026-01-01T00:00:02Z".to_string(),
+            },
+            TraceEvent {
+                session_id: "sess-1".to_string(),
+                kind: TraceEventKind::ToolCall {
+                    tool_name: "list_tasks".to_string(),
+                    input_json: "{}".to_string(),
+                    output_json: "{\"count\":0}".to_string(),
+                    duration_ms: 0,
+                },
+                timestamp: "2026-01-01T00:00:03Z".to_string(),
+            },
+        ];
+
+        let (app, _) = test_app_with_traces(events).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sessions/sess-1/trace/tools")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let data = parsed["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["event_type"], "tool_call");
+        assert_eq!(data[1]["event_type"], "tool_call");
+        // The data_json is the Rust store's serialized form; the
+        // frontend parses it and reads `data.tool_name`. Round-trip
+        // through insert_batch so we exercise the same parse path
+        // the journey sidebar uses.
+        let first: serde_json::Value =
+            serde_json::from_str(data[0]["data_json"].as_str().unwrap()).unwrap();
+        assert_eq!(first["tool_name"], "list_notes");
     }
 
     #[tokio::test]

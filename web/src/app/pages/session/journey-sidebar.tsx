@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useJourney } from "../../../hooks/use-journey";
 import { useFileChanges } from "../../../hooks/use-file-changes";
+import { useToolCalls } from "../../../hooks/use-tool-calls";
 import type { FileChangeSummary, TraceRow } from "../../../lib/types";
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ interface JourneySidebarProps {
 export function JourneySidebar({ sessionId, isOpen, onToggle }: JourneySidebarProps) {
   const journey = useJourney(sessionId);
   const files = useFileChanges(sessionId);
+  const toolCalls = useToolCalls(sessionId);
 
   return (
     <aside
@@ -78,6 +80,12 @@ export function JourneySidebar({ sessionId, isOpen, onToggle }: JourneySidebarPr
               changes={files.data ?? []}
               isLoading={files.isLoading}
               isError={files.isError}
+            />
+            <div className="mx-4 border-t border-slate-200/60" />
+            <ToolCallsList
+              events={toolCalls.data ?? []}
+              isLoading={toolCalls.isLoading}
+              isError={toolCalls.isError}
             />
           </div>
         </div>
@@ -517,6 +525,144 @@ function FileActionChip({ action }: { action: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// ToolCallsList — third Journey section. Renders the chronological
+// list of `tool_call` trace events so a session that only used tools
+// (no decisions, no file edits) doesn't render as empty. The list
+// is the natural place for the chip + tool-name + timestamp; the
+// per-row expand on click shows input + output JSON in a scrollable
+// block.
+//
+// Visual style mirrors `FileChangeItem` / `DecisionNode`: rounded
+// card, brand-slate chip for the tool name, slate body text, ghost
+// chevron for expand. Same 360px sidebar width budget as the other
+// two sections.
+// ---------------------------------------------------------------------------
+
+interface ToolCallsListProps {
+  events: TraceRow[];
+  isLoading: boolean;
+  isError: boolean;
+}
+
+function ToolCallsList({ events, isLoading, isError }: ToolCallsListProps) {
+  return (
+    <section className="px-4 pt-4 pb-4">
+      <div className="flex items-center gap-1.5 mb-3">
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="text-slate-400"
+        >
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+        </svg>
+        <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+          Tools
+        </span>
+        {!isLoading && !isError && events.length > 0 && (
+          <span className="ml-auto text-[10px] text-slate-400">
+            {events.length} {events.length === 1 ? "call" : "calls"}
+          </span>
+        )}
+      </div>
+
+      {isLoading && events.length === 0 ? (
+        <SkeletonRows count={2} compact />
+      ) : isError ? (
+        <EmptyHint text="Failed to load tool calls" />
+      ) : events.length === 0 ? (
+        <EmptyHint text="No tools called yet" />
+      ) : (
+        <div className="space-y-1.5">
+          {events.map((event) => (
+            <ToolCallNode key={event.id} event={event} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ToolCallNode — one row per tool_call event. Click to expand and
+// see the input + output JSON in a scrollable block. Expansion is
+// component-local; no global state needed. Mirrors `DecisionNode`'s
+// expand-on-click pattern but renders structured JSON rather than a
+// single text blob.
+// ---------------------------------------------------------------------------
+
+interface ToolCallNodeProps {
+  event: TraceRow;
+}
+
+function ToolCallNode({ event }: ToolCallNodeProps) {
+  const [expanded, setExpanded] = useState(false);
+  const toolName = parseToolName(event);
+  const payload = parseToolPayload(event);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={() => setExpanded((v) => !v)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setExpanded((v) => !v);
+        }
+      }}
+      className="group rounded-xl border border-slate-200/60 bg-white hover:border-slate-200 transition-colors cursor-pointer"
+    >
+      <div className="flex items-center gap-2.5 px-3 py-2">
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-brand-slate-100 text-brand-slate-600 text-[10px] font-mono font-medium flex-shrink-0">
+          {toolName ?? "tool"}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-[11px] text-slate-700 leading-relaxed truncate">{event.summary}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-[10px] text-slate-400 tabular-nums">
+            {formatTime(event.timestamp)}
+          </span>
+          {payload && (
+            <svg
+              className={`w-3 h-3 text-slate-400 transition-transform duration-200 ${
+                expanded ? "rotate-90" : ""
+              }`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          )}
+        </div>
+      </div>
+      {payload && (
+        <div
+          className={`overflow-hidden transition-all duration-200 ease-out ${
+            expanded ? "max-h-[400px] overflow-y-auto opacity-100" : "max-h-0 opacity-0"
+          }`}
+        >
+          <pre className="mx-3 mb-2 p-2 bg-slate-50 rounded-md text-[10px] text-slate-600 font-mono leading-relaxed whitespace-pre-wrap break-all">
+            {payload}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tiny shared UI bits
 // ---------------------------------------------------------------------------
 
@@ -568,4 +714,48 @@ function formatTime(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "";
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Pull the tool name from a `tool_call` event's `data_json`. Returns
+ * null if the field is missing or unparseable — in which case the
+ * row shows a generic "tool" chip rather than guessing.
+ *
+ * Tool calls always carry `{ tool_name, input, output, duration_ms }`
+ * (per `TraceEventKind::ToolCall` in `store/traces.rs`).
+ */
+function parseToolName(event: TraceRow): string | null {
+  if (!event.data_json) return null;
+  try {
+    const data = JSON.parse(event.data_json) as Record<string, unknown>;
+    const name = data.tool_name;
+    return typeof name === "string" && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pretty-print a tool call's input + output JSON for the expanded
+ * view. Returns null when there's nothing worth showing (no
+ * `data_json` or no input/output) so the chevron is hidden.
+ */
+function parseToolPayload(event: TraceRow): string | null {
+  if (!event.data_json) return null;
+  try {
+    const data = JSON.parse(event.data_json) as Record<string, unknown>;
+    const input = data.input;
+    const output = data.output;
+    if (input === undefined && output === undefined) return null;
+    const parts: string[] = [];
+    if (input !== undefined) {
+      parts.push(`input:\n${JSON.stringify(input, null, 2)}`);
+    }
+    if (output !== undefined) {
+      parts.push(`output:\n${JSON.stringify(output, null, 2)}`);
+    }
+    return parts.join("\n\n");
+  } catch {
+    return null;
+  }
 }

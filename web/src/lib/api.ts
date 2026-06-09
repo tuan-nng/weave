@@ -179,6 +179,8 @@ export const api = {
       apiFetch<TraceRow[]>(`/api/sessions/${sessionId}/trace/journey`),
     fileChanges: (sessionId: string) =>
       apiFetch<FileChangeSummary[]>(`/api/sessions/${sessionId}/trace/files`),
+    toolCalls: (sessionId: string) =>
+      apiFetch<TraceRow[]>(`/api/sessions/${sessionId}/trace/tools`),
   },
 
   // Kanban (feat-026). Boards are workspace-scoped; the composite GET

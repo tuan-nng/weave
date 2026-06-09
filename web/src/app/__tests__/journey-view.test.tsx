@@ -3,14 +3,15 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { JourneySidebar } from "../pages/session/journey-sidebar";
 
-// Mock the API module — the sidebar reads journey + fileChanges
-// through these methods. Mocked in beforeEach so each test gets a
-// clean function.
+// Mock the API module — the sidebar reads journey + fileChanges +
+// toolCalls through these methods. Mocked in beforeEach so each
+// test gets a clean function.
 vi.mock("../../lib/api", () => ({
   api: {
     traces: {
       journey: vi.fn(),
       fileChanges: vi.fn(),
+      toolCalls: vi.fn(),
     },
   },
 }));
@@ -53,6 +54,7 @@ describe("journey-view", () => {
   it("renders the panel heading when open", async () => {
     mockApi.traces.journey.mockResolvedValue([]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(true);
     expect(await screen.findByText("Journey")).toBeInTheDocument();
   });
@@ -60,6 +62,7 @@ describe("journey-view", () => {
   it("does not render the panel when closed", () => {
     mockApi.traces.journey.mockResolvedValue([]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(false);
     // The rail is always rendered; the panel content (e.g. the
     // "Decisions & Errors" section label) is only mounted when open.
@@ -86,6 +89,7 @@ describe("journey-view", () => {
       },
     ]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(true);
 
     expect(await screen.findByText("use Rust for the new service")).toBeInTheDocument();
@@ -109,6 +113,7 @@ describe("journey-view", () => {
       },
     ]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(true);
 
     // The full text is hidden behind a max-height transition;
@@ -131,9 +136,11 @@ describe("journey-view", () => {
   it("renders the empty state when there are no events", async () => {
     mockApi.traces.journey.mockResolvedValue([]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(true);
     expect(await screen.findByText(/No decisions or errors yet/)).toBeInTheDocument();
     expect(await screen.findByText(/No files touched yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/No tools called yet/)).toBeInTheDocument();
   });
 
   it("renders file rows with action chips and copies the path on click", async () => {
@@ -142,6 +149,7 @@ describe("journey-view", () => {
       { path: "src/auth.ts", actions: ["read", "write"], count: 3 },
       { path: "src/old-auth.ts", actions: ["delete"], count: 1 },
     ]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     renderSidebar(true);
 
     // Both file paths appear.
@@ -170,9 +178,77 @@ describe("journey-view", () => {
     // clipboard API was called.
   });
 
+  it("renders tool_call events from the tools endpoint", async () => {
+    mockApi.traces.journey.mockResolvedValue([]);
+    mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([
+      {
+        id: "t10",
+        session_id: "s1",
+        event_type: "tool_call",
+        summary: "list_notes (0 notes)",
+        data_json: JSON.stringify({
+          tool_name: "list_notes",
+          input: {},
+          output: { count: 0, notes: [] },
+          duration_ms: 3,
+        }),
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    renderSidebar(true);
+
+    // The Tools section is present.
+    expect(await screen.findByText("Tools")).toBeInTheDocument();
+    // The summary is shown.
+    expect(await screen.findByText("list_notes (0 notes)")).toBeInTheDocument();
+    // The tool name chip is shown.
+    expect(screen.getAllByText("list_notes").length).toBeGreaterThan(0);
+  });
+
+  it("expands a tool_call node to reveal input + output JSON", async () => {
+    mockApi.traces.journey.mockResolvedValue([]);
+    mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([
+      {
+        id: "t10",
+        session_id: "s1",
+        event_type: "tool_call",
+        summary: "shell_exec",
+        data_json: JSON.stringify({
+          tool_name: "shell_exec",
+          input: { command: "echo hello" },
+          output: { stdout: "hello\n", exit_code: 0 },
+          duration_ms: 5,
+        }),
+        timestamp: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    renderSidebar(true);
+
+    // The JSON payload is in the DOM (in a <pre> block). Scope to
+    // <pre> because the summary text would otherwise be a duplicate
+    // match for the literal "echo hello" string.
+    const pre = await screen.findByText(/echo hello/, { selector: "pre" });
+    expect(pre).toBeInTheDocument();
+
+    // The container starts collapsed.
+    const collapseContainer = pre.closest(".max-h-0, [class*='max-h-0']");
+    expect(collapseContainer).not.toBeNull();
+
+    // Click the tool card to expand.
+    const card = screen.getByRole("button", { name: /shell_exec/ });
+    fireEvent.click(card);
+
+    // After expansion the container is `max-h-[400px] opacity-100`.
+    const expanded = pre.closest(".max-h-\\[400px\\]");
+    expect(expanded).not.toBeNull();
+  });
+
   it("rail toggle button calls onToggle", async () => {
     mockApi.traces.journey.mockResolvedValue([]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     const { onToggle } = renderSidebar(false);
     const rail = screen.getByTitle("Toggle Journey sidebar");
     fireEvent.click(rail);
@@ -182,6 +258,7 @@ describe("journey-view", () => {
   it("panel close (×) button calls onToggle when the panel is open", async () => {
     mockApi.traces.journey.mockResolvedValue([]);
     mockApi.traces.fileChanges.mockResolvedValue([]);
+    mockApi.traces.toolCalls.mockResolvedValue([]);
     const { onToggle } = renderSidebar(true);
     const close = screen.getByTitle("Hide Journey sidebar");
     fireEvent.click(close);

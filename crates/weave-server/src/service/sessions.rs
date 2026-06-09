@@ -797,6 +797,31 @@ async fn execute_tool_call(
     }
 }
 
+/// Flush the per-turn `Thinking` buffer as a single `Decision` trace event.
+///
+/// The Anthropic provider streams extended thinking as many small chunks
+/// (2-3 words each). The Journey sidebar shows one row per reasoning pass,
+/// not dozens of fragments, so we coalesce them into a single `Decision`
+/// event at the natural block boundary (a `TextDelta`, a `ToolUseStart`,
+/// the end of the turn, or a mid-stream `Error`). A whitespace-only buffer
+/// is dropped without emitting anything — the model occasionally emits a
+/// stray newline that is not worth recording.
+///
+/// Mirrors the pre-feat-037 helper of the same name. Lives outside
+/// `agent_loop` so the test module can call it directly.
+fn flush_thinking(trace_collector: &trace::TraceCollector, session_id: &str, buf: &mut String) {
+    if buf.trim().is_empty() {
+        buf.clear();
+        return;
+    }
+    let text = std::mem::take(buf);
+    trace_collector.emit(TraceEvent {
+        session_id: session_id.to_string(),
+        kind: TraceEventKind::Decision { text },
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
 /// Drive the model ↔ tool-execution loop for a single user turn.
 ///
 /// Responsibilities:
@@ -849,6 +874,11 @@ async fn agent_loop(
     // splice it into history as a single structured message before the
     // next agent call.
     let mut turn_text = String::new();
+    // Coalesce `Thinking` stream deltas into a single per-block buffer.
+    // Flushed into a `Decision` trace event at the natural boundary
+    // (TextDelta / ToolUseStart / Done / Error) by `flush_thinking`.
+    // See `flush_thinking` for the rationale on coalescing.
+    let mut thinking_buffer = String::new();
 
     for iteration in 0..MAX_TOOL_ITERATIONS {
         if cancel_token.is_cancelled() {
@@ -887,6 +917,7 @@ async fn agent_loop(
         let mut turn_stop_reason: Option<agent::StopReason> = None;
         pending_tool_requests.clear();
         turn_text.clear();
+        thinking_buffer.clear();
 
         // Stream this turn to completion.
         loop {
@@ -917,10 +948,17 @@ async fn agent_loop(
                             }
                             match event {
                                 StreamEvent::TextDelta { text } => {
+                                    // Text after a thinking block is a
+                                    // natural Decision boundary — flush
+                                    // whatever has accumulated so far.
+                                    flush_thinking(trace_collector, session_id, &mut thinking_buffer);
                                     turn_text.push_str(&text);
                                     accumulated.push_str(&text);
                                 }
                                 StreamEvent::ToolUseStart { id, name, input } => {
+                                    // A tool_use after thinking is also a
+                                    // natural Decision boundary.
+                                    flush_thinking(trace_collector, session_id, &mut thinking_buffer);
                                     pending_tool_requests.insert(id, (name, input));
                                 }
                                 StreamEvent::ToolUseDelta { .. } => {
@@ -933,15 +971,23 @@ async fn agent_loop(
                                     // `ToolResult` events (see below); the
                                     // provider stream does not emit them.
                                 }
-                                StreamEvent::Thinking { .. } => {
-                                    // Forwarded to SSE above; no state change.
+                                StreamEvent::Thinking { text } => {
+                                    // Forwarded to SSE above; coalesce into
+                                    // the per-block buffer. Flushed on the
+                                    // next boundary event.
+                                    thinking_buffer.push_str(&text);
                                 }
                                 StreamEvent::Done { stop_reason } => {
+                                    // End of turn — flush any pending
+                                    // thinking before recording the stop
+                                    // reason and breaking.
+                                    flush_thinking(trace_collector, session_id, &mut thinking_buffer);
                                     turn_stop_reason = Some(stop_reason);
                                     break;
                                 }
                                 StreamEvent::Error { message } => {
                                     error!(session_id, error = %message, "agent stream error");
+                                    flush_thinking(trace_collector, session_id, &mut thinking_buffer);
                                     trace_collector.emit(TraceEvent {
                                         session_id: session_id.to_string(),
                                         kind: TraceEventKind::Error {
@@ -1095,6 +1141,30 @@ async fn agent_loop(
                     break;
                 }
             };
+
+            // Emit a `ToolCall` trace event (regression guard for the
+            // feat-017 emission that was lost in feat-037). All non-Aborted
+            // outcomes are recorded so the Journey sidebar can show what
+            // the model tried — including validation failures and unknown
+            // tool names. `duration_ms == 0` for the failure paths is the
+            // honest signal: we never started the actual tool execution.
+            let trace_ts = chrono::Utc::now().to_rfc3339();
+            trace_collector.emit(TraceEvent {
+                session_id: session_id.to_string(),
+                kind: TraceEventKind::ToolCall {
+                    tool_name: name.clone(),
+                    input_json: input.to_string(),
+                    output_json: content.clone(),
+                    duration_ms,
+                },
+                timestamp: trace_ts.clone(),
+            });
+            // Extract and emit `FileChange` events for the tools that
+            // mutate files. Other tools contribute no rows. Existing
+            // helper; `fs_write` / `fs_edit` are recognised by name.
+            for fc in trace::extract_file_changes(session_id, &name, &input, &trace_ts) {
+                trace_collector.emit(fc);
+            }
 
             // Single emission path: broadcast the visible ToolResult, record
             // the call in the tool-call summary, and push a tool_result
@@ -1275,6 +1345,7 @@ impl Drop for SessionGuard {
 mod tests {
     use super::*;
     use crate::store::sessions::tests::seed_deps;
+    use crate::store::traces::TraceStore;
     use crate::tools::test_support::MockTool;
     use crate::tools::{ToolContext, ToolExecutor, ToolRegistry, ToolResult};
     use async_trait::async_trait;
@@ -3524,6 +3595,142 @@ You are broken."#,
             "no-tool end_turn should not have metadata, got: {:?}",
             assistant.metadata
         );
+    }
+
+    /// Regression guard for the Journey "no information" bug: the
+    /// native tool-execution loop must record `Decision` trace events
+    /// from `Thinking` deltas and `ToolCall` + `FileChange` trace
+    /// events from successful tool invocations. feat-037 deleted the
+    /// pre-existing emissions without a follow-up; this test pins the
+    /// behavior so a future refactor cannot silently break it again.
+    #[tokio::test]
+    async fn test_native_tool_loop_emits_journey_traces() {
+        // Turn 1: model thinks, then calls `fs_write`. Turn 2: model
+        // wraps up. The two `Thinking` deltas must coalesce into a
+        // single `Decision`; the `ToolUseStart` is the boundary that
+        // triggers the flush.
+        let turn1 = vec![
+            agent::StreamEvent::Thinking {
+                text: "I should".into(),
+            },
+            agent::StreamEvent::Thinking {
+                text: " write the file.".into(),
+            },
+            agent::StreamEvent::ToolUseStart {
+                id: "tu_1".into(),
+                name: "fs_write".into(),
+                input: serde_json::json!({
+                    "path": "/tmp/journey_trace_test.rs",
+                    "content": "fn main() {}"
+                }),
+            },
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::ToolUse,
+            },
+        ];
+        let turn2 = vec![agent::StreamEvent::Done {
+            stop_reason: agent::StopReason::EndTurn,
+        }];
+
+        // The `fs_write` tool is registered with a schema that matches
+        // the `extract_file_changes` heuristic (path present, type
+        // string). It does not actually need to write the file —
+        // the trace emission happens before file IO succeeds.
+        let tool = ScriptedTool {
+            name: "fs_write".into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["path", "content"]
+            }),
+            result: std::sync::Arc::new(std::sync::Mutex::new(Some(ToolResult {
+                success: true,
+                data: serde_json::json!({"ok": true}),
+                error: None,
+            }))),
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sleep: std::time::Duration::ZERO,
+        };
+
+        let (db, registry, specialists, active, sse, tools, _pid, sid, _ac, _tc) =
+            setup_loop_test(vec![turn1, turn2], Some(tool));
+
+        let _ = SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &sid,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        wait_for_session_done(&active, &sid, std::time::Duration::from_secs(2)).await;
+
+        // (1) The full trace list must contain the Decision and ToolCall
+        // rows that the loop emitted, in the right order.
+        let traces = TraceStore::list_by_session(&db, &sid).unwrap();
+        let kinds: Vec<&str> = traces.iter().map(|t| t.event_type.as_str()).collect();
+        assert!(
+            kinds.contains(&"decision"),
+            "expected a Decision trace from Thinking deltas, got: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"tool_call"),
+            "expected a ToolCall trace from the fs_write invocation, got: {kinds:?}"
+        );
+
+        // The Decision text must be the coalesced Thinking buffer, not
+        // just the first delta. Order matters: the `ToolUseStart`
+        // boundary should have flushed BEFORE the ToolCall row was
+        // written.
+        let decision_idx = kinds.iter().position(|k| *k == "decision").unwrap();
+        let tool_call_idx = kinds.iter().position(|k| *k == "tool_call").unwrap();
+        assert!(
+            decision_idx < tool_call_idx,
+            "Decision (thinking) must be emitted before ToolCall (boundary flush), got order: {kinds:?}"
+        );
+        let decision_text = traces[decision_idx].summary.clone();
+        assert!(
+            decision_text.contains("write the file"),
+            "Decision should contain the coalesced thinking text, got: {decision_text:?}"
+        );
+
+        // (2) The journey endpoint filters to Decision + Error. The
+        // Decision must show up there so the Journey sidebar renders it.
+        let journey = TraceStore::list_journey(&db, &sid).unwrap();
+        assert!(
+            journey.iter().any(|t| t.event_type == "decision"),
+            "journey endpoint should include the Decision trace"
+        );
+
+        // (3) The file_changes endpoint must have a row for /tmp/...
+        let changes = TraceStore::list_file_changes(&db, &sid).unwrap();
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        assert!(
+            paths.contains(&"/tmp/journey_trace_test.rs"),
+            "expected a FileChange for the fs_write path, got: {paths:?}"
+        );
+
+        // (4) The persisted ToolCall row must carry the tool name and
+        // the JSON-serialized input so the UI can show the call shape.
+        let tool_call_row = traces
+            .iter()
+            .find(|t| t.event_type == "tool_call")
+            .expect("ToolCall row exists (asserted above)");
+        let data_json = tool_call_row
+            .data_json
+            .as_deref()
+            .expect("ToolCall row should have data_json");
+        let data: serde_json::Value = serde_json::from_str(data_json).unwrap();
+        assert_eq!(data["tool_name"], "fs_write");
+        assert_eq!(data["input"]["path"], "/tmp/journey_trace_test.rs");
     }
 
     // --- Session resume tests (feat-018) ---
