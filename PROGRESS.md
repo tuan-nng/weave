@@ -8,13 +8,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-05
+- **Last updated:** 2026-06-09
 - **Latest commit:** feat-062 (attach codebase to session as FS sandbox)
-- **Active feature:** none (feat-062 committed; manual agent-browser validation still pending the user)
+- **Active feature:** none
+- **In-flight (uncommitted):** feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. See note below.
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 616 Rust tests + 90 frontend tests pass (7 new for feat-062)
+- **Test status:** green — 616 Rust tests + 98 frontend tests pass (8 new for feat-063: 2 for /codebases, 6 for /boards)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** none.
+- **Uncommitted:** `web/src/components/new-codebase-modal.tsx` (new), `web/src/components/new-board-modal.tsx` (new), `web/src/app/pages/codebases.tsx` (rewritten), `web/src/app/pages/boards.tsx` (rewritten), `web/src/hooks/use-board.ts` (added `useCreateBoard`), `web/src/app/__tests__/codebases.test.tsx` (updated), `web/src/app/__tests__/boards.test.tsx` (new).
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
@@ -43,6 +44,38 @@ Attach a registered codebase (git repo) to a session at creation time. The sessi
 3. Resume does NOT auto-inherit the parent's `codebase_id` — design choice, but worth a follow-up: when resuming a bound parent, default the new session's codebase picker to the parent's codebase (or pass it server-side).
 4. Pre-existing `tools/fs/mod.rs:167-217` `resolve_path` bug for deeply non-existent files (drops the file name, duplicates the last tail component). Unrelated to this slice; flagged in review.
 5. Kanban auto-spawn in `service/kanban.rs:130` still passes `codebase_id: None`; the `tasks` model has no `codebase_id`. Wiring kanban is a separate feature.
+
+### feat-063 — `/codebases` and `/boards` empty-state fix + modal extract (uncommitted; both halves done)
+
+Drove agent-browser through every workspace-related surface (Home, `/workspaces/:id`, `/sessions`, `/boards`, `/codebases`, `/settings`, New Session modal) and found three functional gaps. The first two are fixed and verified; the third is queued for a future session.
+
+**`/codebases` fix (in working tree, uncommitted):**
+- The pre-fix `WorkspaceCodebases` in `codebases.tsx:30-31` returned `null` when `codebases.length === 0`, leaving the page with no entry point to register the first codebase. Same anti-pattern that feat-061 just fixed in `/sessions`.
+- New `web/src/components/new-codebase-modal.tsx` (182 lines) — extracted from the inline `CreateCodebaseModal` in `codebases.tsx`. Mirrors `new-session-modal.tsx` shape exactly: `{ workspaceId: string | null; onClose, onCreated?: (codebase: Codebase) => void }`, inline `role="alert"` error, `useEffect` form-reset on every open transition, `FIELD_CLASS`/`LABEL_CLASS` constants, `useCreateCodebase` hook.
+- `codebases.tsx` rewritten: `WorkspaceCodebases` now always renders the workspace heading + `+ New codebase in {name}` button (right-aligned in the header row, matching post-feat-061 `sessions.tsx`). Empty state is an inline `<p>No codebases yet</p>` in place of the list. On successful create, navigates to `/workspaces/:wid/codebases/:cid`.
+- `__tests__/codebases.test.tsx` flipped: the old "does not render a workspace section when its codebase list is empty" test is now the positive "renders the workspace heading and + New codebase button even when the codebase list is empty" (asserts heading, button, and "No codebases yet" copy all present). Added 2 new tests mirroring `sessions.test.tsx`: click-the-per-workspace-button-opens-NewCodebaseModal and submit-creates-codebase-and-navigates. 9 tests pass (was 7).
+
+**`/boards` fix (in working tree, uncommitted; 1-to-1 port of the /codebases fix):**
+- The pre-fix `WorkspaceBoards` in `boards.tsx:30` had `if (error || boards.length === 0) return null;` — the identical anti-pattern.
+- New `web/src/components/new-board-modal.tsx` — extracted from the inline `CreateBoardModal` in `boards.tsx`. Same contract as `new-codebase-modal.tsx`: `{ workspaceId, onClose, onCreated?: (board: Board) => void }`, inline `role="alert"` error, `useEffect` form-reset on open, `FIELD_CLASS`/`LABEL_CLASS` constants. Uses a new `useCreateBoard(workspaceId)` hook added to `web/src/hooks/use-board.ts` (mirrors `useCreateCodebase` shape: `useMutation` + `invalidateQueries` on success).
+- `boards.tsx` rewritten: dropped the local `bannerError` state + `ErrorBanner` import (the modal owns its own inline error). `WorkspaceBoards` now always renders the workspace heading + `+ New board in {name}` button (right-aligned, same shape as `/sessions` and `/codebases`). Empty state is an inline `<p>No boards yet</p>`. On successful create, navigates to `/workspaces/:wid/boards/:bid`.
+- New `__tests__/boards.test.tsx` (6 cases, mirroring `codebases.test.tsx`): no-workspaces empty state, workspace heading + button visible when boards empty (the bug fix), rows + button coexist, click button opens the NewBoardModal, submit creates board and navigates, create button is disabled when name is empty.
+- `./init.sh` all 3 layers green (98 frontend tests pass, was 90; +8 for feat-063: 2 for /codebases, 6 for /boards).
+- agent-browser verified both /boards states end-to-end:
+  - **Empty:** deleted both boards via API, reloaded, the page shows the workspace heading + `+ New board in default` button + `<p>No boards yet</p>` (the bug fix). Pre-fix, the whole block returned null and there was no entry point.
+  - **Create flow:** clicked the button, the modal opens with "New Board" heading + disabled "Create Board" submit + empty placeholder. Typed "My Sprint Board Real" via `keyboard inserttext` (after native value setter), the submit button enabled. Clicked submit, the modal closed, the URL navigated to `/workspaces/5a7675ff.../boards/0624af02...` and the board detail page rendered the new board's name as the h1. Cancel button closes the modal cleanly.
+
+**Blocker / Next steps for the next session:**
+1. **Commit the 7 in-tree files** (2 new modals, 2 rewritten pages, 1 hook addition, 2 test files). One commit is fine since both halves are the same fix: `fix: /codebases and /boards always show heading + create button on empty (mirrors feat-061)`. The commit body should reference feat-061 as the precedent and call out the 8 new tests + agent-browser evidence.
+2. **Promote feat-063 in `feature_list.json`** — no entry exists for this yet (it was treated as a follow-up, not a numbered feat). Decide whether to backfill a `feat-063` entry or just commit the work as a post-feat-061 follow-up under a single commit. If backfilling, copy the structure of the `feat-061` entry.
+3. **Other workspace-UI gaps surfaced by the agent-browser walkthrough but out of scope for feat-063** (logged in case they get picked up later):
+   - `/workspaces/:id/sessions` and `/workspaces/:id/settings` return 404 — there is no per-workspace sessions or settings route. The Settings page at `/settings` is top-level and lists all providers globally (the workspace detail page has no settings link to go to).
+   - Workspace detail page (`workspace.tsx`) has no Rename/Delete actions, no link to per-workspace boards/codebases/specialists, no workspace metadata (status, created/updated, last-activity), no filter/search/pagination on the 17-row session table, no session actions from the list (delete/archive/fork).
+   - Sessions list has the same em-dash / no-specialist sparseness as the workspace table.
+   - New Session modal: Specialist dropdown shows 5 names with no descriptions (YAML `description` frontmatter not surfaced), Model is a free-text input with no autocomplete from the provider's known models.
+   - Settings page: "Type" field is a non-editable-looking "Anthropic" label (no select for multi-type), Providers table ACTIONS column is empty (no edit/delete/test).
+   - Sidebar has no workspace switcher, no global search, no notifications.
+4. **Pre-existing de-dup follow-ups (from feat-061, still pending):** the per-workspace `+ New {entity} in {name}` button is now triplicated across sessions/boards/codebases (extract `<PerWorkspaceCreateButton>`); the X close-icon SVG in the modal header is in 7 places (extract `<CloseButton>` or `<ModalHeader>`); the form input/label class strings are duplicated 13+ times (extract `web/src/lib/form-classes.ts`); the test-render QueryClient+MemoryRouter boilerplate is now in 5 places (extract `web/src/__tests__/test-render.tsx`).
 
 ## Completed Since Project Start
 
@@ -209,6 +242,13 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 ### 2026-06-05 — feat-061 (+ New Session button on /sessions)
 - Implemented via /feature-dev workflow. Extracted `web/src/components/new-session-modal.tsx` from the inline modal in `workspace.tsx`; refactored `workspace.tsx` to use it (page shrank 344 → 220 lines, removed `useProviders`/`useCreateSession`/`Modal`/`ErrorBanner` imports and ~100 lines of form/modal/state). Added per-workspace `+ New Session in {name}` button to `sessions.tsx`; restructured `WorkspaceSessions` so a workspace with zero sessions still shows the heading + button (a deliberate divergence from boards/codebases which still hide on empty — logged as a follow-up). Specialist input upgraded from free text to `<select>` populated by `useSpecialists()`. Updated `docs/user/sessions.md:30-31, 34-36` to match. 5 new page tests in `__tests__/sessions.test.tsx` cover: no-workspaces empty state, per-workspace button visible on zero sessions, session rows + button coexist, click button opens modal, submit creates session and navigates to `/sessions/:id`. `./init.sh` all 3 layers green. Simplify pass extracted `FIELD_CLASS`/`LABEL_CLASS` constants and removed a redundant `setCreateWorkspaceId(null)` (modal already calls `onClose()` first). 611 Rust + 88 frontend tests pass.
 - Follow-ups logged (out of scope for this PR): the per-workspace `+ New {entity} in {name}` button is now triplicated across sessions/boards/codebases (extract `<PerWorkspaceCreateButton>`); the X close-icon SVG is now in 7 places (extract `<CloseButton>` or `<ModalHeader>`); the form input/label/button class strings are duplicated 13+ times across all forms (extract `web/src/lib/form-classes.ts`); the test-render QueryClient+MemoryRouter boilerplate is the 5th copy (extract `web/src/__tests__/test-render.tsx`); boards/codebases still hide the per-workspace section when empty (the new sessions.tsx pattern should be ported — extract `<WorkspaceListSection>` to enforce the invariant once); `workspace.tsx` page has no test (pre-existing coverage gap).
+
+### 2026-06-09 — feat-063 (/codebases and /boards empty-state fix + modal extract)
+- Drove agent-browser through every workspace-related surface at `http://localhost:5173/` (Home, `/workspaces/:id`, `/sessions`, `/boards`, `/codebases`, `/settings`, New Session modal). Found three functional gaps: the `/codebases` and `/boards` empty-state bug (per-workspace block returns `null` on 0 entities — same anti-pattern feat-061 just fixed in `/sessions`); the `/workspaces/:id/sessions` and `/workspaces/:id/settings` 404s (no per-workspace routes exist for sessions or settings).
+- **First session:** applied the `/codebases` half of the fix. Extracted `CreateCodebaseModal` to `web/src/components/new-codebase-modal.tsx` (mirroring `new-session-modal.tsx`); refactored `codebases.tsx` so `WorkspaceCodebases` always renders the heading + `+ New codebase in {name}` button (right-aligned in the header row) and shows an inline "No codebases yet" placeholder when the list is empty. On successful create, navigates to `/workspaces/:wid/codebases/:cid`. Updated `__tests__/codebases.test.tsx`: flipped the old "does not render" test to a positive one, added 2 new tests for the click-to-open-modal and submit-and-navigate flows. 92 frontend tests pass. `./init.sh` all 3 layers green. agent-browser verified both states.
+- **Second session (this one):** applied the `/boards` half as a 1-to-1 port. Extracted `CreateBoardModal` to `web/src/components/new-board-modal.tsx`; added `useCreateBoard(workspaceId)` to `web/src/hooks/use-board.ts` (mirrors `useCreateCodebase`); refactored `boards.tsx` to always render the heading + `+ New board in {name}` button + inline "No boards yet" placeholder, with inline modal error (dropped the local `bannerError` state and `ErrorBanner` import). New `__tests__/boards.test.tsx` (6 cases, mirroring `codebases.test.tsx`). 98 frontend tests pass (was 92, +6 for boards). `./init.sh` all 3 layers green.
+- agent-browser end-to-end on /boards: deleted both boards via API, reloaded, the page shows heading+button+"No boards yet" (the bug fix). Clicked the button, modal opened with disabled submit, typed "My Sprint Board Real" via `keyboard inserttext` (after native value setter), submit enabled, clicked submit, modal closed, URL navigated to `/workspaces/5a7675ff.../boards/0624af02...`, the board detail page rendered the new board's name as the h1. Cancel closes cleanly.
+- Uncommitted: 7 files (2 new modals, 2 rewritten pages, 1 hook addition, 2 test files). One commit is fine: `fix: /codebases and /boards always show heading + create button on empty (mirrors feat-061)`. Detailed blocker list at the feat-063 header above.
 
 ### 2026-06-04 — Doc reorganization into `docs/road-map/`
 - Moved `docs/PLAN.md` and `docs/multi-runtime-strategy.md` into `docs/road-map/`. PLAN moved via `git mv` (rename preserved in history); strategy moved via plain `mv` (was untracked).
