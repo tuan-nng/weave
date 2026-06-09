@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -6,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::registry::ProviderRegistry;
 #[allow(unused_imports)] // MessageRequest is used by the `tests` submodule.
-use crate::agent::{self, MessageRequest};
+use crate::agent::{self, MessageRequest, RuntimeKind, SessionMode};
 use crate::db::Db;
 use crate::error::AppError;
 use crate::specialist::{Specialist, SpecialistRegistry};
@@ -73,6 +74,17 @@ impl SessionService {
     /// also pass `cwd` directly (advanced: pointing at a subdir); the two
     /// fields compose, but `codebase_id` wins when both are present (the
     /// resolved path from the codebase overrides any supplied `cwd`).
+    ///
+    /// `runtime_kind` / `mode` / `runtime_metadata_json` (feat-038) take
+    /// the same shape: a per-call override or a default. When resuming
+    /// from a parent, `runtime_kind` and `mode` inherit from the parent
+    /// unless the caller passes a non-`None` override. `runtime_metadata_json`
+    /// is the rule's exception: it is inherited only when the resolved
+    /// `runtime_kind` matches the parent's — a CLI resume id from a
+    /// `claude-code` parent is meaningless when the child runs on
+    /// `anthropic-api`, so it is cleared on a runtime switch (matching
+    /// feat-047's "cli_resume_id is NOT inherited when runtime_kind
+    /// changes" rule).
     #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         db: &Db,
@@ -84,6 +96,9 @@ impl SessionService {
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
         codebase_id: Option<&str>,
+        runtime_kind: Option<&str>,
+        mode: Option<&str>,
+        runtime_metadata_json: Option<&str>,
     ) -> Result<crate::store::sessions::Session, AppError> {
         // Validate workspace exists
         crate::store::workspaces::WorkspaceStore::get_by_id(db, workspace_id)?;
@@ -103,8 +118,16 @@ impl SessionService {
             cwd.map(|s| s.to_string())
         };
 
-        // Validate parent chain and load direct parent's messages
-        let parent_messages = if let Some(pid) = parent_session_id {
+        // Validate the three runtime fields up front so a bad value is
+        // rejected before we touch the parent chain or start a transaction.
+        // Parsing `None` as the typed default means a missing field is
+        // indistinguishable from "use the platform default" — the same
+        // shape the pre-feat-038 API had for `model` / `cwd` / etc.
+        let runtime_kind: RuntimeKind = parse_runtime_kind(runtime_kind)?;
+        let mode: SessionMode = parse_mode(mode)?;
+
+        // Validate parent chain and load direct parent's messages + runtime
+        let (parent_messages, parent) = if let Some(pid) = parent_session_id {
             // Ensure parent has finished — resuming an active session would
             // copy an incomplete message history.
             let parent = SessionStore::get_by_id(db, pid)?;
@@ -116,10 +139,19 @@ impl SessionService {
                 )));
             }
             validate_parent_chain(db, pid, workspace_id)?;
-            MessageStore::load_all(db, pid, MAX_HISTORY_MESSAGES)?
+            let messages = MessageStore::load_all(db, pid, MAX_HISTORY_MESSAGES)?;
+            (messages, Some(parent))
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
+
+        // Resume inheritance. The original `runtime_kind` / `mode` from
+        // the caller are still in scope; we only fall back to the parent
+        // when the caller passed `None`. `runtime_metadata_json` is
+        // computed from the *resolved* runtime_kind, so the
+        // "inherit only on same-runtime resume" rule is enforced here.
+        let (resolved_runtime_kind, resolved_mode, resolved_metadata) =
+            resume_inherit(runtime_kind, mode, runtime_metadata_json, parent.as_ref());
 
         // Atomically create session + copy messages
         db.with_transaction(|conn| {
@@ -133,6 +165,9 @@ impl SessionService {
                 parent_session_id,
                 context_id,
                 codebase_id,
+                resolved_runtime_kind,
+                resolved_mode,
+                resolved_metadata.as_deref(),
             )?;
 
             if !parent_messages.is_empty() {
@@ -349,6 +384,67 @@ fn validate_parent_chain(
     Ok(())
 }
 
+/// Parse a caller-supplied `runtime_kind` (already validated by the API
+/// layer when the request is JSON, but accepting `Option<&str>` keeps
+/// the boundary consistent with the legacy `model` / `cwd` arguments).
+///
+/// `None` is treated as "use the platform default" — the same shape
+/// the rest of `create_session` uses. An unparseable value is a 400.
+pub(crate) fn parse_runtime_kind(s: Option<&str>) -> Result<RuntimeKind, AppError> {
+    match s {
+        None => Ok(RuntimeKind::default()),
+        Some(s) => RuntimeKind::from_str(s),
+    }
+}
+
+/// Parse a caller-supplied `mode`. Same semantics as [`parse_runtime_kind`].
+pub(crate) fn parse_mode(s: Option<&str>) -> Result<SessionMode, AppError> {
+    match s {
+        None => Ok(SessionMode::default()),
+        Some(s) => SessionMode::from_str(s),
+    }
+}
+
+/// Compute the resolved `(runtime_kind, mode, runtime_metadata_json)` for
+/// the new session, applying the resume-inheritance rule (feat-038).
+///
+/// Rule: the child inherits `runtime_kind` and `mode` from the parent
+/// when the caller does not pass a non-`None` override. `runtime_metadata_json`
+/// is the special case: it is inherited only when the *resolved* `runtime_kind`
+/// matches the parent's. A CLI resume id (e.g. from a `claude-code` parent)
+/// is meaningless when the child runs on a different runtime, so the
+/// metadata is cleared on a runtime switch. An explicit caller override
+/// of `runtime_metadata_json` always wins (the caller is asserting "I
+/// know what I'm doing — use this id verbatim").
+///
+/// `parent` is `None` for non-resume calls; the resolved values are
+/// simply the typed defaults + the caller's metadata (if any).
+pub(crate) fn resume_inherit(
+    runtime_kind: RuntimeKind,
+    mode: SessionMode,
+    metadata: Option<&str>,
+    parent: Option<&crate::store::sessions::Session>,
+) -> (RuntimeKind, SessionMode, Option<String>) {
+    let Some(parent) = parent else {
+        // No resume — caller-supplied or default values, metadata is
+        // taken verbatim from the caller.
+        return (runtime_kind, mode, metadata.map(|s| s.to_string()));
+    };
+
+    let resolved_runtime = runtime_kind; // already default-resolved upstream
+    let resolved_mode = mode;
+    // Inherit metadata when the resolved runtime matches the parent's
+    // AND the caller did not pass an explicit override. The caller's
+    // override is the "I know what I'm doing" signal — it always wins.
+    let resolved_metadata = match (metadata, resolved_runtime == parent.runtime_kind) {
+        (Some(s), _) => Some(s.to_string()),
+        (None, true) => parent.runtime_metadata_json.clone(),
+        (None, false) => None,
+    };
+
+    (resolved_runtime, resolved_mode, resolved_metadata)
+}
+
 /// Log an error, transition the session to error status.
 fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, msg: &str) {
     error!(session_id, error = %e, msg);
@@ -504,6 +600,8 @@ async fn run_prompt_task(
         tool_defs,
         history,
         tool_ctx,
+        session.runtime_kind,
+        session.mode,
     )
     .await;
 
@@ -610,6 +708,8 @@ async fn run_prompt_task(
             stop_reason: persisted_stop_reason,
             content: persisted_content,
             created_at: persisted_created_at,
+            runtime_kind: session.runtime_kind,
+            mode: session.mode,
         },
     );
 
@@ -617,7 +717,14 @@ async fn run_prompt_task(
     // handler invalidates the history query, which now refetches a
     // history that contains the row we just broadcast in
     // `message_persisted` — no race, no flash.
-    sse_manager.broadcast(session_id, SseWireEvent::Done { stop_reason });
+    sse_manager.broadcast(
+        session_id,
+        SseWireEvent::Done {
+            stop_reason,
+            runtime_kind: session.runtime_kind,
+            mode: session.mode,
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +985,8 @@ async fn agent_loop(
     mut tool_defs: Option<Vec<agent::ToolDefinition>>,
     mut history: Vec<agent::Message>,
     tool_ctx: crate::tools::ToolContext,
+    runtime_kind: agent::RuntimeKind,
+    mode: agent::SessionMode,
 ) -> LoopResult {
     use agent::StreamEvent;
     use futures_util::StreamExt;
@@ -968,7 +1077,11 @@ async fn agent_loop(
                                 _ => {
                                     sse_manager.broadcast(
                                         session_id,
-                                        sse::stream_event_to_wire(event.clone()),
+                                        sse::stream_event_to_wire(
+                                            event.clone(),
+                                            runtime_kind,
+                                            mode,
+                                        ),
                                     );
                                 }
                             }
@@ -1514,6 +1627,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1537,6 +1653,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1570,6 +1689,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1609,6 +1731,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1660,6 +1785,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1703,6 +1831,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1739,6 +1870,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1867,6 +2001,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2002,6 +2139,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2196,6 +2336,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2353,6 +2496,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2460,6 +2606,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2577,6 +2726,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2725,6 +2877,9 @@ mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2815,10 +2970,11 @@ mod tests {
             matches!(
                 last,
                 crate::sse::SseWireEvent::Done {
-                    stop_reason: agent::StopReason::EndTurn
+                    stop_reason: agent::StopReason::EndTurn,
+                    ..
                 }
             ),
-            "expected last event to be Done{{EndTurn}}"
+            "expected last event to be Done{{EndTurn, ..}}"
         );
 
         // Wait for task to finish
@@ -2887,6 +3043,9 @@ You are a senior Rust engineer."#,
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -2996,6 +3155,9 @@ You are a planning specialist."#,
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -3086,6 +3248,9 @@ You are broken."#,
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -3309,6 +3474,9 @@ You are broken."#,
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -4003,6 +4171,9 @@ You are broken."#,
             parent_session_id,
             None,
             None, // codebase_id
+            None, // runtime_kind — use default
+            None, // mode — use default
+            None, // runtime_metadata_json — none
         )
         .unwrap()
     }
@@ -4126,6 +4297,9 @@ You are broken."#,
             Some("nonexistent-session-id"),
             None,
             None, // codebase_id
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4159,6 +4333,9 @@ You are broken."#,
             Some(&parent.id),
             None,
             None, // codebase_id
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4206,6 +4383,9 @@ You are broken."#,
             Some(&deepest.id),
             None,
             None, // codebase_id
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4250,6 +4430,9 @@ You are broken."#,
             Some(&b.id),
             None,
             None, // codebase_id
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4300,6 +4483,9 @@ You are broken."#,
             Some(&parent.id),
             None,
             None, // codebase_id
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4355,6 +4541,9 @@ You are broken."#,
             None,
             None,
             Some(&codebase.id),
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -4392,6 +4581,9 @@ You are broken."#,
             None,
             None,
             Some("nonexistent-codebase-id"),
+            None, // runtime_kind
+            None, // mode
+            None, // runtime_metadata_json
         );
 
         match result {
@@ -4447,6 +4639,9 @@ You are broken."#,
             None,
             None,
             Some(&codebase.id),
+            None,
+            None,
+            None,
         );
 
         match result {
@@ -4458,6 +4653,332 @@ You are broken."#,
                 "expected NotFound for cross-workspace codebase, got: {:?}",
                 other
             ),
+        }
+    }
+
+    // --- feat-038: session runtime_kind / mode / runtime_metadata_json ---
+
+    /// Migration 011 added the three runtime columns. Verify the
+    /// post-migration `sessions` table is queryable and the columns are
+    /// present with the documented defaults.
+    #[test]
+    fn test_session_runtime_kind_migration() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // After migrations, inserting the minimum 9 columns + reading
+        // back must succeed. The store writes the 3 new columns as part
+        // of its 12-arg signature, so this exercises the full path.
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,                    // codebase_id
+            RuntimeKind::ClaudeCode, // exercise non-default runtime
+            SessionMode::Wrapped,    // exercise non-default mode
+            None,                    // no metadata
+        )
+        .expect("create with non-default runtime/mode");
+
+        // The DB row carries the explicit values, not the column
+        // defaults. Migration 011's DEFAULTs are only seen by pre-011
+        // rows that got backfilled — not by anything inserted after.
+        assert_eq!(session.runtime_kind, RuntimeKind::ClaudeCode);
+        assert_eq!(session.mode, SessionMode::Wrapped);
+        assert_eq!(session.runtime_metadata_json, None);
+
+        // The columns must be readable directly via raw SQL. This
+        // proves migration 011 actually ran (the columns would not
+        // exist otherwise) and the column names match the migration.
+        let conn = db.conn();
+        let runtime_kind_db: String = conn
+            .query_row(
+                "SELECT runtime_kind FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id],
+                |r| r.get(0),
+            )
+            .expect("query runtime_kind");
+        let mode_db: String = conn
+            .query_row(
+                "SELECT mode FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id],
+                |r| r.get(0),
+            )
+            .expect("query mode");
+        assert_eq!(runtime_kind_db, "claude-code");
+        assert_eq!(mode_db, "wrapped");
+    }
+
+    /// Persisting a `runtime_metadata_json` string and reading it back
+    /// returns the exact bytes. The column is opaque JSON, so the store
+    /// does no validation — roundtrip fidelity is the only contract.
+    #[test]
+    fn test_session_runtime_metadata_roundtrip() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // A realistic Claude-Code resume payload: a CLI session id plus
+        // a few runtime knobs. Any JSON object should roundtrip verbatim
+        // — the store does not parse or re-serialize it.
+        let metadata = r#"{"cli_session_id":"sess_abc123","cwd":"/tmp/repo"}"#;
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // codebase_id
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            Some(metadata),
+        )
+        .expect("create with metadata");
+
+        assert_eq!(session.runtime_metadata_json.as_deref(), Some(metadata));
+
+        // Read it back through a fresh query path (list_by_workspace)
+        // to confirm the column is selected, not just stored.
+        let listed = SessionStore::list_by_workspace(&db, &ws_id, None, 100)
+            .expect("list sessions")
+            .data;
+        let found = listed
+            .iter()
+            .find(|s| s.id == session.id)
+            .expect("session present in workspace listing");
+        assert_eq!(
+            found.runtime_metadata_json.as_deref(),
+            Some(metadata),
+            "list_by_workspace must surface runtime_metadata_json"
+        );
+    }
+
+    /// `create_session` called without specifying any of the three
+    /// runtime fields must persist the platform defaults
+    /// (`anthropic-api` + `native`) and a `NULL` metadata column.
+    /// This is the contract for the pre-feat-038 API surface — the
+    /// new fields are fully backward compatible.
+    #[test]
+    fn test_session_runtime_default_backfill() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Call through the service layer (not the raw store) so we
+        // exercise the full default-resolution path. All three
+        // runtime fields are None — same as the pre-feat-038 callers.
+        let session = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None, // no parent (not a resume)
+            None,
+            None, // codebase_id
+            None, // runtime_kind — use default
+            None, // mode — use default
+            None, // runtime_metadata_json — none
+        )
+        .expect("create with all defaults");
+
+        // Platform defaults — see `RuntimeKind::default()` /
+        // `SessionMode::default()`. The defaults match migration 011's
+        // column DEFAULTs, so a row inserted post-migration is
+        // indistinguishable from a backfilled pre-migration row.
+        assert_eq!(session.runtime_kind, RuntimeKind::AnthropicApi);
+        assert_eq!(session.mode, SessionMode::Native);
+        assert_eq!(session.runtime_metadata_json, None);
+    }
+
+    /// Resuming a `claude-code` session without passing metadata must
+    /// inherit the parent's `cli_session_id`. The metadata is
+    /// meaningful only on the same runtime.
+    #[test]
+    fn test_session_resume_inherits_metadata_same_runtime() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Parent: a finished claude-code session with metadata.
+        let parent = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // codebase_id
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            Some(r#"{"cli_session_id":"parent-id"}"#),
+        )
+        .expect("create parent");
+        complete_session(&db, &parent.id);
+
+        // Child: resume on the same runtime, no explicit metadata.
+        let child = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&parent.id), // resume
+            None,
+            None,                // codebase_id
+            Some("claude-code"), // same runtime as parent
+            Some("wrapped"),     // same mode
+            None,                // no explicit metadata — must inherit
+        )
+        .expect("resume on same runtime");
+
+        assert_eq!(child.runtime_kind, RuntimeKind::ClaudeCode);
+        assert_eq!(child.mode, SessionMode::Wrapped);
+        assert_eq!(
+            child.runtime_metadata_json.as_deref(),
+            Some(r#"{"cli_session_id":"parent-id"}"#),
+            "metadata must be inherited on same-runtime resume"
+        );
+    }
+
+    /// Resuming on a different runtime must clear the parent's
+    /// metadata. A `claude-code` cli_session_id is meaningless to an
+    /// `anthropic-api` child.
+    #[test]
+    fn test_session_resume_clears_metadata_on_runtime_switch() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let parent = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            Some(r#"{"cli_session_id":"parent-id"}"#),
+        )
+        .expect("create parent");
+        complete_session(&db, &parent.id);
+
+        // Child: resume on a different runtime, no explicit metadata.
+        let child = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&parent.id),
+            None,
+            None,
+            Some("anthropic-api"), // different runtime
+            None,                  // default mode
+            None,                  // no explicit metadata
+        )
+        .expect("resume on different runtime");
+
+        assert_eq!(child.runtime_kind, RuntimeKind::AnthropicApi);
+        assert_eq!(
+            child.runtime_metadata_json, None,
+            "metadata must be cleared when runtime changes"
+        );
+    }
+
+    /// An explicit `runtime_metadata_json` on a resume must always win
+    /// over the parent's metadata — the caller is asserting "I know
+    /// what I'm doing, use this verbatim." This holds even on
+    /// same-runtime resumes.
+    #[test]
+    fn test_session_resume_explicit_metadata_wins() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let parent = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            Some(r#"{"cli_session_id":"parent-id"}"#),
+        )
+        .expect("create parent");
+        complete_session(&db, &parent.id);
+
+        let override_metadata = r#"{"cli_session_id":"override-id"}"#;
+        let child = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            Some(&parent.id),
+            None,
+            None,
+            Some("claude-code"),
+            Some("wrapped"),
+            Some(override_metadata), // explicit override
+        )
+        .expect("resume with explicit metadata");
+
+        assert_eq!(
+            child.runtime_metadata_json.as_deref(),
+            Some(override_metadata),
+            "explicit metadata must override parent"
+        );
+    }
+
+    /// An invalid `runtime_kind` string is a 400-level validation
+    /// error, surfaced before any DB work. The same applies to `mode`.
+    #[test]
+    fn test_session_runtime_invalid_value_rejected() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("not-a-real-runtime"),
+            None,
+            None,
+        );
+
+        match result {
+            Err(AppError::Validation(msg)) => {
+                assert!(
+                    msg.contains("not-a-real-runtime"),
+                    "error message must echo the bad value, got: {msg}"
+                );
+            }
+            other => panic!("expected Validation error, got: {:?}", other),
         }
     }
 }

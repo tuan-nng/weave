@@ -223,6 +223,14 @@ pub enum SseWireEvent {
     },
     Done {
         stop_reason: agent::StopReason,
+        /// Which Runtime Tool ran this turn (feat-038). The frontend
+        /// uses this to render runtime-specific UI affordances (e.g.
+        /// the CLI resume banner for `claude-code`).
+        runtime_kind: agent::RuntimeKind,
+        /// How the agent drove the turn (feat-038). `wrapped` turns
+        /// carry additional metadata that the frontend surfaces as a
+        /// "subprocess" badge.
+        mode: agent::SessionMode,
     },
     Error {
         message: String,
@@ -240,6 +248,13 @@ pub enum SseWireEvent {
         stop_reason: Option<String>,
         content: String,
         created_at: String,
+        /// Which Runtime Tool produced this message (feat-038). Mirrors
+        /// the `done.runtime_kind` — the frontend needs both to render
+        /// a consistent runtime badge from the first event of the turn.
+        runtime_kind: agent::RuntimeKind,
+        /// How the agent drove the turn that produced this message
+        /// (feat-038). Mirrors `done.mode`.
+        mode: agent::SessionMode,
     },
     // SSE-protocol events
     Connected {
@@ -315,7 +330,20 @@ impl SseWireEvent {
 }
 
 /// Convert an agent `StreamEvent` into an `SseWireEvent`.
-pub fn stream_event_to_wire(event: agent::StreamEvent) -> SseWireEvent {
+///
+/// `runtime_kind` and `mode` are session-level (not per-turn) values
+/// (feat-038). They are forwarded into the wire `Done` event so the
+/// frontend can render a consistent runtime badge across the turn.
+/// The agent's own `StreamEvent::Done` is suppressed at the call site
+/// in `service/sessions.rs` (it is captured into the per-turn
+/// `turn_stop_reason` and the final terminal `Done` is broadcast
+/// separately with the session's runtime/mode in scope) — this
+/// conversion is kept for tests and as a defensive fallback.
+pub fn stream_event_to_wire(
+    event: agent::StreamEvent,
+    runtime_kind: agent::RuntimeKind,
+    mode: agent::SessionMode,
+) -> SseWireEvent {
     match event {
         agent::StreamEvent::TextDelta { text } => SseWireEvent::TextDelta { text },
         agent::StreamEvent::ToolUseStart { id, name, input } => {
@@ -324,7 +352,11 @@ pub fn stream_event_to_wire(event: agent::StreamEvent) -> SseWireEvent {
         agent::StreamEvent::ToolUseDelta { id, delta } => SseWireEvent::ToolUseDelta { id, delta },
         agent::StreamEvent::ToolResult { id, result } => SseWireEvent::ToolResult { id, result },
         agent::StreamEvent::Thinking { text } => SseWireEvent::Thinking { text },
-        agent::StreamEvent::Done { stop_reason } => SseWireEvent::Done { stop_reason },
+        agent::StreamEvent::Done { stop_reason } => SseWireEvent::Done {
+            stop_reason,
+            runtime_kind,
+            mode,
+        },
         agent::StreamEvent::Error { message } => SseWireEvent::Error { message },
     }
 }
@@ -457,7 +489,9 @@ mod tests {
         );
         assert_eq!(
             SseWireEvent::Done {
-                stop_reason: agent::StopReason::EndTurn
+                stop_reason: agent::StopReason::EndTurn,
+                runtime_kind: agent::RuntimeKind::default(),
+                mode: agent::SessionMode::default(),
             }
             .event_type(),
             "done"
@@ -481,6 +515,8 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 content: "hi".into(),
                 created_at: "2026-06-01T00:00:00Z".into(),
+                runtime_kind: agent::RuntimeKind::default(),
+                mode: agent::SessionMode::default(),
             }
             .event_type(),
             "message_persisted"
@@ -542,10 +578,13 @@ mod tests {
             stop_reason: Some("end_turn".into()),
             content: "Hello, world".into(),
             created_at: "2026-06-01T20:14:33.512Z".into(),
+            runtime_kind: agent::RuntimeKind::AnthropicApi,
+            mode: agent::SessionMode::Native,
         };
         let json = sse_data(&event);
         // JSON shape: {"type":"message_persisted","id":...,"role":...,
-        //   "stop_reason":...,"content":...,"created_at":...}
+        //   "stop_reason":...,"content":...,"created_at":...,
+        //   "runtime_kind":"...","mode":"..."}
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["type"], "message_persisted");
         assert_eq!(value["id"], "550e8400-e29b-41d4-a716-446655440000");
@@ -553,6 +592,8 @@ mod tests {
         assert_eq!(value["stop_reason"], "end_turn");
         assert_eq!(value["content"], "Hello, world");
         assert_eq!(value["created_at"], "2026-06-01T20:14:33.512Z");
+        assert_eq!(value["runtime_kind"], "anthropic-api");
+        assert_eq!(value["mode"], "native");
     }
 
     #[tokio::test]
@@ -566,6 +607,8 @@ mod tests {
             stop_reason: Some("cancelled".into()),
             content: String::new(),
             created_at: "2026-06-01T20:14:33.512Z".into(),
+            runtime_kind: agent::RuntimeKind::default(),
+            mode: agent::SessionMode::default(),
         };
         assert_eq!(event.event_type(), "message_persisted");
         let json = sse_data(&event);
@@ -590,6 +633,8 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 content: "hi".into(),
                 created_at: "2026-06-01T20:14:33.512Z".into(),
+                runtime_kind: agent::RuntimeKind::AnthropicApi,
+                mode: agent::SessionMode::Native,
             },
         );
         assert!(assigned_id > 0);
@@ -600,11 +645,15 @@ mod tests {
                 id,
                 content,
                 stop_reason,
+                runtime_kind,
+                mode,
                 ..
             } => {
                 assert_eq!(id, "msg-1");
                 assert_eq!(content, "hi");
                 assert_eq!(stop_reason, Some("end_turn".into()));
+                assert_eq!(runtime_kind, agent::RuntimeKind::AnthropicApi);
+                assert_eq!(mode, agent::SessionMode::Native);
             }
             _ => panic!("expected MessagePersisted"),
         }
@@ -612,20 +661,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_event_to_wire_conversion() {
-        let wire = stream_event_to_wire(agent::StreamEvent::TextDelta {
-            text: "hello".into(),
-        });
+        let wire = stream_event_to_wire(
+            agent::StreamEvent::TextDelta {
+                text: "hello".into(),
+            },
+            agent::RuntimeKind::AnthropicApi,
+            agent::SessionMode::Native,
+        );
         match wire {
             SseWireEvent::TextDelta { text } => assert_eq!(text, "hello"),
             _ => panic!("expected TextDelta"),
         }
 
-        let wire = stream_event_to_wire(agent::StreamEvent::Done {
-            stop_reason: agent::StopReason::EndTurn,
-        });
+        let wire = stream_event_to_wire(
+            agent::StreamEvent::Done {
+                stop_reason: agent::StopReason::EndTurn,
+            },
+            agent::RuntimeKind::ClaudeCode,
+            agent::SessionMode::Wrapped,
+        );
         match wire {
-            SseWireEvent::Done { stop_reason } => {
-                assert_eq!(stop_reason, agent::StopReason::EndTurn)
+            SseWireEvent::Done {
+                stop_reason,
+                runtime_kind,
+                mode,
+            } => {
+                assert_eq!(stop_reason, agent::StopReason::EndTurn);
+                assert_eq!(runtime_kind, agent::RuntimeKind::ClaudeCode);
+                assert_eq!(mode, agent::SessionMode::Wrapped);
             }
             _ => panic!("expected Done"),
         }

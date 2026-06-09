@@ -268,7 +268,7 @@ fn map_sse_to_a2a(event: &SseWireEvent) -> (Option<TaskStatus>, Option<String>) 
     match event {
         SseWireEvent::TextDelta { .. } => (Some(TaskStatus::Working), None),
         SseWireEvent::Thinking { .. } => (Some(TaskStatus::Working), None),
-        SseWireEvent::Done { stop_reason } => {
+        SseWireEvent::Done { stop_reason, .. } => {
             let status = match stop_reason {
                 StopReason::EndTurn | StopReason::MaxTokens | StopReason::ToolUse => {
                     TaskStatus::Completed

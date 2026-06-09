@@ -137,6 +137,9 @@ pub async fn try_automate_lane(
         None,
         None, // context_id — not used in kanban lane automation
         None, // codebase_id — kanban auto-spawn does not pick a codebase; tasks don't yet carry one
+        None, // runtime_kind — use default (anthropic-api); the column-aware kanban UX lands in feat-053+
+        None, // mode — use default (native)
+        None, // runtime_metadata_json — none
     )?;
 
     // Link the session to the task. `session_id: Some(Some(sid))` is the

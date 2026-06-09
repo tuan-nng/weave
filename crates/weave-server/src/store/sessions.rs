@@ -1,3 +1,4 @@
+use crate::agent::{RuntimeKind, SessionMode};
 use crate::db::Db;
 use crate::error::AppError;
 use chrono::Utc;
@@ -32,6 +33,16 @@ pub struct Session {
     /// FK is `ON DELETE SET NULL` — the row survives, the binding
     /// is broken, the stored `cwd` is kept as-is.
     pub codebase_id: Option<String>,
+    /// Which Runtime Tool this session runs on (feat-038). Pre-feat-038
+    /// rows backfill to `AnthropicApi`.
+    pub runtime_kind: RuntimeKind,
+    /// How the agent drives a turn (feat-038). Pre-feat-038 rows
+    /// backfill to `Native`.
+    pub mode: SessionMode,
+    /// Per-runtime JSON blob — for CLI runtimes the canonical field
+    /// is `cli_resume_id`. `None` for native HTTP sessions and for
+    /// any session that has not yet produced per-turn state.
+    pub runtime_metadata_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -130,6 +141,9 @@ impl SessionStore {
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
         codebase_id: Option<&str>,
+        runtime_kind: RuntimeKind,
+        mode: SessionMode,
+        runtime_metadata_json: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -139,10 +153,12 @@ impl SessionStore {
                 "INSERT INTO sessions
                      (id, workspace_id, provider_id, specialist_id,
                       parent_session_id, context_id, status, model, cwd, codebase_id,
+                      runtime_kind, mode, runtime_metadata_json,
                       created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?10)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
                  RETURNING id, workspace_id, provider_id, specialist_id,
                            parent_session_id, context_id, status, model, cwd, codebase_id,
+                           runtime_kind, mode, runtime_metadata_json,
                            created_at, updated_at",
                 rusqlite::params![
                     id,
@@ -154,6 +170,9 @@ impl SessionStore {
                     model,
                     cwd,
                     codebase_id,
+                    runtime_kind.as_str(),
+                    mode.as_str(),
+                    runtime_metadata_json,
                     now,
                 ],
                 Self::map_row,
@@ -167,6 +186,7 @@ impl SessionStore {
             .query_row(
                 "SELECT id, workspace_id, provider_id, specialist_id,
                         parent_session_id, context_id, status, model, cwd, codebase_id,
+                        runtime_kind, mode, runtime_metadata_json,
                         created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 [id],
@@ -221,6 +241,7 @@ impl SessionStore {
         let mut stmt = conn.prepare(
             "SELECT id, workspace_id, provider_id, specialist_id,
                     parent_session_id, context_id, status, model, cwd, codebase_id,
+                    runtime_kind, mode, runtime_metadata_json,
                     created_at, updated_at
              FROM sessions
              WHERE workspace_id = ?1
@@ -269,6 +290,7 @@ impl SessionStore {
              WHERE id = ?3 AND status NOT IN ('completed', 'cancelled', 'error')
              RETURNING id, workspace_id, provider_id, specialist_id,
                        parent_session_id, context_id, status, model, cwd, codebase_id,
+                       runtime_kind, mode, runtime_metadata_json,
                        created_at, updated_at",
             rusqlite::params![new_status, now, id],
             Self::map_row,
@@ -306,7 +328,46 @@ impl SessionStore {
     }
 
     /// Map a result row to a `Session`.
+    ///
+    /// Column indices MUST match the SELECT/RETURNING column lists in
+    /// `create`, `get_by_id`, `list_by_workspace`, `update_status`, and
+    /// `create_tx`. Drift between this mapper and any of those sites
+    /// is a silent bug — keep them in lockstep.
+    ///
+    /// Layout (15 columns after migration 011):
+    ///   0: id
+    ///   1: workspace_id
+    ///   2: provider_id
+    ///   3: specialist_id
+    ///   4: parent_session_id
+    ///   5: context_id
+    ///   6: status
+    ///   7: model
+    ///   8: cwd
+    ///   9: codebase_id
+    ///  10: runtime_kind       (TEXT; parsed via `RuntimeKind::from_str`)
+    ///  11: mode               (TEXT; parsed via `SessionMode::from_str`)
+    ///  12: runtime_metadata_json (TEXT NULL)
+    ///  13: created_at
+    ///  14: updated_at
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+        // The 2 typed enum columns are read as String and parsed via
+        // `FromStr`. The column-level DEFAULTs on migration 011
+        // guarantee the parser never sees a NULL or unknown value for
+        // existing rows; for new rows the value is whatever the caller
+        // passed (already validated upstream). A parse failure here
+        // surfaces as `FromSqlConversionFailure` so the error bubbles
+        // up as `AppError::Database` — defensive in case a future
+        // migration introduces a new variant without backfill.
+        let runtime_kind_str: String = row.get(10)?;
+        let mode_str: String = row.get(11)?;
+        let runtime_kind: RuntimeKind = runtime_kind_str.parse().map_err(|e: AppError| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let mode: SessionMode = mode_str.parse().map_err(|e: AppError| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
         Ok(Session {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
@@ -318,8 +379,11 @@ impl SessionStore {
             model: row.get(7)?,
             cwd: row.get(8)?,
             codebase_id: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            runtime_kind,
+            mode,
+            runtime_metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
         })
     }
 
@@ -339,6 +403,9 @@ impl SessionStore {
         parent_session_id: Option<&str>,
         context_id: Option<&str>,
         codebase_id: Option<&str>,
+        runtime_kind: RuntimeKind,
+        mode: SessionMode,
+        runtime_metadata_json: Option<&str>,
     ) -> Result<Session, AppError> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -347,10 +414,12 @@ impl SessionStore {
             "INSERT INTO sessions
                  (id, workspace_id, provider_id, specialist_id,
                   parent_session_id, context_id, status, model, cwd, codebase_id,
+                  runtime_kind, mode, runtime_metadata_json,
                   created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'connecting', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
              RETURNING id, workspace_id, provider_id, specialist_id,
                        parent_session_id, context_id, status, model, cwd, codebase_id,
+                       runtime_kind, mode, runtime_metadata_json,
                        created_at, updated_at",
             rusqlite::params![
                 id,
@@ -362,6 +431,9 @@ impl SessionStore {
                 model,
                 cwd,
                 codebase_id,
+                runtime_kind.as_str(),
+                mode.as_str(),
+                runtime_metadata_json,
                 now,
             ],
             Self::map_row,
@@ -609,6 +681,9 @@ pub(crate) mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -651,6 +726,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         assert_eq!(s.status, "connecting");
@@ -688,6 +766,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         let s = SessionStore::update_status(&db, &s.id, "cancelled").unwrap();
@@ -704,6 +785,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         let s = SessionStore::update_status(&db, &s.id, "error").unwrap();
@@ -726,6 +810,9 @@ pub(crate) mod tests {
                 None,
                 None,
                 None,
+                RuntimeKind::default(),
+                SessionMode::default(),
+                None, // runtime_metadata_json
             )
             .unwrap();
         }
@@ -772,6 +859,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -789,6 +879,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -830,6 +923,9 @@ pub(crate) mod tests {
                 None,
                 None,
                 None,
+                RuntimeKind::default(),
+                SessionMode::default(),
+                None, // runtime_metadata_json
             )
             .unwrap();
             created_ids.push(s.id);
@@ -902,6 +998,9 @@ pub(crate) mod tests {
             None,
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         );
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -927,6 +1026,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         let child = SessionStore::create(
@@ -939,6 +1041,9 @@ pub(crate) mod tests {
             Some(&parent.id),
             None,
             None, // codebase_id
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -973,6 +1078,9 @@ pub(crate) mod tests {
             None,
             None,
             Some(&codebase.id),
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1020,6 +1128,9 @@ pub(crate) mod tests {
             None,
             None,
             Some(&codebase.id),
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         assert!(session.codebase_id.is_some());
@@ -1049,6 +1160,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1120,6 +1234,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1161,6 +1278,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1197,6 +1317,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1219,6 +1342,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
 
@@ -1258,6 +1384,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         let s1b = SessionStore::create(
@@ -1270,6 +1399,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         let s1t = SessionStore::create(
@@ -1282,6 +1414,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         SessionStore::update_status(&db, &s1a.id, "ready").unwrap();
@@ -1299,6 +1434,9 @@ pub(crate) mod tests {
             None,
             None,
             None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None, // runtime_metadata_json
         )
         .unwrap();
         SessionStore::update_status(&db, &s2a.id, "ready").unwrap();

@@ -107,6 +107,7 @@ pub(crate) fn reap_orphans(db: &Db) -> Result<u64, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{RuntimeKind, SessionMode};
     use crate::store::kanban_test_helpers::{
         make_test_db, seed_provider, seed_workspace_with_board,
     };
@@ -123,6 +124,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            RuntimeKind::default(),
+            SessionMode::default(),
             None,
         )
         .expect("create session");

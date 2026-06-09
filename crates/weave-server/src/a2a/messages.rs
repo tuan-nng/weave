@@ -85,6 +85,9 @@ pub async fn send_message(
             None,                       // parent_session_id — fresh session
             body.context_id.as_deref(), // context_id — A2A task linking
             None,                       // codebase_id — A2A path doesn't pick a codebase
+            None,                       // runtime_kind — use default (anthropic-api)
+            None,                       // mode — use default (native)
+            None,                       // runtime_metadata_json — none for native HTTP
         )?
     };
 

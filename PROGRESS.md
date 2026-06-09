@@ -8,14 +8,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09 (fix-069 committed; fix-067 + fix-068 both committed earlier today)
-- **Latest commit:** (this session — see `fix-069` entry below)
-- **Active feature:** none
-- **In-flight (uncommitted):** none
+- **Last updated:** 2026-06-09 (feat-038 implemented; passing; ready to commit)
+- **Latest commit:** `40b5032 fix: useSession SSE 'error' listener no longer throws on built-in connection errors (fix-069)`
+- **Active feature:** feat-038 (sessions runtime/mode/runtime_metadata_json columns) — Phase 7 of the multi-runtime strategy. Phases 1-6 done; verification gate green; Phase 7 (commit + flip state) remaining.
+- **In-flight (uncommitted):** feat-038 implementation, see in-progress note below.
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 623 Rust tests + 113 frontend tests pass (+4 frontend regression tests for the SSE `error` listener guard in `makeSseListener`).
+- **Test status:** green — 642 Rust tests (635 pre + 7 new) + 113 frontend tests pass.
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** none
+- **Uncommitted:** feat-038 changes (not yet committed; this section's "Files touched" reflects the actually-changed files, not the original plan).
 
 ### fix-069 — `useSession` SSE `"error"` listener no longer throws on built-in connection errors (this session)
 
@@ -56,6 +56,50 @@ User bug report: opening `http://localhost:5173/sessions/6f46ff14-2f1f-4a81-93e8
 
 - Same `type_complexity` clippy warning in `service/sessions.rs:1436` (test helper) as in fix-068 — not addressed here, not in the touched files.
 - No change to `feature_list.json` (this is a bug fix, not a feature).
+
+---
+
+## feat-038 — sessions runtime_kind / mode / runtime_metadata_json migration (implemented, verification green, this session)
+
+Phase 7 of the multi-runtime strategy. Schema change: three new columns on `sessions`. Implementation done; verification gate passing; ready to commit and flip `feature_list.json` to `passing`.
+
+### Architecture decision (Pragmatic)
+
+- **Typed enums** in `agent/mod.rs`: new `RuntimeKind` (anthropic-api | openai-api | openai-compatible | claude-code | codex | opencode) and `SessionMode` (native | wrapped | attended), sibling to the existing `StopReason` enum. Wire format is snake_case via `#[serde(rename_all = "snake_case")]` — same shape as the SQL column default so round-trips are symmetric.
+- **12-arg `create_session` signature** (defer `CreateSessionParams` struct refactor — out of scope for this slice; that refactor will be its own feat).
+- **Serde-driven validation at the API boundary**: the new `CreateSessionRequest` fields are typed enums, so an unknown `runtime_kind` or `mode` is rejected with 400 at parse time.
+- **Default-fill at the service layer** via `parse_runtime_kind` / `parse_mode` helpers that take `Option<&str>` and return `AppError::Validation` on bad input; missing values default to `anthropic-api` / `native`.
+- **Resume inheritance** in `SessionService::create_session` via `resume_inherit` helper: when `parent_session_id` is set, the child inherits `runtime_kind` and `mode` from the parent unless the caller explicitly overrides; `runtime_metadata_json` is inherited only when the runtime_kind matches (a different runtime can't reuse a CLI resume id). Explicit caller override of metadata always wins.
+
+### Files touched (actual)
+
+1. `crates/weave-server/src/migrations/011_session_runtime.sql` (new) — three `ALTER TABLE ADD COLUMN` statements, idempotent guards.
+2. `crates/weave-server/src/db.rs` — MIGRATIONS array gains entry 011; `test_migrations_idempotent` assertion bumps to `user_version == 11`.
+3. `crates/weave-server/src/agent/mod.rs` — add `RuntimeKind`, `SessionMode` enums; `FromStr` impls; `as_str()`; `Default` impls; roundtrip tests.
+4. `crates/weave-server/src/store/sessions.rs` — `Session` struct gets 3 fields; 5 SQL column-list sites updated; `map_row` indices shift to 12/13/14; `SessionStore::create` and `create_tx` gain 3 args; tests updated.
+5. `crates/weave-server/src/service/sessions.rs` — `create_session` gains 3 args; `resume_inherit` helper; `parse_runtime_kind` / `parse_mode` helpers; `agent_loop` threads `runtime_kind` and `mode` through; SSE `MessagePersisted` and `Done` events now carry them; test helper updated; 7 new tests added (the 3 named in the gate + 4 resume-inheritance variants).
+6. `crates/weave-server/src/api/sessions.rs` — `CreateSessionRequest` gains 3 fields; handler threads them through.
+7. `crates/weave-server/src/a2a/messages.rs` — A2A caller threads 3 args.
+8. `crates/weave-server/src/service/kanban.rs` — kanban auto-spawn threads 3 args.
+9. `crates/weave-server/src/service/startup.rs` — test helper `insert_session` threads 3 args.
+10. `crates/weave-server/src/api/health.rs` — three `SessionStore::create` test call sites thread 3 args.
+11. `crates/weave-server/src/sse/mod.rs` — `SseWireEvent::Done` and `MessagePersisted` gain `runtime_kind` and `mode` fields; `stream_event_to_wire` signature gains 2 params; `test_stream_event_to_wire_conversion` updated.
+
+### Verification gate
+
+```
+cargo test -p weave-server -- test_session_runtime_kind_migration
+cargo test -p weave-server -- test_session_runtime_metadata_roundtrip
+cargo test -p weave-server -- test_session_runtime_default_backfill
+```
+
+All 3 named tests pass. Plus 4 resume-inheritance tests pass:
+- `test_session_resume_inherits_metadata_same_runtime` — same-runtime resume inherits parent metadata
+- `test_session_resume_clears_metadata_on_runtime_switch` — runtime change clears parent metadata
+- `test_session_resume_explicit_metadata_wins` — caller override always wins
+- `test_session_runtime_invalid_value_rejected` — bad value returns 400 Validation
+
+Full `./init.sh` 3-layer gate green: clippy clean, fmt clean, 642 Rust tests + 113 frontend tests pass, binary builds, smoke test passes (`/api/health` + `GET /` serves `index.html` with `id="root"`).
 
 
 ### Data cleanup 2026-06-09 (out-of-band admin action, not a feature)

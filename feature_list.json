@@ -576,11 +576,11 @@
       "phase": "phase-7",
       "behavior": "Add three columns to `sessions`: `runtime_kind TEXT NOT NULL DEFAULT 'anthropic-api'` (one of `anthropic-api` | `openai-api` | `openai-compatible` | `claude-code` | `codex` | `opencode`), `mode TEXT NOT NULL DEFAULT 'native'` (one of `native` | `wrapped` | `attended`), and `runtime_metadata_json TEXT` (nullable, JSON-encoded per-runtime state including the CLI-native session id for resume). Migration is a new SQL file under `resources/migrations/` applied in order; existing rows backfill to `runtime_kind='anthropic-api', mode='native', runtime_metadata_json=NULL`. `SessionStore::create` and `update` accept and persist these fields; `get` and `list` return them. `MessageStore` and the SSE `done` event include the runtime_kind and mode in their payload. The `parent_session_id` resume chain (feat-018) inherits the parent session's runtime/mode by default but accepts an override on the new session row. Schema change is additive; no column renames.",
       "verification": "cargo test -p weave-server -- test_session_runtime_kind_migration && cargo test -p weave-server -- test_session_runtime_metadata_roundtrip && cargo test -p weave-server -- test_session_runtime_default_backfill",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-008"
       ],
-      "evidence": ""
+      "evidence": "All 3 named verification tests pass (test_session_runtime_kind_migration, test_session_runtime_metadata_roundtrip, test_session_runtime_default_backfill). Plus 4 resume-inheritance tests pass (test_session_resume_inherits_metadata_same_runtime, test_session_resume_clears_metadata_on_runtime_switch, test_session_resume_explicit_metadata_wins, test_session_runtime_invalid_value_rejected). Full ./init.sh 3-layer gate green: cargo clippy clean, cargo fmt --check clean, 642 Rust tests + 113 frontend tests pass, binary builds, smoke test passes (GET /api/health 200, GET / serves index.html with id=\"root\"). Migration 011 applied (user_version=11, asserted in test_migrations_idempotent)."
     },
     {
       "id": "feat-039",

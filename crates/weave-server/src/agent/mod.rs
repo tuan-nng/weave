@@ -5,12 +5,13 @@
 //! contract between providers and the rest of the system.
 
 use std::pin::Pin;
+use std::str::FromStr;
 
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ProviderError;
+use crate::error::{AppError, ProviderError};
 
 pub mod anthropic;
 pub mod registry;
@@ -96,6 +97,142 @@ pub enum StopReason {
     /// tool rounds and surfaced a final assistant "Sorry, too many tool calls."
     /// message so the user sees something coherent rather than an open stream.
     LoopLimit { iterations: u32 },
+}
+
+// ---------------------------------------------------------------------------
+// Runtime / mode enums (feat-038)
+// ---------------------------------------------------------------------------
+
+/// Which Runtime Tool a session runs on.
+///
+/// `RuntimeKind` is the discriminator for the `providers.kind` widening
+/// (feat-039) and for the per-turn `TurnContext` (feat-041). The wire
+/// format is snake_case (the same as the SQL column default), so a
+/// round-trip through JSON or SQLite text is lossless.
+///
+/// `AnthropicApi` is the pre-feat-038 default — every existing row
+/// backfills to this value. The full matrix of `runtime_kind` × `mode`
+/// compatibility is enforced in feat-040.
+#[allow(dead_code)] // Wider wiring lands in feat-039+; surface kept typed here
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeKind {
+    /// The Anthropic HTTP API in native mode (the pre-feat-038 default).
+    AnthropicApi,
+    /// The OpenAI HTTP API in native mode.
+    OpenaiApi,
+    /// An OpenAI-compatible HTTP endpoint (configurable `base_url`).
+    OpenaiCompatible,
+    /// The Claude Code CLI in wrapped mode (Phase 8 — feat-043+).
+    ClaudeCode,
+    /// The Codex CLI in wrapped mode (Phase 10 — feat-057+).
+    Codex,
+    /// The OpenCode CLI in wrapped mode (Phase 10 — feat-059+).
+    Opencode,
+}
+
+impl RuntimeKind {
+    /// Stable kebab-case wire form (matches the SQL column default and
+    /// the `#[serde(rename_all = "kebab-case")]` JSON shape).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnthropicApi => "anthropic-api",
+            Self::OpenaiApi => "openai-api",
+            Self::OpenaiCompatible => "openai-compatible",
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+        }
+    }
+}
+
+impl Default for RuntimeKind {
+    /// Pre-feat-038 default — every backfilled row lands here.
+    fn default() -> Self {
+        Self::AnthropicApi
+    }
+}
+
+impl std::fmt::Display for RuntimeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RuntimeKind {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "anthropic-api" => Ok(Self::AnthropicApi),
+            "openai-api" => Ok(Self::OpenaiApi),
+            "openai-compatible" => Ok(Self::OpenaiCompatible),
+            "claude-code" => Ok(Self::ClaudeCode),
+            "codex" => Ok(Self::Codex),
+            "opencode" => Ok(Self::Opencode),
+            other => Err(AppError::Validation(format!(
+                "invalid runtime_kind '{other}', expected one of: \
+                 anthropic-api, openai-api, openai-compatible, claude-code, codex, opencode"
+            ))),
+        }
+    }
+}
+
+/// How the agent drives a turn.
+///
+/// `Native` is the pre-feat-038 default — every existing row backfills
+/// to this value. `Wrapped` means a CLI subprocess is invoked per
+/// turn (Phase 8+). `Attended` is a separate Terminal abstraction
+/// (deferred — Phase 11).
+#[allow(dead_code)] // Wider wiring lands in feat-040+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    /// Weave drives the turn via a direct provider call (HTTP, native).
+    Native,
+    /// Weave drives the turn by spawning a CLI subprocess per turn.
+    Wrapped,
+    /// A human drives the CLI; Weave only observes. Deferred to Phase 11.
+    Attended,
+}
+
+impl SessionMode {
+    /// Stable snake-case wire form (matches the SQL column default).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Wrapped => "wrapped",
+            Self::Attended => "attended",
+        }
+    }
+}
+
+impl Default for SessionMode {
+    /// Pre-feat-038 default.
+    fn default() -> Self {
+        Self::Native
+    }
+}
+
+impl std::fmt::Display for SessionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SessionMode {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "native" => Ok(Self::Native),
+            "wrapped" => Ok(Self::Wrapped),
+            "attended" => Ok(Self::Attended),
+            other => Err(AppError::Validation(format!(
+                "invalid mode '{other}', expected one of: native, wrapped, attended"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,5 +494,142 @@ mod tests {
         assert_send_sync::<ToolDefinition>();
         assert_send_sync::<ModelInfo>();
         assert_send_sync::<ProviderHealth>();
+        assert_send_sync::<RuntimeKind>();
+        assert_send_sync::<SessionMode>();
+    }
+
+    // --- feat-038: RuntimeKind / SessionMode ---
+
+    #[test]
+    fn test_runtime_kind_variants() {
+        let kinds = [
+            RuntimeKind::AnthropicApi,
+            RuntimeKind::OpenaiApi,
+            RuntimeKind::OpenaiCompatible,
+            RuntimeKind::ClaudeCode,
+            RuntimeKind::Codex,
+            RuntimeKind::Opencode,
+        ];
+        assert_eq!(kinds.len(), 6, "RuntimeKind must have exactly 6 variants");
+    }
+
+    #[test]
+    fn test_runtime_kind_default_is_anthropic_api() {
+        // The pre-feat-038 default — every backfilled row lands here.
+        assert_eq!(RuntimeKind::default(), RuntimeKind::AnthropicApi);
+    }
+
+    #[test]
+    fn test_runtime_kind_as_str() {
+        assert_eq!(RuntimeKind::AnthropicApi.as_str(), "anthropic-api");
+        assert_eq!(RuntimeKind::OpenaiApi.as_str(), "openai-api");
+        assert_eq!(RuntimeKind::OpenaiCompatible.as_str(), "openai-compatible");
+        assert_eq!(RuntimeKind::ClaudeCode.as_str(), "claude-code");
+        assert_eq!(RuntimeKind::Codex.as_str(), "codex");
+        assert_eq!(RuntimeKind::Opencode.as_str(), "opencode");
+    }
+
+    #[test]
+    fn test_runtime_kind_from_str_roundtrip() {
+        for kind in [
+            RuntimeKind::AnthropicApi,
+            RuntimeKind::OpenaiApi,
+            RuntimeKind::OpenaiCompatible,
+            RuntimeKind::ClaudeCode,
+            RuntimeKind::Codex,
+            RuntimeKind::Opencode,
+        ] {
+            let parsed: RuntimeKind = kind.as_str().parse().expect("valid wire form");
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn test_runtime_kind_from_str_rejects_unknown() {
+        let err = "not-a-runtime".parse::<RuntimeKind>().unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(msg.contains("invalid runtime_kind")),
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_runtime_kind_serde_roundtrip() {
+        // JSON wire form is kebab-case (matches SQL column default).
+        for kind in [
+            RuntimeKind::AnthropicApi,
+            RuntimeKind::OpenaiApi,
+            RuntimeKind::OpenaiCompatible,
+            RuntimeKind::ClaudeCode,
+            RuntimeKind::Codex,
+            RuntimeKind::Opencode,
+        ] {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            let deserialized: RuntimeKind = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, kind);
+        }
+        // Spot-check the wire shape.
+        let json = serde_json::to_string(&RuntimeKind::AnthropicApi).unwrap();
+        assert_eq!(json, "\"anthropic-api\"");
+    }
+
+    #[test]
+    fn test_session_mode_variants() {
+        let modes = [
+            SessionMode::Native,
+            SessionMode::Wrapped,
+            SessionMode::Attended,
+        ];
+        assert_eq!(modes.len(), 3, "SessionMode must have exactly 3 variants");
+    }
+
+    #[test]
+    fn test_session_mode_default_is_native() {
+        // The pre-feat-038 default — every backfilled row lands here.
+        assert_eq!(SessionMode::default(), SessionMode::Native);
+    }
+
+    #[test]
+    fn test_session_mode_as_str() {
+        assert_eq!(SessionMode::Native.as_str(), "native");
+        assert_eq!(SessionMode::Wrapped.as_str(), "wrapped");
+        assert_eq!(SessionMode::Attended.as_str(), "attended");
+    }
+
+    #[test]
+    fn test_session_mode_from_str_roundtrip() {
+        for mode in [
+            SessionMode::Native,
+            SessionMode::Wrapped,
+            SessionMode::Attended,
+        ] {
+            let parsed: SessionMode = mode.as_str().parse().expect("valid wire form");
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn test_session_mode_from_str_rejects_unknown() {
+        let err = "turbo".parse::<SessionMode>().unwrap_err();
+        match err {
+            AppError::Validation(msg) => assert!(msg.contains("invalid mode")),
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_session_mode_serde_roundtrip() {
+        // JSON wire form is snake_case (matches SQL column default).
+        for mode in [
+            SessionMode::Native,
+            SessionMode::Wrapped,
+            SessionMode::Attended,
+        ] {
+            let json = serde_json::to_string(&mode).expect("serialize");
+            let deserialized: SessionMode = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, mode);
+        }
+        let json = serde_json::to_string(&SessionMode::Native).unwrap();
+        assert_eq!(json, "\"native\"");
     }
 }

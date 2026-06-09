@@ -6,6 +6,7 @@ use futures_util::stream;
 use serde::Deserialize;
 use std::convert::Infallible;
 
+use crate::agent;
 use crate::api::responses::DataResponse;
 use crate::error::AppError;
 use crate::service::sessions::SessionService;
@@ -42,6 +43,21 @@ pub struct CreateSessionRequest {
     /// the same workspace, and the codebase's `path` is copied onto the
     /// session's `cwd` (overriding any supplied `cwd`).
     pub codebase_id: Option<String>,
+    /// Which Runtime Tool this session runs on (feat-038). Accepts the
+    /// same kebab-case form as the SQL column default (e.g.
+    /// `"anthropic-api"`, `"claude-code"`). `None` defaults to
+    /// `"anthropic-api"`. Serde enum deserialization rejects unknown
+    /// values with 400 at parse time.
+    pub runtime_kind: Option<agent::RuntimeKind>,
+    /// How the agent drives a turn (feat-038). `None` defaults to
+    /// `"native"`. Same serde-rejection rule as `runtime_kind`.
+    pub mode: Option<agent::SessionMode>,
+    /// Per-runtime JSON blob. For CLI runtimes the canonical field is
+    /// `cli_resume_id`. On resume, this is inherited from the parent
+    /// only when the resolved `runtime_kind` matches the parent's;
+    /// otherwise it is cleared (a CLI resume id is meaningless on a
+    /// different runtime).
+    pub runtime_metadata_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +96,9 @@ pub async fn create_session(
         body.parent_session_id.as_deref(),
         None, // context_id — not set via the standard session API
         body.codebase_id.as_deref(),
+        body.runtime_kind.map(|k| k.as_str()),
+        body.mode.map(|m| m.as_str()),
+        body.runtime_metadata_json.as_deref(),
     )?;
 
     Ok((StatusCode::CREATED, Json(DataResponse { data: session })))
