@@ -9,13 +9,13 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-09
-- **Latest commit:** feat-062 (attach codebase to session as FS sandbox)
+- **Latest commit:** `cada59e` fix: New Session modal — inline codebase creation
 - **Active feature:** none
-- **In-flight (uncommitted):** (a) feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. (b) fix: New Session modal — inline codebase creation (this session). Ready to commit. See notes below.
+- **In-flight (uncommitted):** feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. See note below.
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 616 Rust tests + 99 frontend tests pass (9 new since last entry: 8 for feat-063 + 1 for the New Session inline-create fix; 1 existing test flipped from link→button expectation)
+- **Test status:** green — 616 Rust tests + 99 frontend tests pass (8 new for feat-063: 2 for /codebases, 6 for /boards; 1 new + 1 flipped for the New Session inline-create fix landed in `cada59e`)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** feat-063 (7 files: 2 new modals, 2 rewritten pages, 1 hook addition, 2 test files) + the New Session inline-create fix (4 files: `web/src/components/modal.tsx` +2 props, `web/src/components/new-codebase-modal.tsx` 1 prop, `web/src/components/new-session-modal.tsx` nested-modal + bug fix, `web/src/app/__tests__/sessions.test.tsx` 1 test updated + 1 test added + 1 mock format fixed).
+- **Uncommitted:** feat-063 (7 files: 2 new modals, 2 rewritten pages, 1 hook addition, 2 test files).
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
