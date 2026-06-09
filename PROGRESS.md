@@ -8,14 +8,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09 (fix-066 — Journey sidebar shows tool_call events; see journal entry below)
-- **Latest commit:** `cada59e` fix: New Session modal — inline codebase creation
+- **Last updated:** 2026-06-09 (fix-068 — reap_orphans stops nuking multi-turn `ready` sessions on restart)
+- **Latest commit:** `bed99ea` fix: Journey sidebar shows tool_call events (fix-066)
 - **Active feature:** none
-- **In-flight (uncommitted):** fix-066 — Journey sidebar empty-state bug (two parts: emit traces in `agent_loop`; render tool_call events in a new "Tools" section). See journal entry below.
+- **In-flight (uncommitted):** fix-067 (Journey detail Decisions/Errors + tool-call correlation) and fix-068 (reap_orphans narrow filter + 18-session data recovery).
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 619 Rust tests + 100 frontend tests pass (+3 Rust: 1 regression test for the trace emission, 1 backend test for the new `/trace/tools` endpoint, 1 from the native-tool-loop test family now exercising the new emission path; +2 frontend: 2 new journey tests covering the Tools section)
+- **Test status:** green — 623 Rust tests + 109 frontend tests pass (+1 Rust regression test for `ready` surviving `reap_orphans` across repeated restarts).
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** fix-066 (5 Rust files: 1 store + 1 api + 1 hook + 1 queryKeys + 1 api + 1 sidebar + 1 test file). See journal entry below for the per-file breakdown.
+- **Uncommitted:** fix-067 (5 files in `web/` + `crates/weave-server/src/service/sessions.rs`) and fix-068 (1 file: `crates/weave-server/src/service/startup.rs`).
 
 ### Data cleanup 2026-06-09 (out-of-band admin action, not a feature)
 
@@ -32,6 +32,46 @@ User-requested one-off cleanup of the dev SQLite database. Direct `sqlite3` writ
 1. **Restart the dev server.** `weave-server` (pid 1459382 at session end) has the pre-cleanup providers/sessions cached in memory. Stop the `cargo watch -x 'run -p weave-server'` shell (the one in the background) and re-run `just dev`. Until restart, any new session creation that targets the deleted `xiaomi` provider id will fail, and the UI will show stale rows.
 2. **No code or schema changes.** This was a data-only cleanup — `git status` is still clean, `feature_list.json` is unchanged, no test or lint regressions to chase.
 3. **If the user wants a recurring reset, ask first before automating.** A `just db:reset` recipe (drop + re-run migrations + re-seed default workspace) would be a feature, not an admin action — it belongs in `feature_list.json` with a verification command. Do not just add it inline.
+
+### fix-068 — `reap_orphans` no longer nukes multi-turn `ready` sessions on restart (uncommitted; this session)
+
+User bug report: at `http://localhost:5173/sessions`, **every** session in the default workspace was labeled `Error`. Clicked one (e.g. `c122fbc1-...` — the same one we validated at the top of this session) and it had a clean successful 4-message history (user "hello" → assistant greeting, user "what is this repo" → assistant with 2 tool calls). Nothing about the data said "error" — yet the DB said `status = "error"` and the badge said `Error`.
+
+**Root cause:** `reap_orphans` in `crates/weave-server/src/service/startup.rs` ran on every server startup and used `WHERE status NOT IN ('completed', 'cancelled', 'error')` — which catches BOTH `connecting` AND `ready`. The only state that genuinely could be a zombie from a killed server is `connecting` (the transient state set at session creation; only the spawned streaming task transitions it out). `ready` is the multi-turn idle state — the session successfully completed its last turn and is waiting for the next prompt. Reaping it silently broke every multi-turn conversation on every server restart and forced users to start a new session. The original test (`test_reap_orphans_marks_non_terminal_sessions_as_error`) locked in the bug by asserting that a `ready` session gets flipped to `error`.
+
+**Fix (1 file, +regression-test):**
+
+- `crates/weave-server/src/service/startup.rs`:
+  - Module doc rewrites the orphan model: only `connecting` is reapable. `ready` is the multi-turn idle state and must survive restart. `ActiveSessions` (in-memory) is the only way to know if a `ready` session was mid-stream when the server died, and it's gone after a crash — so we conservatively leave `ready` alone and surface a half-streamed assistant message to the user instead of nuking a successful multi-turn history.
+  - New `REAP_STATUSES: &[&str] = &["connecting"]` constant (narrow, with a doc comment telling future maintainers to keep it narrow).
+  - `SELECT` SQL flipped from `WHERE status NOT IN (...)` to `WHERE status IN (...)` against `REAP_STATUSES`.
+  - `UPDATE` WHERE clause mirrored (`AND status IN ('connecting')`) — defensive check, rows that became terminal between SELECT and UPDATE are left alone.
+  - Function-level doc updated: "Mark every `connecting` session as `error`."
+  - Test `test_reap_orphans_marks_non_terminal_sessions_as_error` renamed to `test_reap_orphans_marks_only_connecting_sessions_as_error` and rewritten: asserts `reaped == 1` (only `connecting` is reaped), `ready` is preserved, `completed` is untouched. Inline comment calls out that the previous version of this assertion was the bug.
+  - Test `test_reap_orphans_idempotent` now seeds `connecting` (not `ready`) — the right seed for what the function is actually supposed to reap.
+  - New test `test_reap_orphans_preserves_ready_sessions_across_restarts` — the regression guard. Simulates 5 consecutive server restarts and asserts the same `ready` session survives all of them. Without the fix, this test fails on the first reap.
+
+**Verification:**
+
+- `cargo test -p weave-server --bin weave-server service::startup` → 4 passed (1 pre-existing `test_reap_orphans_empty_database_is_noop` + 1 renamed + 1 updated idempotent + 1 new multi-restart regression).
+- `cargo test -p weave-server` → 623 passed (was 622; +1 for the new test).
+- `just lint` → clippy clean, ESLint clean.
+- `just fmt` → Rust fmt + Prettier clean.
+- `cd web && bun run test` → 109/109 (unchanged).
+- Live restart verification: killed the running server, started the freshly-built binary, verified the 18 recovered sessions still showed `status: "ready"` in the API and the StatusBadge rendered "Ready" (green). Server uptime 3s post-restart with all 18 sessions intact.
+
+**Data recovery (out-of-band admin action; same shape as the 2026-06-09 cleanup precedent):**
+
+- Backup: `cp weave.db weave.db.bak.20260609-160418` (790,528 bytes — byte-for-byte copy before the transaction).
+- Transaction: `PRAGMA busy_timeout = 10000; BEGIN IMMEDIATE; UPDATE sessions SET status = 'ready', updated_at = '2026-06-09T15:00:00+00:00' WHERE status = 'error'; COMMIT;` — 18 rows affected, ran against the live server via the WAL so no app restart was needed.
+- `PRAGMA foreign_key_check` clean, `PRAGMA integrity_check` clean.
+- Post-state via API: `GET /api/workspaces/.../sessions` → 18 sessions, all `ready`. Browser: every row in the sessions list renders "Ready" (green badge). The `c122fbc1-...` session detail page now shows the green "Ready" badge, the message input is enabled (no "Session has ended" placeholder), and the Journey sidebar's 2 tool_call rows are intact.
+- Note: the flip back to `ready` does not distinguish reaped-from-ready from genuinely-errorred-then-completed. A user can manually re-flag any session that was truly errored by patching it back to `error` via `PATCH /api/sessions/:id/status`. None of the 18 looked like a real error in the message history spot-check (c122fbc1 had a clean 4-message exchange with 2 successful tool calls).
+
+**Notes / follow-up:**
+
+- The renamed test still uses `insert_session` which goes through `SessionStore::create` (which seeds `connecting`) and then `update_status` to walk to the target state. That helper is fine — the renamed test now asserts the correct post-condition. No need to add a separate test for `connecting` since it's already covered by the renamed test.
+- No code change to `SessionStore::update_status`, `run_prompt_task`, or the state machine. The bug was localized to the single function `reap_orphans`.
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 

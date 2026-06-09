@@ -1,24 +1,38 @@
 //! Startup-time recovery tasks.
 //!
-//! Currently exposes [`reap_orphans`], which marks every non-terminal session
-//! that survived a previous server crash as `error`. The server can't tell
-//! from SQLite alone whether a session in `connecting` / `ready` was still
-//! being streamed — but if we just came up and the `SessionGuard::drop` from
-//! the previous process never ran, the only safe default is to surface those
-//! sessions as failed. The frontend treats `error` as terminal, so the user
-//! sees a clear "this session was interrupted by a server restart" outcome
-//! instead of an infinite spinner.
+//! Currently exposes [`reap_orphans`], which marks every `connecting`
+//! session that survived a previous server crash as `error`. The state
+//! machine has only one status that genuinely could be a zombie from a
+//! killed server: `connecting` is the transient state set at session
+//! creation and only the spawned streaming task transitions it out
+//! (to `ready` at the start of the first turn). If a session is in
+//! `connecting` when the server starts, no other process exists to
+//! finish the transition, so it is by definition a zombie.
+//!
+//! Crucially, `ready` sessions are NOT reaped. `ready` is the
+//! multi-turn idle state — the session successfully completed its last
+//! turn and is waiting for the next prompt. Reaping it would silently
+//! break every multi-turn conversation on every server restart. The
+//! ActiveSessions in-memory map (which doesn't survive a crash) is
+//! the only way to know whether a `ready` session was mid-stream when
+//! the server died, and it's gone — so we conservatively leave `ready`
+//! alone and surface a half-streamed assistant message to the user
+//! instead of nuking a successful multi-turn history.
 //!
 //! Used by `run()` in `main.rs` after the database is opened and migrations
 //! have run, but BEFORE the listener is bound. This guarantees that any
 //! client that races to connect immediately after a successful bind sees a
-//! consistent world: no zombie sessions, no half-streamed events.
+//! consistent world: no zombie `connecting` sessions, no half-streamed
+//! events. `ready` sessions are preserved across restarts.
 
 use tracing::info;
 
 use crate::db::Db;
 use crate::error::AppError;
-use crate::store::sessions::TERMINAL;
+
+/// Statuses that are reaped on startup. Keep this list narrow — see the
+/// module docs for the multi-turn `ready` invariant.
+const REAP_STATUSES: &[&str] = &["connecting"];
 
 /// Reason text recorded into the tracing log for each reaped session.
 ///
@@ -28,12 +42,15 @@ use crate::store::sessions::TERMINAL;
 /// the session so the operator can correlate it with client reports.
 const REAP_REASON: &str = "orphan: server restarted with active session";
 
-/// Mark every non-terminal session as `error`.
+/// Mark every `connecting` session as `error`.
 ///
 /// Returns the number of sessions reaped. Idempotent — calling this on a
 /// fresh database (no survivors) is a no-op and returns 0. Uses a single
 /// transaction so the recovery either lands atomically or rolls back, and
 /// the caller's view of "active sessions" never sees a partial transition.
+///
+/// `ready` sessions are deliberately left alone: see the module docs for
+/// why this is the only correct behavior for a multi-turn session model.
 ///
 /// Safe to call from the synchronous startup path: it holds the DB mutex
 /// only for the duration of one transaction.
@@ -42,13 +59,18 @@ pub(crate) fn reap_orphans(db: &Db) -> Result<u64, AppError> {
         // 1. Collect the survivor IDs in this transaction. We can't bind
         //    a subquery directly to the UPDATE in SQLite without a CTE,
         //    and the read+write split keeps the two statements readable.
-        let placeholders = TERMINAL.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let select_sql = format!("SELECT id FROM sessions WHERE status NOT IN ({placeholders})");
+        let placeholders = REAP_STATUSES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let select_sql = format!("SELECT id FROM sessions WHERE status IN ({placeholders})");
         let mut stmt = conn.prepare(&select_sql)?;
         let survivors: Vec<String> = stmt
-            .query_map(rusqlite::params_from_iter(TERMINAL.iter().copied()), |r| {
-                r.get::<_, String>(0)
-            })?
+            .query_map(
+                rusqlite::params_from_iter(REAP_STATUSES.iter().copied()),
+                |r| r.get::<_, String>(0),
+            )?
             .collect::<Result<Vec<_>, _>>()?;
 
         if survivors.is_empty() {
@@ -65,7 +87,7 @@ pub(crate) fn reap_orphans(db: &Db) -> Result<u64, AppError> {
         for id in &survivors {
             let rows = conn.execute(
                 "UPDATE sessions SET status = 'error', updated_at = ?1
-                 WHERE id = ?2 AND status NOT IN ('completed', 'cancelled', 'error')",
+                 WHERE id = ?2 AND status IN ('connecting')",
                 rusqlite::params![now, id],
             )?;
             if rows > 0 {
@@ -118,27 +140,37 @@ mod tests {
     }
 
     #[test]
-    fn test_reap_orphans_marks_non_terminal_sessions_as_error() {
+    fn test_reap_orphans_marks_only_connecting_sessions_as_error() {
         let db = make_test_db();
         let (workspace_id, _, _) = seed_workspace_with_board(&db);
         let provider_id = seed_provider(&db);
 
-        // Three survivors (connecting, ready, error already) and one
-        // terminal (completed). The terminal session must be untouched.
+        // One genuine orphan (connecting — the only status the spawned
+        // streaming task can be in when the server dies), one idle
+        // multi-turn session (ready — must be preserved), one already
+        // terminal session (completed — must be untouched), and one
+        // already-error session (must also be untouched; it was never
+        // going to be reaped again).
         let id_connecting = insert_session(&db, &workspace_id, &provider_id, "connecting");
         let id_ready = insert_session(&db, &workspace_id, &provider_id, "ready");
         let _id_error = insert_session(&db, &workspace_id, &provider_id, "error");
         let id_completed = insert_session(&db, &workspace_id, &provider_id, "completed");
 
         let reaped = reap_orphans(&db).expect("reap_orphans");
-        // 2 (connecting + ready flipped to error; the already-error one
-        // stays as `error` but is NOT reaped since it's already terminal
-        // and the function only re-counts non-terminal survivors at the
-        // SELECT time).
-        assert_eq!(reaped, 2, "two non-terminal sessions should be reaped");
+        assert_eq!(
+            reaped, 1,
+            "only the `connecting` session should be reaped; \
+             `ready` is the multi-turn idle state and must survive restart"
+        );
 
         assert_eq!(get_status(&db, &id_connecting), "error");
-        assert_eq!(get_status(&db, &id_ready), "error");
+        // Regression guard: previously this asserted `error`, which broke
+        // every multi-turn session across server restarts.
+        assert_eq!(
+            get_status(&db, &id_ready),
+            "ready",
+            "`ready` sessions must survive `reap_orphans` (multi-turn invariant)"
+        );
         assert_eq!(get_status(&db, &id_completed), "completed");
     }
 
@@ -155,12 +187,36 @@ mod tests {
         let db = make_test_db();
         let (workspace_id, _, _) = seed_workspace_with_board(&db);
         let provider_id = seed_provider(&db);
-        insert_session(&db, &workspace_id, &provider_id, "ready");
+        // Use `connecting` (not `ready` — see multi-turn invariant).
+        insert_session(&db, &workspace_id, &provider_id, "connecting");
 
         // First call reaps 1, second call sees only terminal sessions
         // and reaps 0.
         assert_eq!(reap_orphans(&db).expect("first reap"), 1);
         assert_eq!(reap_orphans(&db).expect("second reap"), 0);
+    }
+
+    /// Regression test for the multi-turn invariant: a `ready` session
+    /// (idle, waiting for next prompt) must survive every startup of
+    /// `reap_orphans`. Previously `reap_orphans` treated `ready` as an
+    /// orphan state, silently breaking every multi-turn conversation on
+    /// every server restart and forcing users to start a new session.
+    #[test]
+    fn test_reap_orphans_preserves_ready_sessions_across_restarts() {
+        let db = make_test_db();
+        let (workspace_id, _, _) = seed_workspace_with_board(&db);
+        let provider_id = seed_provider(&db);
+        let id_ready = insert_session(&db, &workspace_id, &provider_id, "ready");
+
+        // Simulate 5 server restarts.
+        for _ in 0..5 {
+            assert_eq!(reap_orphans(&db).expect("reap"), 0);
+            assert_eq!(
+                get_status(&db, &id_ready),
+                "ready",
+                "`ready` session must survive repeated `reap_orphans` calls"
+            );
+        }
     }
 
     impl Session {
