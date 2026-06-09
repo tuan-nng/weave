@@ -1,19 +1,28 @@
-// Page-level tests for the Codebases list + detail pages (feat-032).
-// Mirrors the structure of `kanban-board.test.tsx`: mock the `api`
-// surface, mount the pages with a real QueryClient + MemoryRouter,
-// assert rendered content. The test suite covers three flows:
+// Page-level tests for the Codebases list + detail pages (feat-032,
+// feat-extract-modal).
 //
-//   1. List page renders codebases grouped by workspace and surfaces
-//      a friendly empty state when a workspace has no codebases.
-//   2. Detail page renders the composite response (row + git status).
-//   3. Detail page surfaces `git_error` as a banner when the path is
+// Mirrors the structure of `kanban-board.test.tsx` and `sessions.test.tsx`:
+// mock the `api` surface, mount the pages with a real QueryClient +
+// MemoryRouter, assert rendered content. The test suite covers:
+//
+//   1. List page renders codebases grouped by workspace and the
+//      `+ New codebase in {name}` button per workspace.
+//   2. The per-workspace section is always visible — heading AND
+//      create button — even when the workspace has zero codebases
+//      (the empty-state fix; previously the whole block returned null).
+//   3. Clicking the per-workspace button opens the NewCodebaseModal
+//      pre-bound to that workspace; submitting it calls
+//      `api.codebases.create` with the right payload and navigates
+//      to the new codebase's detail page.
+//   4. Detail page renders the composite response (row + git status).
+//   5. Detail page surfaces `git_error` as a banner when the path is
 //      not a git repo, instead of the status block.
 //
 // SSE is not used by codebases (read-only after create/delete), so
 // the test surface is just the query + render path.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryRouter, RouterProvider } from "react-router";
 import CodebasesPage from "../pages/codebases";
@@ -89,14 +98,21 @@ function renderList() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // The router intentionally has no `/workspaces/:wid/codebases/:cid`
+  // route — the post-create navigate is asserted via
+  // `router.state.location.pathname` only. The 404 the unknown route
+  // logs is expected and does not affect the test outcome. (We can't
+  // add a catch-all here without breaking the navigate call from the
+  // post-create onSuccess.)
   const router = createMemoryRouter([{ path: "/codebases", element: <CodebasesPage /> }], {
     initialEntries: ["/codebases"],
   });
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  return { router };
 }
 
 function renderDetail(initialPath = "/workspaces/w1/codebases/c1") {
@@ -116,6 +132,11 @@ function renderDetail(initialPath = "/workspaces/w1/codebases/c1") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Silence the React Router 404 that the unknown detail route logs
+  // during the create-and-navigate flow. The 404 is expected (we
+  // deliberately do not mount the detail page) and does not affect
+  // the test outcome.
+  vi.spyOn(console, "error").mockImplementation(() => {});
   // window.confirm is called by the delete button; default to true so
   // the test of the happy-path render is unaffected.
   vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -153,32 +174,91 @@ describe("codebases list", () => {
     expect(screen.getByText(/create a workspace first to register codebases/i)).toBeInTheDocument();
   });
 
-  it("does not render a workspace section when its codebase list is empty", async () => {
+  it("renders the workspace heading and + New codebase button even when the codebase list is empty", async () => {
+    // The pre-fix behavior was: `WorkspaceCodebases` returned null when
+    // `codebases.length === 0`, leaving the page with no entry point to
+    // register the first codebase. The fix (mirroring feat-061 in
+    // sessions.tsx) keeps the heading + button visible and renders an
+    // inline "No codebases yet" placeholder.
     mockApi.workspaces.list.mockResolvedValue({ data: mockWorkspaces });
     mockApi.codebases.list.mockResolvedValue([]);
 
     renderList();
-    // Wait for the workspaces query to resolve so the workspaces.map
-    // runs; then assert that the per-workspace block is hidden (its
-    // h3 header AND its row link are both absent). The create button
-    // lives inside the same hidden block — confirm it's not there.
-    await waitFor(() => {
-      // The "All codebases across workspaces" subtitle is always
-      // visible. Use it as a sentinel that the page finished loading.
-      expect(
-        screen.getByText(/git repositories registered across workspaces/i),
-      ).toBeInTheDocument();
-    });
-    expect(screen.queryByRole("heading", { level: 3 })).toBeNull();
-    expect(screen.queryByRole("button", { name: /\+ New codebase in Default/i })).toBeNull();
+
+    // The workspace heading and the per-workspace create button are
+    // both present, so the user can still register a codebase.
+    expect(await screen.findByRole("heading", { level: 3, name: "Default" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /\+ New codebase in Default/i })).toBeInTheDocument();
+    // The inline empty-state copy is rendered (in place of the list).
+    expect(screen.getByText(/no codebases yet/i)).toBeInTheDocument();
   });
 
-  it("create button is disabled when path is empty", async () => {
+  it("clicking the per-workspace button opens the NewCodebaseModal", async () => {
+    mockApi.workspaces.list.mockResolvedValue({ data: mockWorkspaces });
+    mockApi.codebases.list.mockResolvedValue(mockCodebases);
+
+    renderList();
+    const trigger = await screen.findByRole("button", {
+      name: /\+ New codebase in Default/i,
+    });
+    fireEvent.click(trigger);
+
+    // The modal header appears.
+    expect(await screen.findByRole("heading", { name: "New Codebase" })).toBeInTheDocument();
+    // The path input is present and focused.
+    const pathInput = screen.getByPlaceholderText(/\/Users\/me\/projects\/my-app/i);
+    expect(pathInput).toBeInTheDocument();
+  });
+
+  it("submitting the form creates a codebase and navigates to /workspaces/:wid/codebases/:cid", async () => {
+    const newCodebase = {
+      id: "new-cb-id",
+      workspace_id: "w1",
+      path: "/home/u/new",
+      branch: null,
+      label: "New",
+      created_at: "2026-06-01T00:00:00Z",
+    };
+    mockApi.workspaces.list.mockResolvedValue({ data: mockWorkspaces });
+    mockApi.codebases.list.mockResolvedValue(mockCodebases);
+    mockApi.codebases.create.mockResolvedValueOnce(newCodebase);
+
+    const { router } = renderList();
+
+    const trigger = await screen.findByRole("button", {
+      name: /\+ New codebase in Default/i,
+    });
+    fireEvent.click(trigger);
+
+    // Fill the form and submit.
+    const pathInput = (await screen.findByPlaceholderText(
+      /\/Users\/me\/projects\/my-app/i,
+    )) as HTMLInputElement;
+    fireEvent.change(pathInput, { target: { value: "/home/u/new" } });
+
+    const labelInput = screen.getByPlaceholderText(/e\.g\. Backend, Mobile/i) as HTMLInputElement;
+    fireEvent.change(labelInput, { target: { value: "New" } });
+
+    const submit = screen.getByRole("button", { name: /create codebase/i });
+    fireEvent.click(submit);
+
+    await waitFor(() => {
+      expect(mockApi.codebases.create).toHaveBeenCalledWith("w1", {
+        path: "/home/u/new",
+        label: "New",
+      });
+    });
+    await waitFor(() => {
+      expect(router.state.location.pathname).toBe("/workspaces/w1/codebases/new-cb-id");
+    });
+  });
+
+  it("the create button is disabled when the path is empty", async () => {
     mockApi.workspaces.list.mockResolvedValue({ data: mockWorkspaces });
     mockApi.codebases.list.mockResolvedValue(mockCodebases);
     renderList();
-    const button = await screen.findByRole("button", { name: /\+ New codebase in Default/i });
-    fireEvent.click(button);
+    const trigger = await screen.findByRole("button", { name: /\+ New codebase in Default/i });
+    fireEvent.click(trigger);
     const createButton = await screen.findByRole("button", { name: /create codebase/i });
     expect(createButton).toBeDisabled();
   });
@@ -234,6 +314,3 @@ describe("codebase detail (composite)", () => {
     });
   });
 });
-
-// late import so the line above is clean
-import { fireEvent } from "@testing-library/react";

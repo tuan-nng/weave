@@ -28,6 +28,22 @@ export function useBoards(workspaceId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Create board (used by NewBoardModal, called from the per-workspace trigger
+// on /boards and from the page-level trigger on /workspaces/:id). Bound to a
+// single workspace. Mirrors `useCreateCodebase` in use-codebase.ts.
+// ---------------------------------------------------------------------------
+
+export function useCreateBoard(workspaceId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateBoardRequest) => api.kanban.boards.create(workspaceId, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.boards.list(workspaceId) });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Public hook result
 // ---------------------------------------------------------------------------
 
