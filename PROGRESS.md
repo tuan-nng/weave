@@ -8,7 +8,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09
+- **Last updated:** 2026-06-09 (admin cleanup — see "Data cleanup 2026-06-09" below)
 - **Latest commit:** `cada59e` fix: New Session modal — inline codebase creation
 - **Active feature:** none
 - **In-flight (uncommitted):** feat-063 — both halves done (`/codebases` + `/boards` empty-state fix + modal extract). Ready to commit. See note below.
@@ -16,6 +16,22 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 - **Test status:** green — 616 Rust tests + 99 frontend tests pass (8 new for feat-063: 2 for /codebases, 6 for /boards; 1 new + 1 flipped for the New Session inline-create fix landed in `cada59e`)
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
 - **Uncommitted:** feat-063 (7 files: 2 new modals, 2 rewritten pages, 1 hook addition, 2 test files).
+
+### Data cleanup 2026-06-09 (out-of-band admin action, not a feature)
+
+User-requested one-off cleanup of the dev SQLite database. Direct `sqlite3` writes (not through the app API) inside a `BEGIN IMMEDIATE` transaction with `PRAGMA busy_timeout = 10000` so the running `weave-server` (pid 1459382) could hold the DB open during the writes.
+
+**What changed in `weave.db`:**
+- Deleted provider `xiaomi` (id `0ac09b04-5047-46e4-b58f-945e8788ec88`, type `anthropic`) — user typed "xiami", a typo for the `name` column value.
+- Deleted the 15 sessions that referenced that provider (all status `error`, dates 2026-06-01 → 2026-06-02). Cascade-removed 109 `messages` and 1,968 `traces` rows. The 3 `mm`-provider sessions (12 messages, 0 traces) are untouched.
+- Post-state: providers 2→1, sessions 18→3, messages 121→12, traces 1968→0.
+- `PRAGMA foreign_key_check` clean, `PRAGMA integrity_check` ok.
+- Backup: `weave.db.bak.20260609-110204` (790,528 bytes — byte-for-byte copy taken immediately before the transaction).
+
+**Next steps for the next session:**
+1. **Restart the dev server.** `weave-server` (pid 1459382 at session end) has the pre-cleanup providers/sessions cached in memory. Stop the `cargo watch -x 'run -p weave-server'` shell (the one in the background) and re-run `just dev`. Until restart, any new session creation that targets the deleted `xiaomi` provider id will fail, and the UI will show stale rows.
+2. **No code or schema changes.** This was a data-only cleanup — `git status` is still clean, `feature_list.json` is unchanged, no test or lint regressions to chase.
+3. **If the user wants a recurring reset, ask first before automating.** A `just db:reset` recipe (drop + re-run migrations + re-seed default workspace) would be a feature, not an admin action — it belongs in `feature_list.json` with a verification command. Do not just add it inline.
 
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
@@ -281,6 +297,13 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - **Second session (this one):** applied the `/boards` half as a 1-to-1 port. Extracted `CreateBoardModal` to `web/src/components/new-board-modal.tsx`; added `useCreateBoard(workspaceId)` to `web/src/hooks/use-board.ts` (mirrors `useCreateCodebase`); refactored `boards.tsx` to always render the heading + `+ New board in {name}` button + inline "No boards yet" placeholder, with inline modal error (dropped the local `bannerError` state and `ErrorBanner` import). New `__tests__/boards.test.tsx` (6 cases, mirroring `codebases.test.tsx`). 98 frontend tests pass (was 92, +6 for boards). `./init.sh` all 3 layers green.
 - agent-browser end-to-end on /boards: deleted both boards via API, reloaded, the page shows heading+button+"No boards yet" (the bug fix). Clicked the button, modal opened with disabled submit, typed "My Sprint Board Real" via `keyboard inserttext` (after native value setter), submit enabled, clicked submit, modal closed, URL navigated to `/workspaces/5a7675ff.../boards/0624af02...`, the board detail page rendered the new board's name as the h1. Cancel closes cleanly.
 - Uncommitted: 7 files (2 new modals, 2 rewritten pages, 1 hook addition, 2 test files). One commit is fine: `fix: /codebases and /boards always show heading + create button on empty (mirrors feat-061)`. Detailed blocker list at the feat-063 header above.
+
+### 2026-06-09 — fix-065 (sessions list ordered by last-updated DESC)
+- Bug: `http://localhost:5173/sessions` (and `/workspaces/:id`) listed sessions in random order. Root cause: `SessionStore::list_by_workspace` (`crates/weave-server/src/store/sessions.rs:187`) was `ORDER BY id ASC` — UUIDv4 is random, so the visible order was arbitrary. No test pinned the ordering, so the regression-detection surface was empty.
+- Fix: changed the SQL to `ORDER BY updated_at DESC, id DESC`. The cursor is now a compound `<updated_at>\x1f<id>` key (keyset pagination), so a single `id` cursor doesn't skip or duplicate rows when consecutive pages straddle a `updated_at` tie. Cursor format is opaque to the client (still a `Option<String>` in the API response).
+- Tests added in the same file: `test_session_list_orders_by_updated_at_desc` (the regression test — create two sessions, bump one's `updated_at` via `update_status`, assert the bumped one comes first) and `test_session_list_descending_pagination_is_complete` (creates 5 sessions with distinct `updated_at`, paginates with limit 2, asserts the full set comes back in expected order across all pages).
+- Verified: 618 Rust tests pass (was 616, +2 for the new tests). Pre-existing clippy warning in `service/sessions.rs:1340` and 79 pre-existing `tsc` errors are unchanged (both present on `main`). Frontend untouched — `useWorkspaceSessions` just renders what the API returns.
+- Out of scope (logged, not fixed): no index on `(workspace_id, updated_at)`. For workspaces with thousands of sessions the sort will spill to a temp file. Add a migration when that becomes a real concern; not blocking the current use.
 
 ### 2026-06-04 — Doc reorganization into `docs/road-map/`
 - Moved `docs/PLAN.md` and `docs/multi-runtime-strategy.md` into `docs/road-map/`. PLAN moved via `git mv` (rename preserved in history); strategy moved via plain `mv` (was untracked).

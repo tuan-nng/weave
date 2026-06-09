@@ -183,35 +183,63 @@ impl SessionStore {
 
     /// Cursor-based listing by workspace.
     ///
-    /// Fetches up to `limit` rows after the cursor, ordered by `id`.
+    /// Fetches up to `limit` sessions in a workspace, ordered by most recently
+    /// updated first. The cursor encodes the last session's `(updated_at, id)`
+    /// pair from the previous page; the next page begins at sessions that sort
+    /// strictly after that position. An id-only cursor is not enough because
+    /// `updated_at` ties must be broken by `id` — using just `id` as a
+    /// high-water mark would skip or duplicate rows whenever two consecutive
+    /// pages straddle a timestamp tie.
     pub fn list_by_workspace(
         db: &Db,
         workspace_id: &str,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<SessionPage, AppError> {
-        let cursor = cursor.unwrap_or("");
-
         let conn = db.conn();
+
+        // Decode the compound cursor. None / empty / malformed -> first page.
+        // Valid cursors are `<updated_at>\x1f<id>`; we tolerate a missing
+        // cursor (treat as first page) rather than 400, since old clients
+        // pass `None`.
+        let (cursor_ts, cursor_id) = match cursor {
+            Some(c) if !c.is_empty() => match c.split_once('\x1f') {
+                Some((ts, id)) => (ts.to_string(), id.to_string()),
+                None => {
+                    return Err(AppError::Validation(
+                        "invalid sessions cursor: expected '<updated_at>\\x1f<id>'".into(),
+                    ));
+                }
+            },
+            _ => (String::new(), String::new()),
+        };
+
+        // Single prepared statement: when no cursor, the keyset predicate
+        // short-circuits to TRUE (compared against empty strings, which sort
+        // before every real timestamp). When a cursor is set, it filters to
+        // rows strictly after the (updated_at, id) position.
         let mut stmt = conn.prepare(
             "SELECT id, workspace_id, provider_id, specialist_id,
                     parent_session_id, context_id, status, model, cwd, codebase_id,
                     created_at, updated_at
              FROM sessions
-             WHERE workspace_id = ?1 AND id > ?2
-             ORDER BY id ASC
-             LIMIT ?3",
+             WHERE workspace_id = ?1
+               AND ((?2 = '' AND ?3 = '')
+                    OR updated_at < ?2
+                    OR (updated_at = ?2 AND id < ?3))
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?4",
         )?;
 
         let rows: Vec<Session> = stmt
             .query_map(
-                rusqlite::params![workspace_id, cursor, limit],
+                rusqlite::params![workspace_id, cursor_ts, cursor_id, limit],
                 Self::map_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
 
         let next_cursor = if rows.len() == limit as usize {
-            rows.last().map(|s| s.id.clone())
+            rows.last().map(|s| format!("{}\x1f{}", s.updated_at, s.id))
         } else {
             None
         };
@@ -724,6 +752,112 @@ pub(crate) mod tests {
         let page = SessionStore::list_by_workspace(&db, &ws_id, None, 10).unwrap();
         assert!(page.data.is_empty());
         assert!(page.cursor.is_none());
+    }
+
+    /// Regression for /sessions ordering: the most recently updated session
+    /// must come first. With `ORDER BY id ASC` (UUIDv4 = random), this was
+    /// false, so the UI showed sessions in arbitrary order.
+    #[test]
+    fn test_session_list_orders_by_updated_at_desc() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let first = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Ensure `updated_at` strictly increases between the two creates.
+        // RFC 3339 has microsecond resolution on most platforms; sleep 1ms.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+
+        let second = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Bump `first`'s `updated_at` via a legal status transition so it is
+        // now the most recently updated session.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let first_touched = SessionStore::update_status(&db, &first.id, "ready").unwrap();
+        assert!(first_touched.updated_at > second.updated_at);
+
+        let page = SessionStore::list_by_workspace(&db, &ws_id, None, 10).unwrap();
+        assert_eq!(page.data.len(), 2);
+        assert_eq!(
+            page.data[0].id, first_touched.id,
+            "most recently updated session should be first"
+        );
+        assert_eq!(page.data[1].id, second.id);
+    }
+
+    /// Descending pagination: across pages, the same set of sessions is
+    /// returned once, in updated_at DESC order. The cursor is the last
+    /// `id` of the previous page; subsequent pages use `id < cursor` to
+    /// continue the descending scan.
+    #[test]
+    fn test_session_list_descending_pagination_is_complete() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Create 5 sessions with distinct updated_at values so the
+        // ordering is deterministic.
+        let mut created_ids: Vec<String> = Vec::new();
+        for _ in 0..5 {
+            let s = SessionStore::create(
+                &db,
+                &ws_id,
+                &provider_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            created_ids.push(s.id);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Reverse the IDs so the last-created is first in our expectation
+        // (matching updated_at DESC).
+        let expected: Vec<String> = created_ids.iter().rev().cloned().collect();
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            assert!(pages < 10, "pagination did not terminate");
+            let page = SessionStore::list_by_workspace(&db, &ws_id, cursor.as_deref(), 2).unwrap();
+            seen.extend(page.data.iter().map(|s| s.id.clone()));
+            match page.cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            seen, expected,
+            "pages must cover all sessions in updated_at DESC order"
+        );
     }
 
     #[test]
