@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/query-keys";
 import type {
@@ -276,6 +276,27 @@ export interface UseSessionResult {
 }
 
 // ---------------------------------------------------------------------------
+// Trace invalidation
+// ---------------------------------------------------------------------------
+
+/**
+ * @internal
+ * Exported for unit testing only. A persisted assistant message means all trace
+ * groups for the turn have been flushed and can be refreshed together.
+ */
+export function invalidateCommittedTraceQueries(qc: QueryClient, sessionId: string) {
+  qc.invalidateQueries({
+    queryKey: queryKeys.traces.journey(sessionId),
+  });
+  qc.invalidateQueries({
+    queryKey: queryKeys.traces.fileChanges(sessionId),
+  });
+  qc.invalidateQueries({
+    queryKey: queryKeys.traces.toolCalls(sessionId),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // useSession hook
 // ---------------------------------------------------------------------------
 
@@ -358,11 +379,10 @@ export function useSession(sessionId: string): UseSessionResult {
             persistedId: mp.id,
             stopReason: mp.stop_reason,
           });
-          // The journey sidebar (`useJourney` + `useFileChanges`)
-          // depends on the trace events that the server has just
-          // emitted. Invalidate here — at the exact moment the
-          // assistant message is committed — so the sidebar's
-          // timeline and file list refresh together with the chat.
+          // The journey sidebar depends on the trace events that the
+          // server has just emitted. Invalidate here — at the exact
+          // moment the assistant message is committed — so every
+          // sidebar group refreshes together with the chat.
           //
           // The backend awaits the trace flush task before
           // broadcasting `message_persisted` (see
@@ -370,12 +390,7 @@ export function useSession(sessionId: string): UseSessionResult {
           // time the client sees this event every new trace row is
           // already in SQLite. The refetch is guaranteed to see
           // them; there is no race.
-          qcRef.current.invalidateQueries({
-            queryKey: queryKeys.traces.journey(sessionId),
-          });
-          qcRef.current.invalidateQueries({
-            queryKey: queryKeys.traces.fileChanges(sessionId),
-          });
+          invalidateCommittedTraceQueries(qcRef.current, sessionId);
           break;
         }
 

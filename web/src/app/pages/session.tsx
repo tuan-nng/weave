@@ -13,26 +13,42 @@ import type { Message, MessageMetadata, TraceRow } from "../../lib/types";
 // Trace-to-message correlation
 // ---------------------------------------------------------------------------
 
-function correlateTraces(messages: Message[], traces: TraceRow[]): Map<string, TraceRow[]> {
-  const sorted = [...traces]
+export function correlateTraces(messages: Message[], traces: TraceRow[]): Map<string, TraceRow[]> {
+  const sortedTraces = [...traces]
     .filter((t) => t.event_type === "tool_call")
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const orderedMessages = [...messages].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const assistantTurns = orderedMessages
+    .map((message, index) => {
+      if (message.role !== "assistant") return null;
+      const previousUser = orderedMessages
+        .slice(0, index)
+        .reverse()
+        .find((msg) => msg.role === "user");
+      const nextUser = orderedMessages.slice(index + 1).find((msg) => msg.role === "user");
+      return { message, previousUser, nextUser };
+    })
+    .filter((turn): turn is { message: Message; previousUser?: Message; nextUser?: Message } =>
+      Boolean(turn),
+    );
 
   const result = new Map<string, TraceRow[]>();
-  if (messages.length === 0 || sorted.length === 0) return result;
+  if (assistantTurns.length === 0 || sortedTraces.length === 0) return result;
 
-  // Assign each trace to the message whose created_at is the closest preceding timestamp
-  for (const trace of sorted) {
-    let bestId: string | null = null;
-    for (const msg of messages) {
-      if (msg.created_at <= trace.timestamp) {
-        bestId = msg.id;
-      }
-    }
-    if (bestId) {
-      const arr = result.get(bestId) ?? [];
-      arr.push(trace);
-      result.set(bestId, arr);
+  for (const trace of sortedTraces) {
+    const target = assistantTurns.find(({ message, previousUser, nextUser }) => {
+      const inCurrentTurn =
+        (previousUser === undefined || trace.timestamp >= previousUser.created_at) &&
+        trace.timestamp <= message.created_at;
+      const legacyAfterPersist =
+        trace.timestamp >= message.created_at &&
+        (nextUser === undefined || trace.timestamp < nextUser.created_at);
+      return inCurrentTurn || legacyAfterPersist;
+    })?.message;
+
+    if (target) {
+      const arr = result.get(target.id) ?? [];
+      result.set(target.id, [...arr, trace]);
     }
   }
   return result;
@@ -166,7 +182,25 @@ function ToolCallBlock({
 // TraceToolCallBlock (from historical trace data)
 // ---------------------------------------------------------------------------
 
-function TraceToolCallBlock({ trace }: { trace: TraceRow }) {
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function formatTraceOutput(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+export function parseTraceToolCallPayload(trace: TraceRow): {
+  toolName: string;
+  input: unknown;
+  output: string | null;
+} {
   let data: Record<string, unknown> = {};
   try {
     data = trace.data_json ? JSON.parse(trace.data_json) : {};
@@ -174,18 +208,24 @@ function TraceToolCallBlock({ trace }: { trace: TraceRow }) {
     // corrupted trace data — fall back to summary
   }
 
-  let parsedInput: unknown = {};
-  try {
-    parsedInput = data.input_json ? JSON.parse(data.input_json as string) : {};
-  } catch {
-    // corrupted input data
-  }
+  const input = "input" in data ? data.input : (parseMaybeJson(data.input_json) ?? {});
+  const outputValue = "output" in data ? data.output : parseMaybeJson(data.output_json);
+
+  return {
+    toolName: (data.tool_name as string) ?? trace.summary,
+    input,
+    output: formatTraceOutput(outputValue),
+  };
+}
+
+function TraceToolCallBlock({ trace }: { trace: TraceRow }) {
+  const payload = parseTraceToolCallPayload(trace);
 
   return (
     <ToolCallBlock
-      toolName={(data.tool_name as string) ?? trace.summary}
-      input={parsedInput}
-      output={(data.output_json as string) ?? null}
+      toolName={payload.toolName}
+      input={payload.input}
+      output={payload.output}
       status="complete"
     />
   );

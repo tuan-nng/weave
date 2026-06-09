@@ -91,6 +91,16 @@ User bug report: at `http://localhost:5173/sessions`, **every** session in the d
 
 5. **Out-of-scope items noticed (logged in fix-068 entry, not fixed):** none new this session. The pre-existing `type_complexity` clippy warning in `service/sessions.rs:1436` (test helper) is unchanged — it doesn't fail `just lint` because lint runs without `--all-targets`.
 
+## Session End Verification (2026-06-09, end of fix-068 commit)
+
+Working tree state at session end matches the "Next Steps" checklist above:
+
+- `git status --short` shows the 5 fix-067 files modified and 1 new (`web/src/app/__tests__/session-traces.test.tsx`) — these are the work the next session will pick up.
+- `weave.db.bak.20260609-160418` is untracked at the repo root (the pre-`BEGIN IMMEDIATE` byte-for-byte copy from the 18-session recovery). Item 3 in the Next Steps above covers deletion.
+- `crates/weave-server/src/service/startup.rs` and the fix-068 PROGRESS.md section are committed at `81ce146` (docs) and `1cd4ab7` (fix).
+- Server is running on `:3000` (uptime ~10 min at session end), Vite on `:5173`. The dev server will auto-rebuild on the next source change via `cargo watch` (pids 19633/19634).
+- `./init.sh` last passed at session end (clippy, ESLint, fmt, Prettier, Rust tests, frontend tests, build, `/api/health` smoke).
+
 ### feat-062 — Attach codebase to session (committed; manual smoke by user)
 
 Attach a registered codebase (git repo) to a session at creation time. The session's `cwd` is the codebase's `path`; the FS-tool sandbox (fs_read/fs_list/fs_search + the explicit-cwd form of shell_exec/git_*) is contained within the repo, and the FS walkers deliberately do NOT follow symlinks (so `ln -s /etc <repo>/etc_link` cannot be used to escape).

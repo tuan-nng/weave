@@ -1,5 +1,12 @@
-import { describe, expect, test } from "vitest";
-import { EMPTY_LIVE_BUFFER, reducer, type Action } from "../use-session";
+import type { QueryClient } from "@tanstack/react-query";
+import { describe, expect, test, vi } from "vitest";
+import { queryKeys } from "../../lib/query-keys";
+import {
+  EMPTY_LIVE_BUFFER,
+  invalidateCommittedTraceQueries,
+  reducer,
+  type Action,
+} from "../use-session";
 
 /**
  * Reducer unit tests. The reducer is the single source of truth for
@@ -8,6 +15,25 @@ import { EMPTY_LIVE_BUFFER, reducer, type Action } from "../use-session";
  * between live and persisted bubbles, which is what eliminates the
  * flash-on-completion and duplicate-bubble bugs.
  */
+describe("invalidateCommittedTraceQueries", () => {
+  test("refreshes all Journey sidebar trace groups", () => {
+    const invalidateQueries = vi.fn();
+    const qc = { invalidateQueries } as unknown as QueryClient;
+
+    invalidateCommittedTraceQueries(qc, "s1");
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.traces.journey("s1"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.traces.fileChanges("s1"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: queryKeys.traces.toolCalls("s1"),
+    });
+  });
+});
+
 describe("useSession reducer", () => {
   describe("SEND_STARTED", () => {
     test("resets to a clean streaming state", () => {

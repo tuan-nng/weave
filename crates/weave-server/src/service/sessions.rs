@@ -822,6 +822,34 @@ fn flush_thinking(trace_collector: &trace::TraceCollector, session_id: &str, buf
     });
 }
 
+fn emit_error_trace(trace_collector: &trace::TraceCollector, session_id: &str, message: String) {
+    trace_collector.emit(TraceEvent {
+        session_id: session_id.to_string(),
+        kind: TraceEventKind::Error { message },
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
+fn provider_error_trace_message(e: &crate::error::ProviderError) -> String {
+    match e {
+        crate::error::ProviderError::AuthFailed => "Authentication failed".to_string(),
+        crate::error::ProviderError::RateLimited { retry_after_ms } => {
+            format!("Rate limited, retry after {retry_after_ms}ms")
+        }
+        crate::error::ProviderError::ModelNotFound { model } => {
+            format!("Model not found: {model}")
+        }
+        crate::error::ProviderError::Unreachable(_) => "Provider unreachable".to_string(),
+        crate::error::ProviderError::StreamInterrupted(_) => {
+            "Provider stream interrupted".to_string()
+        }
+    }
+}
+
+fn stream_event_error_trace_message() -> String {
+    "Provider stream interrupted".to_string()
+}
+
 /// Drive the model ↔ tool-execution loop for a single user turn.
 ///
 /// Responsibilities:
@@ -901,12 +929,10 @@ async fn agent_loop(
             Ok(s) => s,
             Err(e) => {
                 error!(session_id, error = %e, "agent send_message failed mid-loop");
-                sse_manager.broadcast(
-                    session_id,
-                    SseWireEvent::Error {
-                        message: e.to_string(),
-                    },
-                );
+                let trace_message = provider_error_trace_message(&e);
+                let message = e.to_string();
+                emit_error_trace(trace_collector, session_id, trace_message);
+                sse_manager.broadcast(session_id, SseWireEvent::Error { message });
                 had_error = true;
                 final_stop_reason = agent::StopReason::EndTurn;
                 break;
@@ -988,13 +1014,11 @@ async fn agent_loop(
                                 StreamEvent::Error { message } => {
                                     error!(session_id, error = %message, "agent stream error");
                                     flush_thinking(trace_collector, session_id, &mut thinking_buffer);
-                                    trace_collector.emit(TraceEvent {
-                                        session_id: session_id.to_string(),
-                                        kind: TraceEventKind::Error {
-                                            message: message.clone(),
-                                        },
-                                        timestamp: chrono::Utc::now().to_rfc3339(),
-                                    });
+                                    emit_error_trace(
+                                        trace_collector,
+                                        session_id,
+                                        stream_event_error_trace_message(),
+                                    );
                                     had_error = true;
                                     turn_stop_reason = Some(agent::StopReason::EndTurn);
                                     break;
@@ -1003,11 +1027,12 @@ async fn agent_loop(
                         }
                         Some(Err(e)) => {
                             error!(session_id, error = %e, "agent stream provider error");
+                            flush_thinking(trace_collector, session_id, &mut thinking_buffer);
+                            let trace_message = provider_error_trace_message(&e);
+                            let message = e.to_string();
+                            emit_error_trace(trace_collector, session_id, trace_message);
                             had_error = true;
-                            sse_manager.broadcast(
-                                session_id,
-                                SseWireEvent::Error { message: e.to_string() },
-                            );
+                            sse_manager.broadcast(session_id, SseWireEvent::Error { message });
                             turn_stop_reason = Some(agent::StopReason::EndTurn);
                             break;
                         }
@@ -2126,7 +2151,7 @@ mod tests {
                         .await;
                     let _ = tx
                         .send(Ok(agent::StreamEvent::Error {
-                            message: "provider stream interrupted".into(),
+                            message: "provider stream interrupted token=sk-test".into(),
                         }))
                         .await;
                 });
@@ -2238,6 +2263,232 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(partial.metadata.as_deref().unwrap()).unwrap();
         assert_eq!(parsed["stop_reason"], "error");
+
+        let journey = TraceStore::list_journey(&db, &session.id).unwrap();
+        assert_eq!(journey.len(), 1);
+        assert_eq!(journey[0].event_type, "error");
+        assert_eq!(journey[0].summary, "Provider stream interrupted");
+        assert!(!journey[0].summary.contains("sk-test"));
+    }
+
+    #[tokio::test]
+    async fn test_provider_stream_error_writes_journey_error_trace() {
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct ProviderErrorAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for ProviderErrorAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(Err(crate::error::ProviderError::StreamInterrupted(
+                            "network dropped token=sk-test".into(),
+                        )))
+                        .await;
+                });
+                Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(ProviderErrorAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // codebase_id
+        )
+        .unwrap();
+
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "error");
+
+        let journey = TraceStore::list_journey(&db, &session.id).unwrap();
+        assert_eq!(journey.len(), 1);
+        assert_eq!(journey[0].event_type, "error");
+        assert_eq!(journey[0].summary, "Provider stream interrupted");
+        assert!(!journey[0].summary.contains("sk-test"));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_error_writes_sanitized_journey_error_trace() {
+        use async_trait::async_trait;
+        use futures_core::Stream;
+        use std::pin::Pin;
+
+        struct SendMessageErrorAgent;
+
+        #[async_trait]
+        impl crate::agent::CodingAgent for SendMessageErrorAgent {
+            fn provider_type(&self) -> &str {
+                "mock"
+            }
+            fn display_name(&self) -> &str {
+                "Mock"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _request: MessageRequest,
+            ) -> Result<
+                Pin<
+                    Box<
+                        dyn Stream<Item = Result<agent::StreamEvent, crate::error::ProviderError>>
+                            + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                Err(crate::error::ProviderError::StreamInterrupted(
+                    "pre-stream token=sk-test".into(),
+                ))
+            }
+            async fn health_check(
+                &self,
+            ) -> Result<crate::agent::ProviderHealth, crate::error::ProviderError> {
+                Ok(crate::agent::ProviderHealth {
+                    healthy: true,
+                    latency_ms: 0,
+                    error: None,
+                })
+            }
+        }
+
+        let db = test_db();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let specialists = Arc::new(SpecialistRegistry::new());
+        let active = Arc::new(ActiveSessions::new());
+        let sse = Arc::new(crate::sse::SseManager::new());
+        let tools = Arc::new(ToolRegistry::new());
+
+        let ws = crate::store::workspaces::WorkspaceStore::create(&db, "test-ws").unwrap();
+        let provider = crate::store::providers::ProviderStore::create(
+            &db,
+            "mock",
+            "test",
+            r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
+        )
+        .unwrap();
+        registry.add_agent(&provider.id, Arc::new(SendMessageErrorAgent));
+
+        let session = crate::store::sessions::SessionStore::create(
+            &db,
+            &ws.id,
+            &provider.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None, // codebase_id
+        )
+        .unwrap();
+
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while active.contains(&session.id) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let session = crate::store::sessions::SessionStore::get_by_id(&db, &session.id).unwrap();
+        assert_eq!(session.status, "error");
+
+        let journey = TraceStore::list_journey(&db, &session.id).unwrap();
+        assert_eq!(journey.len(), 1);
+        assert_eq!(journey[0].event_type, "error");
+        assert_eq!(journey[0].summary, "Provider stream interrupted");
+        assert!(!journey[0].summary.contains("sk-test"));
     }
 
     #[tokio::test]
