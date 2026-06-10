@@ -28,18 +28,19 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-10
-- **Latest commit:** `15dc466 chore: trim PROGRESS.md, add PROGRESS-archive.md, document state-file lifecycle` (no new commit yet — feat-040 implementation complete, about to be committed in this session)
-- **Active feature:** none — `feat-040` moved to `passing` this session. 7-phase `feature-dev` workflow ran end-to-end: Phase 1 (Discovery, from prior session), Phase 2 (Codebase exploration, 3 code-explorer reports preserved in PROGRESS-archive.md from prior session), Phase 3 (Clarifying questions, user confirmed via "your call" → 3 decisions: hybrid A2A extend + chokepoint test, message-string payload, terse attended message; spec also fixed to match shipping enum names), Phase 4 (Architecture, 3 code-architect agents, user selected Pragmatic), Phase 5 (Implementation, 5 files), Phase 6 (Quality review, 3 reviewers — Correctness + Conventions passed; Simplicity flagged 3 issues, 2 applied: redundant A2A test assertion dropped, 2 supported_modes tests consolidated to 1), Phase 7 (Summary, this entry).
-- **In-flight (uncommitted):** `feature_list.json` (feat-040 → `passing` + evidence), `crates/weave-server/src/agent/mod.rs` (validator + 6 tests), `crates/weave-server/src/a2a/types.rs` (2 optional fields), `crates/weave-server/src/a2a/messages.rs` (call-site + 2 tests), `crates/weave-server/src/service/sessions.rs` (chokepoint call + 1 test), `PROGRESS.md` (this file, current state + OOS updates)
+- **Latest commit:** `760b24a chore: add precommit hook enforcing just check` (this session)
+- **Previous commit:** `cfb8c02 feat(phase-7): runtime x mode compatibility validator (feat-040)` (committed before this session; prior PROGRESS.md was stale at session start)
+- **Active feature:** none — small chore session: added the version-controlled precommit hook + init.sh activation block. 6 verification steps ran end-to-end: hook standalone passes, init.sh sets `core.hooksPath`, deliberate test-panic gets rejected with the FAIL block, `--no-verify` escape hatch works, working tree clean, full `./init.sh` 3-layer gate stays green. See the session entry in `PROGRESS-archive.md` for full verification trace.
+- **In-flight (uncommitted):** none — working tree clean
 - **Build status:** green — `./init.sh` 3-layer gate passes
-- **Test status:** green — 659 Rust tests + 113 frontend tests, 9 new tests in feat-040
-- **Lint status:** green — clippy clean, fmt clean (auto-fixed), prettier clean, ESLint clean
+- **Test status:** green — 659 Rust tests + 113 frontend tests
+- **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
+- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` now runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed.
 
 ## Next Steps (in order)
 
-1. **Commit feat-040.** All 5 implementation files are modified, `feature_list.json` is flipped to `passing` with evidence, `./init.sh` is green. Stage and commit with a feat message. Then `git push` and the user reviews the diff.
-2. **Pick the next `not_started` phase-7 feature.** Per the `feature_list.json` next-features list: `feat-041` (TurnContext extension to CodingAgent trait) has dependencies feat-005/009/038 all `passing` and is the natural next step in the multi-runtime foundation. `feat-042` (Per-Runtime-Tool model cache) depends on feat-005/007/039 and is independent of feat-041.
-3. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
+1. **Pick the next `not_started` phase-7 feature.** Per the `feature_list.json` next-features list: `feat-041` (TurnContext extension to CodingAgent trait) has dependencies feat-005/009/038 all `passing` and is the natural next step in the multi-runtime foundation. `feat-042` (Per-Runtime-Tool model cache) depends on feat-005/007/039 and is independent of feat-041. With the precommit hook in place, the next feature implementation will be gated at commit time — green builds required.
+2. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
 
