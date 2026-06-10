@@ -28,19 +28,18 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-10
-- **Latest commit:** `f6873c8` (feat-043); feat-044 is the next one to commit.
-- **Active feature:** none — feat-044 marked `passing` in `feature_list.json`. Next: pick the next `not_started` phase-8 feature (feat-045: Claude Code `stream-json` parser).
-- **In-flight (uncommitted):** feat-044 working tree — fake CLI binary at `src/bin/fake_cli.rs`, tests at `src/agent/fake_cli_test.rs`, shared `run_with_timeout` extracted to `cli_runner::test_support`, evidence in `feature_list.json`. Ready to commit.
+- **Latest commit:** `4ee04c3` (feat-044); feat-045 is the next one to implement.
+- **Active feature:** none — feat-044 marked `passing` in `feature_list.json` (commit `4ee04c3`). Next: pick the next `not_started` phase-8 feature (feat-045: Claude Code `stream-json` parser — consumes the fake's output).
+- **In-flight (uncommitted):** none.
 - **Build status:** green — `./init.sh` 3-layer gate passes (697 Rust + 113 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, smoke test green)
 - **Test status:** green — 697 Rust tests + 113 frontend tests (6 new `test_fake_cli_*` in feat-044)
 - **Lint status:** green — clippy clean (default targets), fmt clean, prettier clean, ESLint clean
-- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth.
+- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth. Confirmed green for the feat-044 commit (no flake triggered).
 
 ## Next Steps (in order)
 
-1. **Commit feat-044** — fake CLI test harness is verified green; the working tree is ready. Conventional commit message: `feat(phase-8): fake CLI test harness (feat-044)`.
-2. **Pick the next phase-8 feature.** feat-045 (Claude Code `stream-json` parser) is the natural successor — it consumes the fake's output via `cargo test -p weave-server -- test_claude_code_parser_*`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
-3. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
+1. **Pick the next phase-8 feature.** feat-045 (Claude Code `stream-json` parser) is the natural successor — it consumes the fake's output via `cargo test -p weave-server -- test_claude_code_parser_*`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
+2. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
 

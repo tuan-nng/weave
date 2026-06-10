@@ -530,7 +530,7 @@ User bug report: at `http://localhost:5173/sessions`, **every** session in the d
 
 ---
 
-### feat-044 — fake CLI test harness (phase-8, verification green, uncommitted)
+### feat-044 — fake CLI test harness (phase-8, verification green, committed 4ee04c3)
 
 Phase 8 of the multi-runtime strategy. The `fake_cli` test fixture binary: a Claude-Code-style CLI emulator that emits deterministic JSON events on stdout for conformance tests. Six scripts selected by `FAKE_CLI_SCRIPT` env var: `text-only`, `text+tool+done`, `permission-denied`, `crash`, `resume-unknown-session`, `echo-resume-id`. The `text+tool+done` script deliberately does NOT emit a `tool_result` — real Claude Code never re-emits a tool result it did not execute; the tool is run server-side by the runtime. The journey translator (feat-048) records the missing result as a `tool_call` with `status='orphaned'`.
 
