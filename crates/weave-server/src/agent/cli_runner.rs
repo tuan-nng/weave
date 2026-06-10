@@ -586,12 +586,40 @@ fn cli_spawn_post(message: &'static str) -> AppError {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Shared helpers for in-crate test modules that drive the runner
+/// (the existing `cli_runner::tests` mod and `fake_cli_test`). Kept
+/// `pub(crate)` so the in-crate tests can share them without exposing
+/// test internals to integration tests in `tests/`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::super::turn_context::TurnContext;
+    use super::{CliInvocation, CliRunResult, CliRunner};
+    use crate::error::AppError;
+
+    /// Drive the runner to completion, return the result or panic
+    /// on a wall-clock timeout (60s) — anything slower means a test
+    /// regression in the runner.
+    pub(crate) async fn run_with_timeout(
+        runner: &CliRunner,
+        inv: CliInvocation,
+        turn: TurnContext,
+    ) -> Result<CliRunResult, AppError> {
+        timeout(Duration::from_secs(60), runner.run(inv, &turn))
+            .await
+            .expect("runner did not return within 60s — likely a deadlock")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::run_with_timeout;
     use super::*;
     use crate::agent::turn_context::test_support::make_test_turn_context;
     use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::time::timeout;
 
@@ -645,19 +673,6 @@ mod tests {
             stdin_payload: None,
         };
         (tmp, inv)
-    }
-
-    /// Drive the runner to completion, return the result or panic
-    /// on a wall-clock timeout (60s) — anything slower means a test
-    /// regression in the runner.
-    async fn run_with_timeout(
-        runner: &CliRunner,
-        inv: CliInvocation,
-        turn: TurnContext,
-    ) -> Result<CliRunResult, AppError> {
-        timeout(Duration::from_secs(60), runner.run(inv, &turn))
-            .await
-            .expect("runner did not return within 60s — likely a deadlock")
     }
 
     /// 1. `test_cli_runner_basic` — invoke `/bin/echo` with args

@@ -434,6 +434,12 @@ pub struct ProviderHealth {
 // Tests
 // ---------------------------------------------------------------------------
 
+// Integration tests for the `fake_cli` test harness (feat-044). The
+// fake binary is declared as a `[[bin]]` target in the parent
+// `Cargo.toml`; the tests locate it via `env!("CARGO_BIN_EXE_fake_cli")`.
+#[cfg(test)]
+mod fake_cli_test;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -530,6 +530,71 @@ User bug report: at `http://localhost:5173/sessions`, **every** session in the d
 
 ---
 
+### feat-044 — fake CLI test harness (phase-8, verification green, uncommitted)
+
+Phase 8 of the multi-runtime strategy. The `fake_cli` test fixture binary: a Claude-Code-style CLI emulator that emits deterministic JSON events on stdout for conformance tests. Six scripts selected by `FAKE_CLI_SCRIPT` env var: `text-only`, `text+tool+done`, `permission-denied`, `crash`, `resume-unknown-session`, `echo-resume-id`. The `text+tool+done` script deliberately does NOT emit a `tool_result` — real Claude Code never re-emits a tool result it did not execute; the tool is run server-side by the runtime. The journey translator (feat-048) records the missing result as a `tool_call` with `status='orphaned'`.
+
+**Wire format:** one JSON object per line on stdout. Event types: `session_id` (always first), `text_delta`, `tool_use` (start), `input_json_delta`, `tool_result`, `thinking`, `error`, `done`. Exit codes: 0=success, 2=permission_denied, 3=resume_unknown_session, 139=SIGSEGV emulation, 1=unknown script. `--resume <id>` is echoed back as the first `session_id` event. Module-level doc in `src/bin/fake_cli.rs` is the wire-format reference; no standalone README.
+
+**Layout decisions (Q1, applied):**
+
+- **Binary at `src/bin/fake_cli.rs`, not `tests/fakes/fake_cli/main.rs`.** The spec suggested `tests/fakes/` but cargo reserves `tests/` for integration tests; pointing a `[[bin]]` at a path inside `tests/` is non-idiomatic and requires a `[[bin]]` declaration. The standard `src/bin/<name>.rs` path is auto-discovered — no `[[bin]]` block needed in `Cargo.toml`. The test fixture's nature is documented in the binary's module-level doc.
+- **Tests in `src/agent/fake_cli_test.rs`, not `tests/fake_cli.rs`.** Integration tests in `tests/` link against the library, but `weave-server` is a binary crate (no `lib.rs`). Moving the tests to `tests/` would require exposing the cli_runner types via a new `lib.rs` — out of scope for feat-044. In-crate `#[cfg(test)]` works because `cli_runner` is already `pub mod cli_runner;` in `agent/mod.rs`. Future feat-051/058/059 will hit this gap; the lib.rs refactor is then natural.
+- **Always-emit `session_id` first, even for `echo-resume-id`.** Real Claude Code always emits a session id on the first event of every turn. With `--resume <id>`, the fake echoes that value back; otherwise a fresh UUID is generated.
+
+**Shared `run_with_timeout` extracted (Q2, applied):**
+
+The existing `cli_runner::tests` had a private `run_with_timeout` helper. The new `fake_cli_test` would have duplicated it. Instead, extracted to a new `pub(crate) mod test_support { pub async fn run_with_timeout }` inside `cli_runner.rs`. Both call sites use it. Mirrors the existing `turn_context::test_support` and `tools::test_support` patterns. The 14 existing cli_runner tests updated mechanically to import from the new location.
+
+**`fake_cli_path()` uses both branches (Q3, applied):**
+
+`CARGO_BIN_EXE_fake_cli` is set for integration tests in `tests/` and for build scripts, but NOT for in-crate unit tests. The helper tries it first (for future `tests/` integration tests) and falls back to walking up from `current_exe()` to `target/debug/fake_cli` (used by today's in-crate tests). `cargo test` always builds every `[[bin]]` in the crate before running tests, so the path is valid by the time the test runs.
+
+**Simplify pass (Q4, applied):**
+
+- All 6 script functions return `ExitCode` for uniform dispatch shape (the 2 success scripts previously fell through to `ExitCode::SUCCESS`).
+- `read_stdin` inlined at the call site (its `String` return was always discarded).
+- `BTreeMap::from([...])` for the single-entry env map in the test helper.
+- `expect_success` / `expect_exit_error` helpers cut ~25 lines of `match result { other => panic!(...) }` boilerplate across the 6 tests.
+- Doc on `fake_cli_path()` trimmed from 11 lines to 3 (the load-bearing cargo-quirk info is in 1 line, the path-walk trace moved to an inline comment).
+- Explicit "no `tool_result`" assertion in the `text+tool+done` test: `assert!(!events.iter().any(|e| e["type"] == "tool_result"))` — the load-bearing claim is now its own assertion, not just an implicit `events.len() == 4` invariant.
+
+**Code-review pass (Q5, applied):**
+
+3 parallel reviewers (simplicity, correctness, conventions) agreed: no correctness bugs, conventions are consistent (`pub(crate) mod test_support` matches `turn_context::test_support` exactly), test names match both `feature_list.json` and `multi-runtime-tasks.md`. One low-severity simplification: tighten the `test_support` import path from `super::super::cli_runner::...` to `super::{...}` (`super` is already `cli_runner`).
+
+**Skipped (with reasoning):**
+
+- **clap for argv parsing** (altitude reviewer's first finding): user explicitly chose "Hand-rolled" in Phase 3 of the feature-dev workflow. Strategy doc says "two flags is below the threshold where pulling in clap would pay off."
+- **`#![forbid(unsafe_code)]` consistency** (conventions reviewer's first finding): reviewer said "leave or remove at taste". The attribute is a defensive guardrail on a test fixture with no legitimate need for unsafe; kept.
+- **Moving tests to `tests/`** (altitude reviewer's first finding): requires adding a `lib.rs` to expose the cli_runner types. Out of scope for feat-044; deferred to feat-051 (the first consumer of the fake).
+- **Data-driving the 6 script functions** (simplification reviewer's finding): the per-script docstrings document the wire shape. A data-driven table would lose the grep-friendly `script_permission_denied` → implementation link. The script table lives in the module-level doc.
+
+**Deferred (with reasoning):**
+
+- **2 input-mode tests** (`test_fake_cli_input_mode_stdin`, `test_fake_cli_input_mode_argv`) from the strategy doc: the runner's stdin-write path is already covered by `test_cli_runner_stdin_payload` (cli_runner.rs:1082). The fake's stdin path is mechanically the same (read stdin, discard). User chose in Phase 3 to stick to 6 named tests.
+
+**Verification:**
+
+- `./init.sh` exit 0, all 3 layers pass.
+- 697 Rust tests + 113 frontend tests, 6 new tests in feat-044.
+- clippy clean, fmt clean, prettier clean, ESLint clean.
+- Server starts, `/api/health` 200, `GET /` serves index.html with `id="root"`, graceful shutdown.
+
+**Cross-feature follow-ups (now in PROGRESS.md / DECISIONS.md):**
+
+- feat-045 (parser) — wire-format reference is the binary's module-level doc. The 7 spec verification tests (text_delta, tool_use_start_delta, tool_result, thinking, session_id_capture, done_stop_reason, malformed_line_skipped) will consume the fake's output.
+- feat-047 (resume metadata) — `echo-resume-id` and `resume-unknown-session` are the two scripts that exercise the resume path.
+- feat-051 (Claude Code adapter) — first end-to-end consumer. Will hit the in-crate-vs-`tests/` lib.rs gap noted above.
+- feat-057 (conformance suite) — `cli_conformance` test target. The 6 fake scripts are the canonical fixtures; Codex/OpenCode fakes will follow the same shape.
+- feat-058/059 (Codex, OpenCode) — separate binaries at `src/bin/fake_codex.rs` and `src/bin/fake_opencode.rs` per the "one binary per adapter" decision in the strategy doc.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- The `lib.rs` exposure gap noted above (in-crate tests vs `tests/` integration tests) becomes more pressing as feat-051/058/059 add end-to-end tests. Defer the refactor until then.
+
+---
+
 ## Cross-Session Reference
 
 ### Completed Since Project Start (as of 2026-06-10)
