@@ -595,6 +595,53 @@ The existing `cli_runner::tests` had a private `run_with_timeout` helper. The ne
 
 ---
 
+### feat-045 — Claude Code stream-json parser (phase-8, verification green, uncommitted)
+
+Phase 8 of the multi-runtime strategy. The Claude Code `stream-json` parser: a synchronous state machine that consumes one JSON line per call and returns 0+ `StreamEvent`s. Lives in a new `claude_code/` subdir (`mod.rs` + `parser.rs` + `parser_test.rs`, ~1079 lines total) with a 1-line `pub mod claude_code;` added to `agent/mod.rs`. Wires the fake CLI from feat-044 into the Weave `StreamEvent` vocabulary; the runner from feat-043 feeds the line stream; the journey translator (feat-048) will consume the events.
+
+**State machine (Q1, applied):**
+
+`ClaudeCodeStreamParser` mirrors the existing `anthropic::streaming::EventConverter` discipline. Tool uses are registered in a `Vec<(String, InFlightToolUse)>` (insertion-ordered, NOT a `BTreeMap` keyed by block id — see Q2 below) and emitted at the matching `done` line or at `flush()`. `InFlightToolUse` carries `name`, `initial_input: Option<Value>`, and `input_text: String`; the assembled `ToolUseStart` is emitted once with `input` as the parsed `serde_json::Value` of the concatenated `input_json_delta` text. `null`, `{}`, or missing `input` are all treated as "no initial input" via `is_empty_input_value` so the concatenation parses cleanly when the CLI doesn't pre-fill the field.
+
+**`session_id` capture is a passive getter (Q2, applied):**
+
+The parser exposes `session_id()` and `take_session_id()` — no tokio coupling, no internal channel. feat-047's `Sender<String>` (the CLI-native resume id persistence layer) will pull the id out at `done` time. The parser stays a pure synchronous state machine; the resume layer owns the channel discipline.
+
+**Module-level `#![allow(dead_code)]` (Q3, applied):**
+
+`claude_code/parser.rs:1` carries `#![allow(dead_code)]` because feat-051's `ClaudeCodeCodingAgent` doesn't exist yet — every public symbol on `ClaudeCodeStreamParser` is currently unused in production. Mirrors the `cli_runner.rs:58` precedent for "public surface for a future consumer". The public re-export `pub use parser::ClaudeCodeStreamParser;` is `#[cfg_attr(not(test), allow(unused_imports))]` so the unused-imports lint stays quiet in non-test builds.
+
+**Simplify pass (Q4, applied):**
+
+7 fixes from the simplify reviewer: (1) `BTreeMap` → `Vec` for true insertion order (the prior `BTreeMap` was a no-op guarantee; a Vec is what we want); (2-3) `serde_json::json!({})` instead of `Value::Object(serde_json::Map::new())` in 2 places; (4) collapsed the `error` arm's if/else into a `Option::or_else`; (5) trimmed the module doc from 58 to 30 lines; (6) fixed the stale test-name reference in the module doc; (7) made the test import via the public re-export and cfg-gated the `#[allow(unused_imports)]` on the `pub use`.
+
+**Verification:**
+
+- `./init.sh` exit 0, all 3 layers pass.
+- 712 Rust tests + 113 frontend tests (+15 over feat-044), 7 spec-named + 8 robustness parser tests.
+- clippy clean, fmt clean, prettier clean, ESLint clean.
+- Server starts, `/api/health` 200, `GET /` serves index.html with `id="root"`, graceful shutdown.
+
+**Skipped (with reasoning):**
+
+- **`map_stop_reason` and deferred-emission state-machine dedup** (simplify reviewer's finding): `claude_code/parser.rs::map_stop_reason` and `InFlightToolUse` are near-duplicates of `anthropic/streaming.rs::map_stop_reason` and `EventConverter`. Three near-identical copies will exist once Codex (feat-058) and OpenCode (feat-059) parsers land. **Best home: feat-057 (shared conformance suite)** — the conformance tests are the natural forcing function for the abstraction. Don't refactor pre-emptively; wait until a second CLI adapter exists.
+- **Test-helper hoist for `fake_cli` tests** (simplify reviewer's finding): `parser_test.rs::test_claude_code_parser_session_id_capture_through_runner` re-implements `fake_cli_path` and `CliInvocation` construction that already exist (privately) in `fake_cli_test.rs`. The same helpers will be needed by feat-051, feat-057, feat-058, feat-059. **Best home: a new `agent::test_support` module**, lifted from `fake_cli_test.rs` when the second consumer (feat-051) lands. The duplication is intentional for feat-045; the hoist is a one-time refactor.
+
+**Cross-feature follow-ups (now in PROGRESS.md / DECISIONS.md):**
+
+- feat-047 (resume metadata) — the `Sender<String>` channel that pulls `cli_resume_id` from the parser's `take_session_id()` is wired here.
+- feat-048 (journey translator) — consumes the parser's `StreamEvent` stream and records trace events. The `tool_call status='orphaned'` path (CLI dropped the tool result) is fed by `feed_line`'s `flush()` of any pending `ToolUseStart` that never got a matching `tool_result`.
+- feat-051 (Claude Code adapter) — first real consumer of `ClaudeCodeStreamParser`. The `pub mod claude_code;` is the public surface feat-051 builds on.
+- feat-057 (conformance suite) — natural home for the `map_stop_reason` + `InFlightToolUse` dedup across Claude Code / Codex / OpenCode parsers.
+- feat-058/059 (Codex, OpenCode) — sibling parsers in `agent/codex/parser.rs` and `agent/opencode/parser.rs`, sharing the same `StreamEvent` contract.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- The `InFlightToolUse` `Vec` is bounded by the number of in-flight tool uses per turn (bounded by Claude Code's own model — typically <10 in practice). No cap is enforced; if a runaway model emits thousands of pending tool_uses, the Vec will grow without bound. Not a regression (real Claude Code has the same behavior); defer to a future feature if it bites.
+- The parser does NOT verify that the CLI's reported `stop_reason` matches the in-flight state (e.g., `done` with `stop_reason='end_turn'` but an unfinished `ToolUseStart` is silently flushed via `flush()`). Real Claude Code never does this, but a malicious or buggy fake could. Not a security issue (the parser is the consumer, not the gate).
+
+---
+
 ## Cross-Session Reference
 
 ### Completed Since Project Start (as of 2026-06-10)
