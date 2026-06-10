@@ -33,6 +33,19 @@ step() { echo ""; echo "=== $* ==="; }
 step "Installing dependencies"
 just setup || fail 1 "Dependency setup failed. Check Cargo.toml, network connectivity, and web/package.json."
 
+# ---------- Hook setup ----------
+# Activate the version-controlled precommit hook so `git commit` blocks
+# on `just check` failures. `git config` (no flag) defaults to --local,
+# so this only affects the current clone. Idempotent: re-running init.sh
+# is safe. Bypass with `git commit --no-verify` when needed.
+step "Configuring precommit hook"
+if [ -d ".git" ] && [ -d ".githooks" ]; then
+    git config core.hooksPath .githooks
+    echo "core.hooksPath set to .githooks (precommit hook active)"
+else
+    echo "SKIP: not a git repo or .githooks/ missing — hook not configured"
+fi
+
 # ---------- Layer 1: Static ----------
 step "Layer 1 — Static checks (lint, format)"
 just lint || fail 1 "Lint failed. Run 'just lint' to see details. Fix all warnings before proceeding."

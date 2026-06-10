@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Precommit hook — enforces `just check` (cargo clippy + frontend lint +
+# cargo test + frontend test) on every commit. Bypass with
+# `git commit --no-verify` when you have a specific reason to skip
+# (CI is the safety net for those cases — the change must still
+# pass `./init.sh` per CLAUDE.md hard constraint #9).
+#
+# Activated via `git config core.hooksPath .githooks`, which
+# `init.sh` sets on fresh clones.
+
+set -euo pipefail
+
+# Run from repo root regardless of where git invokes us from
+cd "$(git rev-parse --show-toplevel)"
+
+echo "==> pre-commit: running 'just check' (lint + tests, no build)"
+if just check; then
+    echo "==> pre-commit: just check passed"
+else
+    echo "" >&2
+    echo "FAIL: 'just check' exited non-zero. Commit aborted." >&2
+    echo "" >&2
+    echo "  Why: CLAUDE.md hard constraint #9 — all commits must pass ./init.sh." >&2
+    echo "  How: fix the lint/test failure above, then retry the commit." >&2
+    echo "  Escape hatch: 'git commit --no-verify' (CI will still gate the merge)." >&2
+    exit 1
+fi
