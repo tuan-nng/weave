@@ -9,7 +9,7 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 ## Current State
 
 - **Last updated:** 2026-06-10 (feat-039 committed; ready to pick next phase-7 feature)
-- **Latest commit:** _filled in after commit lands (feat-039 — provider table discriminated union on `kind`)_
+- **Latest commit:** `075e721 feat(phase-7): provider table discriminated union on kind (feat-039)`
 - **Active feature:** none — feat-039 closed, state `passing`. Next: pick a `not_started` phase-7 feature (feat-040, feat-041, or feat-042 are the natural next steps in dep order).
 - **In-flight (uncommitted):** none.
 - **Build status:** green — `./init.sh` all 3 layers pass
