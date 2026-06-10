@@ -587,11 +587,11 @@
       "phase": "phase-7",
       "behavior": "Widen the Provider table to a discriminated union. Add a `kind TEXT NOT NULL DEFAULT 'http'` column to `providers` (`http` | `cli`). HTTP rows carry the existing `base_url`, `api_key`, `default_model` (unchanged). CLI rows carry a new `binary_path TEXT`, `args_json TEXT`, `env_json TEXT`, `default_model TEXT`, and `permission_mode TEXT` (one of `accept-edits` | `default` | `plan` | `bypass-permissions` | CLI-specific strings). Both variants keep `name` and `default_model`. Migration is additive; existing rows backfill to `kind='http'`. `POST /api/providers` accepts the `kind` discriminator and validates the right shape (http requires base_url + api_key; cli requires binary_path; both require name + default_model). `GET /api/providers` and `GET /api/providers/:id` return `kind` and the kind-specific config. `add_provider` in ProviderRegistry builds the matching `CodingAgent` (HTTP → `AnthropicAgent`-style; CLI → `CliCodingAgent` placeholder until feat-051). `api_key` is stripped from responses as today. The `/api/providers/:id/models` endpoint is still HTTP-only in this feature; the CLI model cache is feat-042.",
       "verification": "cargo test -p weave-server -- test_provider_kind_http_crud && cargo test -p weave-server -- test_provider_kind_cli_crud && cargo test -p weave-server -- test_provider_kind_validation && cargo test -p weave-server -- test_provider_api_key_stripped_across_kinds && cargo test -p weave-server -- test_provider_migration_backfills_http",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-007"
       ],
-      "evidence": ""
+      "evidence": "5 tests passed: test_provider_kind_http_crud, test_provider_kind_cli_crud, test_provider_kind_validation, test_provider_api_key_stripped_across_kinds, test_provider_migration_backfills_http. Run 2026-06-10 via `cargo test -p weave-server -- test_provider_kind_http_crud test_provider_kind_cli_crud test_provider_kind_validation test_provider_api_key_stripped_across_kinds test_provider_migration_backfills_http` (cargo test: 5 passed, 645 filtered out, 1 suite, 0.20s). Full `./init.sh` also green: 650 Rust + 113 frontend tests; server starts, /api/health and / respond."
     },
     {
       "id": "feat-040",

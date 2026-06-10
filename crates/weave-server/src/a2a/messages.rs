@@ -35,8 +35,8 @@ pub async fn send_message(
     // 2. Extract text from message parts
     let prompt = extract_text_from_parts(&body.message.parts);
     if prompt.trim().is_empty() {
-        return Err(AppError::Validation(
-            "message must contain at least one text part with non-empty content".into(),
+        return Err(AppError::validation(
+            "message must contain at least one text part with non-empty content",
         ));
     }
 
@@ -52,7 +52,7 @@ pub async fn send_message(
         // Continue existing session — validate it exists and is non-terminal
         let session = SessionStore::get_by_id(&state.db, task_id)?;
         if crate::store::sessions::TERMINAL.contains(&session.status.as_str()) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "cannot send message to task in terminal status '{}'",
                 session.status
             )));
@@ -127,9 +127,6 @@ fn first_provider_id(db: &crate::db::Db) -> Result<String, AppError> {
         .first()
         .map(|p| p.id.clone())
         .ok_or_else(|| {
-            AppError::Validation(
-                "no AI provider configured; add a provider via POST /api/providers before sending A2A messages"
-                    .into(),
-            )
+            AppError::validation("no AI provider configured; add a provider via POST /api/providers before sending A2A messages")
         })
 }

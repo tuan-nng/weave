@@ -170,7 +170,7 @@ impl FromStr for RuntimeKind {
             "claude-code" => Ok(Self::ClaudeCode),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::Opencode),
-            other => Err(AppError::Validation(format!(
+            other => Err(AppError::validation(format!(
                 "invalid runtime_kind '{other}', expected one of: \
                  anthropic-api, openai-api, openai-compatible, claude-code, codex, opencode"
             ))),
@@ -228,7 +228,7 @@ impl FromStr for SessionMode {
             "native" => Ok(Self::Native),
             "wrapped" => Ok(Self::Wrapped),
             "attended" => Ok(Self::Attended),
-            other => Err(AppError::Validation(format!(
+            other => Err(AppError::validation(format!(
                 "invalid mode '{other}', expected one of: native, wrapped, attended"
             ))),
         }
@@ -548,7 +548,9 @@ mod tests {
     fn test_runtime_kind_from_str_rejects_unknown() {
         let err = "not-a-runtime".parse::<RuntimeKind>().unwrap_err();
         match err {
-            AppError::Validation(msg) => assert!(msg.contains("invalid runtime_kind")),
+            AppError::Validation { message: msg, .. } => {
+                assert!(msg.contains("invalid runtime_kind"))
+            }
             other => panic!("expected Validation, got: {other:?}"),
         }
     }
@@ -612,7 +614,7 @@ mod tests {
     fn test_session_mode_from_str_rejects_unknown() {
         let err = "turbo".parse::<SessionMode>().unwrap_err();
         match err {
-            AppError::Validation(msg) => assert!(msg.contains("invalid mode")),
+            AppError::Validation { message: msg, .. } => assert!(msg.contains("invalid mode")),
             other => panic!("expected Validation, got: {other:?}"),
         }
     }

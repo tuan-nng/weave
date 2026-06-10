@@ -100,10 +100,7 @@ fn map_fk_violation(e: rusqlite::Error) -> AppError {
         if err.code == ErrorCode::ConstraintViolation {
             // SQLITE_CONSTRAINT_FOREIGNKEY = 787
             if err.extended_code == 787 {
-                return AppError::Validation(
-                    "referenced resource not found (workspace_id, provider_id, or parent_session_id)"
-                        .into(),
-                );
+                return AppError::validation("referenced resource not found (workspace_id, provider_id, or parent_session_id)");
             }
         }
     }
@@ -226,8 +223,8 @@ impl SessionStore {
             Some(c) if !c.is_empty() => match c.split_once('\x1f') {
                 Some((ts, id)) => (ts.to_string(), id.to_string()),
                 None => {
-                    return Err(AppError::Validation(
-                        "invalid sessions cursor: expected '<updated_at>\\x1f<id>'".into(),
+                    return Err(AppError::validation(
+                        "invalid sessions cursor: expected '<updated_at>\\x1f<id>'",
                     ));
                 }
             },
@@ -277,7 +274,7 @@ impl SessionStore {
     /// rejects transitions from terminal states, preventing TOCTOU races.
     pub fn update_status(db: &Db, id: &str, new_status: &str) -> Result<Session, AppError> {
         if !VALID_STATUSES.contains(&new_status) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "invalid status '{}', expected one of: {:?}",
                 new_status, VALID_STATUSES,
             )));
@@ -301,7 +298,7 @@ impl SessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Disambiguate: not found vs illegal transition
                 let current = Self::get_by_id(db, id)?;
-                Err(AppError::Validation(format!(
+                Err(AppError::validation(format!(
                     "cannot transition from '{}' to '{}'",
                     current.status, new_status,
                 )))
@@ -529,7 +526,7 @@ impl MessageStore {
             Some(c) if !c.is_empty() => match c.split_once('|') {
                 Some((ts, id)) => (ts.to_string(), id.to_string()),
                 None => {
-                    return Err(AppError::Validation(format!(
+                    return Err(AppError::validation(format!(
                         "invalid cursor: expected '<created_at>|<id>', got {c:?}"
                     )));
                 }
@@ -743,7 +740,7 @@ pub(crate) mod tests {
         let result = SessionStore::update_status(&db, &s.id, "ready");
         assert!(result.is_err());
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("cannot transition"), "got: {}", msg);
             }
             other => panic!("expected Validation, got: {:?}", other),
@@ -1004,7 +1001,7 @@ pub(crate) mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("referenced resource"), "got: {}", msg);
             }
             other => panic!("expected Validation, got: {:?}", other),

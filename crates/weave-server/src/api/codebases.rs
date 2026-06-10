@@ -77,7 +77,7 @@ pub async fn create_codebase(
     validate_absolute_path(path)?;
     let path_exists = std::path::Path::new(path).is_dir();
     if !path_exists {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "codebase path '{}' does not exist or is not a directory",
             path
         )));
@@ -87,7 +87,7 @@ pub async fn create_codebase(
     // catching it at create time gives a clearer message.
     let pb = PathBuf::from(path);
     if !is_git_repo(&pb).await {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "codebase path '{}' is not a git repository",
             path
         )));
@@ -149,12 +149,10 @@ pub async fn delete_codebase(
 /// paths as-given; the handler is the validation layer.
 fn validate_absolute_path(path: &str) -> Result<(), AppError> {
     if path.is_empty() {
-        return Err(AppError::Validation(
-            "codebase path must not be empty".into(),
-        ));
+        return Err(AppError::validation("codebase path must not be empty"));
     }
     if !std::path::Path::new(path).is_absolute() {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "codebase path '{}' must be absolute",
             path
         )));

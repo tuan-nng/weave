@@ -123,28 +123,65 @@ data: <json_payload>
 
 ## Provider API
 
+`POST /api/providers` widens to a discriminated union on `kind`
+(`"http"` default; `"cli"` for CLI runtimes pre-registered before the
+per-adapter dispatch lands in feat-051).
+
 ```json
-// POST /api/providers
-// Request:
+// POST /api/providers — kind=http (default)
 {
+    "kind": "http",
     "type": "anthropic",
     "name": "My Anthropic Provider",
-    "config": {
-        "base_url": "https://api.anthropic.com",
-        "api_key": "sk-ant-...",
-        "default_model": "claude-sonnet-4-5"
-    }
+    "base_url": "https://api.anthropic.com",
+    "api_key": "sk-ant-...",
+    "default_model": "claude-sonnet-4-5"
 }
-// Response (201): {"data": {"id": "uuid", "type": "anthropic", "name": "My Anthropic Provider", "created_at": "..."}}
-// Note: api_key is never returned in responses
+// Response (201):
+{"data": {
+    "id": "uuid",
+    "type": "anthropic",
+    "kind": "http",
+    "name": "My Anthropic Provider",
+    "default_model": "claude-sonnet-4-5",
+    "binary_path": null,
+    "args_json": null,
+    "env_json": null,
+    "permission_mode": null,
+    "created_at": "..."
+}}
+// Note: api_key is never returned in responses (carried in the
+// un-serialized config_json column only).
+
+// POST /api/providers — kind=cli
+{
+    "kind": "cli",
+    "type": "anthropic",
+    "name": "My Claude Code",
+    "default_model": "claude-sonnet-4-5",
+    "binary_path": "/usr/local/bin/claude",
+    "args_json": "[\"--verbose\"]",
+    "env_json": "{\"LOG_LEVEL\":\"info\"}",
+    "permission_mode": "accept-edits"
+}
+// Response (201): same shape as above, kind="cli", HTTP-only fields null.
 
 // GET /api/providers/:id/models
-// Response (200):
+// Response (200) for kind=http:
 {"data": [
     {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "context_window": 200000},
     {"id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "context_window": 200000}
 ]}
+// Response (501) for kind=cli: not yet dispatchable (lands in feat-042).
+{"error": {"code": "not_implemented",
+           "message": "CLI model list not available until feat-042"}}
 ```
+
+The pre-existing wire shape used a nested `config: {...}` envelope. The
+feat-039 shape is **flat** — `base_url`, `api_key`, `default_model`,
+`binary_path`, etc. are top-level fields, and `config_json` is never
+serialized. The pre-039 doc example above was inaccurate; this section
+is the source of truth as of feat-039.
 
 ## Kanban API
 

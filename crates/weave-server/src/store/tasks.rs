@@ -18,7 +18,7 @@ pub(crate) const VALID_TASK_STATUSES: &[&str] = &["active", "done", "archived"];
 /// every call site (HTTP handlers, agent tools, store methods).
 pub(crate) fn validate_status(s: &str) -> Result<(), AppError> {
     if !VALID_TASK_STATUSES.contains(&s) {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "invalid task status '{}'; valid values: {}",
             s,
             VALID_TASK_STATUSES.join(", ")
@@ -110,7 +110,7 @@ impl TaskStore {
         let status = status.unwrap_or("active");
         validate_status(status)?;
         if !column_belongs_to_board(db, column_id, board_id)? {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "column '{}' does not belong to board '{}'",
                 column_id, board_id
             )));
@@ -378,10 +378,9 @@ impl TaskStore {
         fields: &UpdateTask,
     ) -> Result<Task, AppError> {
         if fields.column_id.is_some() {
-            return Err(AppError::Validation(
+            return Err(AppError::validation(
                 "use move_to_column to change a task's column; \
-                 setting column_id via update is not allowed"
-                    .into(),
+                 setting column_id via update is not allowed",
             ));
         }
         // No-op when nothing to change.
@@ -536,7 +535,7 @@ impl TaskStore {
                 other => other.into(),
             })?;
         if target_board_id.as_deref() != Some(task_board_id.as_str()) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "column '{}' does not belong to board '{}'",
                 target_column_id, task_board_id
             )));
@@ -806,7 +805,7 @@ mod tests {
         let result = TaskStore::update_status(&db, &task.id, &ws, "invalid_status");
         assert!(result.is_err());
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("invalid task status"), "got: {}", msg);
             }
             other => panic!("expected Validation, got: {:?}", other),
@@ -998,7 +997,10 @@ mod tests {
         let db = test_db();
         let (_, board_id, col_id) = seed_workspace_with_board(&db);
         let result = TaskStore::create(&db, &board_id, &col_id, "X", None, None, Some("bogus"));
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[test]
@@ -1101,7 +1103,10 @@ mod tests {
             verification_report: None,
         };
         let result = TaskStore::update(&db, &task.id, &ws, &update);
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[test]

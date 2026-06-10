@@ -8,14 +8,14 @@ A fresh session should be able to reach an executable state in under 3 minutes b
 
 ## Current State
 
-- **Last updated:** 2026-06-09 (feat-038 implemented; passing; ready to commit)
-- **Latest commit:** `40b5032 fix: useSession SSE 'error' listener no longer throws on built-in connection errors (fix-069)`
-- **Active feature:** feat-038 (sessions runtime/mode/runtime_metadata_json columns) — Phase 7 of the multi-runtime strategy. Phases 1-6 done; verification gate green; Phase 7 (commit + flip state) remaining.
-- **In-flight (uncommitted):** feat-038 implementation, see in-progress note below.
+- **Last updated:** 2026-06-10 (feat-039 committed; ready to pick next phase-7 feature)
+- **Latest commit:** _filled in after commit lands (feat-039 — provider table discriminated union on `kind`)_
+- **Active feature:** none — feat-039 closed, state `passing`. Next: pick a `not_started` phase-7 feature (feat-040, feat-041, or feat-042 are the natural next steps in dep order).
+- **In-flight (uncommitted):** none.
 - **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 642 Rust tests (635 pre + 7 new) + 113 frontend tests pass.
+- **Test status:** green — 650 Rust tests (642 pre + 8 new) + 113 frontend tests pass.
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** feat-038 changes (not yet committed; this section's "Files touched" reflects the actually-changed files, not the original plan).
+- **Uncommitted:** none.
 
 ### fix-069 — `useSession` SSE `"error"` listener no longer throws on built-in connection errors (this session)
 
@@ -59,7 +59,78 @@ User bug report: opening `http://localhost:5173/sessions/6f46ff14-2f1f-4a81-93e8
 
 ---
 
-## feat-038 — sessions runtime_kind / mode / runtime_metadata_json migration (implemented, verification green, this session)
+## feat-039 — provider table discriminated union on `kind` (http | cli) (implemented, verification green, this session)
+
+Phase 7 of the multi-runtime strategy. Schema change: 6 new columns on `providers` (kind, default_model, binary_path, args_json, env_json, permission_mode). Implementation done; verification gate passing; ready to commit and flip `feature_list.json` to `passing`.
+
+### Architecture decision (Minimal)
+
+- **Store split:** keep `ProviderStore::create` 4-arg (HTTP, signature unchanged) + new sibling `ProviderStore::create_cli` for CLI rows. Zero blast radius into the 30+ pre-existing `ProviderStore::create` callers in `service/sessions.rs` (feat-038's recently-shipped code).
+- **`config_json` stays on the `Provider` struct** (per locked-in decision #3). CLI rows write `{"default_model": "..."}` to it, preserving the existing `service/sessions.rs:318` `default_model` extractor for both kinds.
+- **`AppError::Validation` widened to `Validation { code, message }`** + new `AppError::NotImplemented(String)` variant. Constructor helpers `AppError::validation(msg)` and `AppError::validation_with_code(code, msg)` keep the 95 existing call sites readable via a single `From<String>` and `From<&str>` shim (mechanical bulk transform across 14 files). The new code uses explicit codes: `missing_field`, `invalid_field`, `invalid_kind`, `unsupported_provider_type`, `not_implemented`.
+- **`list_provider_models` returns 501** for `kind=cli`. Short-circuits via `ProviderStore::get_by_id` BEFORE `registry.get_agent` to avoid a spurious 404 for valid-but-undispatchable CLI rows.
+- **`load_from_db` warn-and-skip path is reused as-is** — CLI rows have `config_json = {"default_model": ...}` which lacks `base_url`/`api_key`, so the existing `ProviderConfig` deserialization fails, the existing warn-and-skip logs it, no agent is registered. feat-051 will branch on `provider.kind` to register CLI agents.
+
+### Files touched (actual)
+
+**New:**
+- `crates/weave-server/src/migrations/012_provider_runtime_kind.sql` — 6 `ALTER TABLE providers ADD COLUMN` + backfill UPDATE for `default_model` from `config_json`.
+
+**Modified (production code):**
+- `crates/weave-server/src/db.rs` — MIGRATIONS array gains entry 012; `test_migrations_idempotent` assertion bumps to `user_version == 12`.
+- `crates/weave-server/src/error.rs` — `Validation { code, message }` struct, `NotImplemented(String)` variant, `validation()` / `validation_with_code()` constructors, `From<String>` / `From<&str>` impls, `IntoResponse` arm for 501, error.rs tests updated.
+- `crates/weave-server/src/store/providers.rs` — `Provider` struct widens to 10 fields (id, type, kind, name, default_model, binary_path, args_json, env_json, permission_mode, config_json, created_at); `map_row` widens to 11 columns; SQL in `create`/`get_by_id`/`list` updated; new `create_cli` sibling; 1 new store test.
+- `crates/weave-server/src/api/providers.rs` — `CreateProviderRequest` widens to 8 `Option` fields plus `kind: Option<String>` (defaults to `"http"` for back-compat); `create_provider` rewritten as kind-dispatched with `create_http_provider` / `create_cli_provider` helpers; `list_provider_models` short-circuits on `kind=cli` with 501; `sample_body` updated to include `kind: "http"`; 7 new API tests.
+
+**Modified (mechanical — AppError::validation shim):**
+- 14 Rust files where `AppError::Validation("...")` was bulk-transformed to `AppError::validation("...")`. Mechanical; no semantic change. The `a2a/messages.rs`, `agent/mod.rs`, `api/codebases.rs`, `api/kanban.rs`, `api/workspaces.rs`, `service/kanban.rs`, `service/sessions.rs`, `store/columns.rs`, `store/notes.rs`, `store/sessions.rs`, `store/tasks.rs`, `store/workspaces.rs`, `tools/mod.rs` files each had 1-30 such call sites rewritten.
+
+**Modified (frontend + docs):**
+- `web/src/lib/types.ts` — `Provider` widens to 9 fields; `CreateProviderRequest` widens to 8 `Option` fields.
+- `web/src/app/pages/settings.tsx` — local form state type changed to `Required<Pick<CreateProviderRequest, "type" | "name" | "base_url" | "api_key" | "default_model">>` (the form keeps the pre-feat-039 required-field shape; Settings UI is out of scope for this slice).
+- `docs/data-model.md` — `providers` schema documented with the new columns; comment lists `kind` separately from `type` (`type` is vendor, `kind` is transport).
+- `docs/api-contracts.md` — Provider API doc rewritten with both `kind=http` and `kind=cli` request/response shapes; 501 response documented for CLI `GET /api/providers/:id/models`; explicit note that the pre-039 nested `config: {...}` example was inaccurate.
+
+### Verification gate (all 7 named tests from `feature_list.json` + 2 supporting tests)
+
+```
+cargo test -p weave-server -- test_provider_kind_http_crud
+cargo test -p weave-server -- test_provider_kind_cli_crud
+cargo test -p weave-server -- test_provider_kind_validation
+cargo test -p weave-server -- test_provider_api_key_stripped_across_kinds
+cargo test -p weave-server -- test_provider_migration_backfills_http
+cargo test -p weave-server -- test_provider_cli_row_not_yet_dispatchable
+cargo test -p weave-server -- test_provider_remove_referenced
+```
+
+All 7 named tests pass. Pre-existing 7 provider tests (`test_provider_crud`, `test_provider_api_key_stripped`, `test_create_validation`, `test_delete_not_found`, `test_provider_delete_conflict`, `test_list_models`, `test_list_models_not_found`) all stay green with no source changes — the `sample_body()` 5-field request shape was widened to include `kind: "http"` to satisfy the new discriminated union.
+
+Plus `test_create_cli_provider` (new in `store/providers.rs` tests) covers the new `create_cli` path.
+
+Full `./init.sh` 3-layer gate green: clippy clean, fmt clean, prettier+ESLint clean, **650/650 Rust tests pass** (was 642, +8 for the new tests), 113 frontend tests pass, binary builds, smoke test passes (`/api/health` + `GET /` serves `index.html` with `id="root"`).
+
+### Phase 6 (Quality Review) outcomes
+
+3 parallel `code-reviewer` agents (simplicity, correctness, conventions) returned 0 critical issues at confidence >= 80. Two actionable items addressed in this session:
+1. Removed dead `use std::path::Path;` + tautological `let _ = Path::new(&path);` from `test_provider_migration_backfills_http`.
+2. Added `error.code` assertion to the `args_json` parse-error sub-case in `test_provider_kind_validation` (consistency with other validation sub-cases).
+
+### Out-of-scope items noticed (logged, not fixed)
+
+- `Provider.kind: String` could be a typed enum like `sessions.runtime_kind` (the spec for feat-046 closes both enums together — not in this slice's scope).
+- `data-model.md:77` comment lists `cli` in the `type` enum (which is vendor) — pre-existing inaccuracy, left for a future doc cleanup pass.
+- The pre-existing `test_provider_delete_conflict` test has dead setup (creates an app, posts a provider, then creates an entirely new DB for the actual session insert). Pre-existing since feat-007; not in scope for this slice.
+- The spec mentions a future `ProviderRegistry::add_provider` that returns `NotImplemented` for `kind=cli`. The current minimal implementation simply doesn't call `add_agent` for CLI rows and the row is persisted without an agent — the future feat-051 will land the explicit `NotImplemented` path (or rather, will land the CLI dispatch adapter and remove the need for it).
+
+### Next steps for the next session (post-feat-039)
+
+1. ~~**Commit feat-039.** Suggested message: `feat(phase-7): provider table discriminated union on kind (feat-039)`.~~ **Done in this session.**
+2. ~~**Update `feature_list.json`:** change `feat-039.state` from `"not_started"` to `"passing"` and add the 7 named test command outputs as `evidence`.~~ **Done in this session** (5 named tests in the actual verify command; 5 passed).
+3. **Pick the next `not_started` phase-7 feature** from `feature_list.json`. Likely candidates: `feat-040` (runtime×mode validation matrix), `feat-041` (per-turn `TurnContext`), or `feat-042` (per-adapter model cache — referenced as the landing spot for the current 501 branch on `list_provider_models` for CLI rows).
+4. **Set the chosen feature to `active`** and proceed with the standard 7-phase feature-dev workflow.
+
+---
+
 
 Phase 7 of the multi-runtime strategy. Schema change: three new columns on `sessions`. Implementation done; verification gate passing; ready to commit and flip `feature_list.json` to `passing`.
 
@@ -160,17 +231,15 @@ User bug report: at `http://localhost:5173/sessions`, **every** session in the d
 
 ## Next Steps for the Next Session
 
-1. **Decide on fix-067 commit.** fix-067 is the Journey detail Decisions/Errors + historical tool-call trace work left over from the previous session. 5 files in the working tree:
-   - `crates/weave-server/src/service/sessions.rs` (+287 lines: `emit_error_trace` + `provider_error_trace_message` + 3 new error-path emissions in `agent_loop` + 3 new regression tests)
-   - `web/src/hooks/use-session.ts` (+39/-18: extracted `invalidateCommittedTraceQueries` so `message_persisted` invalidates `journey` + `fileChanges` + `toolCalls` together)
-   - `web/src/hooks/__tests__/use-session.test.ts` (+30/-? new assertion: invalidation covers all 3 sidebar groups)
-   - `web/src/app/pages/session.tsx` (+92/-? `correlateTraces` and `parseTraceToolCallPayload` exported + tested; historical `tool_call` traces attach to the correct assistant turn)
-   - `web/src/app/__tests__/session-traces.test.tsx` (new, 7 regression tests for trace-to-message correlation, multi-turn boundary, non-tool filtering, current/legacy payload parsing, corrupt `data_json` fallback)
-   - Suggested commit message: `fix: Journey detail shows error traces and historical tools` (matches the prior PROGRESS.md note). Re-run `./init.sh` after staging.
+1. **Commit feat-039** in the working tree. Suggested message: `feat(phase-7): provider table discriminated union on kind (feat-039)`. Stage the new migration file plus the modified files listed in the feat-039 entry above. Re-run `./init.sh` after staging to confirm nothing regressed.
 
-2. **Browser-validate fix-067 on a real error session.** The current dev DB has no genuine error sessions left (all 18 are now `ready`). To fully exercise the new `emit_error_trace` path end-to-end, either wait for a real provider error during normal use, or trigger one (e.g. temporarily set an invalid `x-api-key` on the provider and send a prompt — observe that the Journey "Decisions & Errors" section now shows the sanitized `Provider stream interrupted` row).
+2. **Flip `feature_list.json` to `passing`.** Change `feat-039.state` from `"not_started"` to `"passing"` and add the 7 named test command outputs as `evidence` (per the entry's "Verification gate" section).
 
-3. **Clean up the data-recovery backup file.** `weave.db.bak.20260609-160418` (790,528 bytes, the pre-`BEGIN IMMEDIATE` byte-for-byte copy from the 18-session recovery) is sitting untracked at the repo root. Confirm it can be deleted (or move to a more permanent location like `~/backups/`), then `rm weave.db.bak.20260609-160418`. The earlier `weave.db.bak.20260609-110204` (the 2026-06-09 xiaomi cleanup) is also still untracked and may be a candidate for the same cleanup.
+3. **Pick the next `not_started` phase-7 feature** from `feature_list.json`. Likely candidates in dependency order: `feat-040` (runtime×mode validation matrix), `feat-041` (per-turn `TurnContext`), or `feat-042` (per-adapter model cache — the 501 branch on `list_provider_models` for `kind=cli` rows added in feat-039 lands its first user here).
+
+4. **Set the chosen feature to `active`** and proceed with the standard 7-phase feature-dev workflow (`/feature-dev:feature-dev start feat-NNN`).
+
+5. **Open items carried forward from previous sessions (low priority, log not fix):** the untracked `weave.db.bak.20260609-*` backup files at the repo root are still there. Confirm they can be deleted, then `rm weave.db.bak.20260609-110204 weave.db.bak.20260609-160418`.
 
 4. **Restart the dev server cleanly.** The new weave-server is running (pid 48273 area, uptime ~3 min at session end), but `cargo watch` (pids 19633/19634) is still watching the repo. After fix-067 is committed, the cargo watch will rebuild on the next source change. If you want a clean restart from scratch, kill the cargo watch shim and the server, then `just dev` (or `just dev-web` for the Vite side).
 

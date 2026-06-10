@@ -366,8 +366,8 @@ pub(crate) fn validate_auto_trigger(
     specialist_id: Option<&str>,
 ) -> Result<(), AppError> {
     if auto_trigger && specialist_id.map(str::is_empty).unwrap_or(true) {
-        return Err(AppError::Validation(
-            "auto_trigger requires a non-empty specialist_id".into(),
+        return Err(AppError::validation(
+            "auto_trigger requires a non-empty specialist_id",
         ));
     }
     Ok(())
@@ -453,7 +453,10 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
         let result = ColumnStore::create(&db, &bid, "Broken", None, None, true, None, None, None);
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[test]
@@ -563,7 +566,10 @@ mod tests {
         .unwrap();
         // Now try to clear specialist while auto_trigger is still on
         let result = ColumnStore::update(&db, &cid, None, None, Some(None), None, None, None, None);
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[test]

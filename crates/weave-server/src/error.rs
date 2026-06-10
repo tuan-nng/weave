@@ -14,8 +14,11 @@ pub enum AppError {
     #[error("Not found: {resource} {id}")]
     NotFound { resource: String, id: String },
 
-    #[error("Validation error: {0}")]
-    Validation(String),
+    #[error("Validation error: {message}")]
+    Validation { code: String, message: String },
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 
     #[error("Provider error: {0}")]
     Provider(#[from] ProviderError),
@@ -57,9 +60,12 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, code, message) = match &self {
             AppError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
-            AppError::Validation(_) => (
-                StatusCode::BAD_REQUEST,
-                "validation_error",
+            AppError::Validation { code, .. } => {
+                (StatusCode::BAD_REQUEST, code.as_str(), self.to_string())
+            }
+            AppError::NotImplemented(_) => (
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented",
                 self.to_string(),
             ),
             AppError::Provider(ProviderError::AuthFailed) => {
@@ -101,6 +107,49 @@ impl IntoResponse for AppError {
     }
 }
 
+/// Construct a `Validation` with the default `"validation_error"` code.
+///
+/// Convenience for the 100+ existing call sites that just want to
+/// raise a 400 with a message. New call sites that need a specific
+/// code (e.g. `"missing_field"`, `"invalid_kind"`) construct
+/// `AppError::Validation { code, message }` directly.
+impl AppError {
+    /// Build a `Validation` with the default `"validation_error"` code.
+    pub fn validation(message: impl Into<String>) -> Self {
+        AppError::Validation {
+            code: "validation_error".to_string(),
+            message: message.into(),
+        }
+    }
+
+    /// Build a `Validation` with an explicit `code` (e.g. `"missing_field"`,
+    /// `"invalid_kind"`).
+    pub fn validation_with_code(code: impl Into<String>, message: impl Into<String>) -> Self {
+        AppError::Validation {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for AppError {
+    fn from(message: String) -> Self {
+        AppError::Validation {
+            code: "validation_error".to_string(),
+            message,
+        }
+    }
+}
+
+impl From<&str> for AppError {
+    fn from(message: &str) -> Self {
+        AppError::Validation {
+            code: "validation_error".to_string(),
+            message: message.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,7 +177,7 @@ mod tests {
                 "workspace",
             ),
             (
-                AppError::Validation("name too long".into()),
+                AppError::validation("name too long"),
                 "validation_error",
                 "name too long",
             ),
@@ -209,7 +258,7 @@ mod tests {
                 },
                 StatusCode::NOT_FOUND,
             ),
-            (AppError::Validation("bad".into()), StatusCode::BAD_REQUEST),
+            (AppError::validation("bad"), StatusCode::BAD_REQUEST),
             (
                 AppError::Provider(ProviderError::AuthFailed),
                 StatusCode::UNAUTHORIZED,

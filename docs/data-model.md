@@ -73,11 +73,17 @@ CREATE INDEX idx_messages_session ON messages(session_id);
 
 -- Providers
 CREATE TABLE providers (
-    id          TEXT PRIMARY KEY,
-    type        TEXT NOT NULL,             -- anthropic | openai | local | cli
-    name        TEXT NOT NULL,
-    config_json TEXT NOT NULL,             -- {base_url, api_key, default_model, ...}
-    created_at  TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    type            TEXT NOT NULL,         -- vendor: anthropic | openai | local | cli
+    kind            TEXT NOT NULL DEFAULT 'http',  -- transport: http | cli (feat-039)
+    name            TEXT NOT NULL,
+    default_model   TEXT,                  -- canonical wire field, both kinds (feat-039)
+    binary_path     TEXT,                  -- cli rows only (feat-039)
+    args_json       TEXT,                  -- JSON Vec<String>, cli rows only (feat-039)
+    env_json        TEXT,                  -- JSON BTreeMap<String,String>, cli rows only (feat-039)
+    permission_mode TEXT,                  -- cli rows only (feat-039)
+    config_json     TEXT NOT NULL,         -- {base_url, api_key, default_model, ...}
+    created_at      TEXT NOT NULL
 );
 
 -- Codebases

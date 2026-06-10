@@ -15,7 +15,15 @@ export default function SettingsPage() {
     id: string;
     name: string;
   } | null>(null);
-  const [form, setForm] = useState<CreateProviderRequest>({
+  // The form keeps the pre-feat-039 required-field shape (the Settings
+  // UI only knows about HTTP providers in this slice). The wire DTO is
+  // widened to a discriminated union on `kind`; the form payload
+  // satisfies the HTTP arm.
+  const [form, setForm] = useState<
+    Required<
+      Pick<CreateProviderRequest, "type" | "name" | "base_url" | "api_key" | "default_model">
+    >
+  >({
     type: "anthropic",
     name: "",
     base_url: "https://api.anthropic.com",

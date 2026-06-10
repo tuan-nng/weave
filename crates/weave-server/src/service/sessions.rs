@@ -132,7 +132,7 @@ impl SessionService {
             // copy an incomplete message history.
             let parent = SessionStore::get_by_id(db, pid)?;
             if !TERMINAL.contains(&parent.status.as_str()) {
-                return Err(AppError::Validation(format!(
+                return Err(AppError::validation(format!(
                     "cannot resume from session in '{}' status — parent must be completed, \
                      cancelled, or error",
                     parent.status
@@ -195,13 +195,13 @@ impl SessionService {
     ) -> Result<String, AppError> {
         // Validate prompt is non-empty
         if prompt.trim().is_empty() {
-            return Err(AppError::Validation("prompt cannot be empty".into()));
+            return Err(AppError::validation("prompt cannot be empty"));
         }
 
         // Validate session exists and is in a non-terminal state
         let session = SessionStore::get_by_id(db, session_id)?;
         if crate::store::sessions::TERMINAL.contains(&session.status.as_str()) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "cannot send prompt to session in '{}' status",
                 session.status
             )));
@@ -260,9 +260,7 @@ impl SessionService {
                 token.cancel();
                 Ok(())
             }
-            None => Err(AppError::Validation(
-                "session is not actively streaming".into(),
-            )),
+            None => Err(AppError::validation("session is not actively streaming")),
         }
     }
 
@@ -354,8 +352,8 @@ fn validate_parent_chain(
 
         // Validate workspace ownership
         if session.workspace_id != workspace_id {
-            return Err(AppError::Validation(
-                "parent session belongs to a different workspace".into(),
+            return Err(AppError::validation(
+                "parent session belongs to a different workspace",
             ));
         }
 
@@ -363,14 +361,14 @@ fn validate_parent_chain(
         if let Some(ref parent_id) = session.parent_session_id {
             depth += 1;
             if depth >= MAX_RESUME_DEPTH {
-                return Err(AppError::Validation(format!(
+                return Err(AppError::validation(format!(
                     "session resume chain exceeds maximum depth of {}",
                     MAX_RESUME_DEPTH
                 )));
             }
             if seen.contains(parent_id) {
-                return Err(AppError::Validation(
-                    "cycle detected in parent_session_id chain".into(),
+                return Err(AppError::validation(
+                    "cycle detected in parent_session_id chain",
                 ));
             }
             seen.insert(parent_id.clone());
@@ -1749,7 +1747,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[tokio::test]
@@ -1806,7 +1807,10 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[tokio::test]
@@ -1814,7 +1818,10 @@ mod tests {
         let (_, _, _, active, _, _) = test_state();
 
         let result = SessionService::cancel_session(&active, "nonexistent");
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
     }
 
     #[tokio::test]
@@ -3266,9 +3273,12 @@ You are broken."#,
         )
         .await;
 
-        assert!(matches!(result, Err(AppError::Validation(_))));
+        assert!(matches!(
+            result,
+            Err(AppError::Validation { message: _, .. })
+        ));
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("nonexistent_profile"));
             }
             other => panic!("expected Validation, got: {:?}", other),
@@ -4339,7 +4349,7 @@ You are broken."#,
         );
 
         match result {
-            Err(AppError::Validation(msg)) => {
+            Err(AppError::Validation { message: msg, .. }) => {
                 assert!(
                     msg.contains("different workspace"),
                     "unexpected message: {}",
@@ -4389,7 +4399,7 @@ You are broken."#,
         );
 
         match result {
-            Err(AppError::Validation(msg)) => {
+            Err(AppError::Validation { message: msg, .. }) => {
                 assert!(
                     msg.contains("depth") || msg.contains("exceeds"),
                     "unexpected message: {}",
@@ -4436,7 +4446,7 @@ You are broken."#,
         );
 
         match result {
-            Err(AppError::Validation(msg)) => {
+            Err(AppError::Validation { message: msg, .. }) => {
                 assert!(msg.contains("cycle"), "unexpected message: {}", msg);
             }
             other => panic!("expected Validation for cycle, got: {:?}", other),
@@ -4489,7 +4499,7 @@ You are broken."#,
         );
 
         match result {
-            Err(AppError::Validation(msg)) => {
+            Err(AppError::Validation { message: msg, .. }) => {
                 assert!(msg.contains("connecting"), "unexpected message: {}", msg);
             }
             other => panic!("expected Validation for active parent, got: {:?}", other),
@@ -4972,7 +4982,7 @@ You are broken."#,
         );
 
         match result {
-            Err(AppError::Validation(msg)) => {
+            Err(AppError::Validation { message: msg, .. }) => {
                 assert!(
                     msg.contains("not-a-real-runtime"),
                     "error message must echo the bad value, got: {msg}"

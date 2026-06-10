@@ -197,7 +197,7 @@ impl WorkspaceStore {
             if err.code == ErrorCode::ConstraintViolation {
                 // SQLITE_CONSTRAINT_UNIQUE = 2067
                 if err.extended_code == 2067 {
-                    return AppError::Validation("workspace name already exists".into());
+                    return AppError::validation("workspace name already exists");
                 }
             }
         }
@@ -234,7 +234,7 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("already exists"), "got: {}", msg);
             }
             other => panic!("expected Validation, got: {:?}", other),

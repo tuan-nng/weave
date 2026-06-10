@@ -40,10 +40,9 @@ fn first_provider_id(db: &crate::db::Db) -> Result<String, AppError> {
         .next()
         .map(|p| p.id)
         .ok_or_else(|| {
-            AppError::Validation(
+            AppError::validation(
                 "no provider configured in workspace; add one via POST /api/providers \
-                 before moving tasks to auto-trigger columns"
-                    .into(),
+                 before moving tasks to auto-trigger columns",
             )
         })
 }
@@ -117,7 +116,7 @@ pub async fn try_automate_lane(
     // otherwise create a session that runs without a system prompt. Fail
     // fast with a clear 400.
     if state.specialists.get_by_name(specialist_id).is_none() {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "specialist '{specialist_id}' is not loaded; check resources/specialists/ \
              for a markdown file with `name: {specialist_id}` in its frontmatter"
         )));
@@ -253,7 +252,7 @@ pub fn check_transition_gates(
 
     // Gate 1: description frozen on exit.
     if current_column.freeze_description && is_blank(&task.description) {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "column '{}' freezes descriptions on exit; \
              set task.description before moving out",
             current_column.name
@@ -277,7 +276,7 @@ pub fn check_transition_gates(
             }
         };
         if is_blank(value) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "column '{}' requires '{}' to be non-empty before entry",
                 dest_column.name, field_name
             )));
@@ -291,7 +290,7 @@ pub fn check_transition_gates(
     // and points the agent at `provide_artifact` for remediation.
     for required in &dest_column.required_artifact_types {
         if !present_artifact_types.contains(required) {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "column '{}' requires artifact of type '{}' before entry; \
                  use the provide_artifact tool to attach it",
                 dest_column.name, required
@@ -398,7 +397,9 @@ mod tests {
         let task = task_with("T", None);
         let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
         match err {
-            AppError::Validation(msg) => assert!(msg.contains("no provider"), "got: {msg}"),
+            AppError::Validation { message: msg, .. } => {
+                assert!(msg.contains("no provider"), "got: {msg}")
+            }
             other => panic!("expected Validation, got {other:?}"),
         }
     }
@@ -412,7 +413,7 @@ mod tests {
         let task = task_with("T", None);
         let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("ghost"), "got: {msg}");
                 assert!(msg.contains("not loaded"), "got: {msg}");
             }
@@ -453,7 +454,7 @@ mod tests {
         let dst = default_column("col-dst", false, None);
         let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("freezes descriptions"), "got: {msg}");
                 assert!(msg.contains("set task.description"), "got: {msg}");
             }
@@ -486,7 +487,7 @@ mod tests {
         let dst = gate_column("col-dst", false, vec!["acceptance_criteria"], vec![]);
         let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("acceptance_criteria"), "got: {msg}");
                 assert!(msg.contains("non-empty"), "got: {msg}");
             }
@@ -519,7 +520,7 @@ mod tests {
         );
         let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("verification_report"), "got: {msg}");
             }
             other => panic!("expected Validation, got {other:?}"),
@@ -592,7 +593,7 @@ mod tests {
         let present: HashSet<String> = HashSet::new();
         let err = check_transition_gates(&task, &src, &dst, &present).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("test_results"), "got: {msg}");
                 assert!(msg.contains("provide_artifact"), "got: {msg}");
             }
@@ -626,7 +627,7 @@ mod tests {
         present.insert("test_results".to_string());
         let err = check_transition_gates(&task, &src, &dst, &present).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("screenshot"), "got: {msg}");
             }
             other => panic!("expected Validation, got: {other:?}"),
@@ -658,7 +659,7 @@ mod tests {
         // src freeze passes (description is set); dst required fails first.
         let err = check_transition_gates(&task, &src, &dst, &HashSet::new()).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("acceptance_criteria"), "got: {msg}");
             }
             other => panic!("expected Validation, got {other:?}"),

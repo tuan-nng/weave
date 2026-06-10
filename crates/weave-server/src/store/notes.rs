@@ -71,7 +71,7 @@ pub(crate) fn validate_note_type(s: &str) -> Result<&str, AppError> {
     if VALID_NOTE_TYPES.contains(&s) {
         Ok(s)
     } else {
-        Err(AppError::Validation(format!(
+        Err(AppError::validation(format!(
             "invalid note type: {s:?} (must be one of: {})",
             VALID_NOTE_TYPES.join(", ")
         )))
@@ -84,12 +84,10 @@ pub(crate) fn validate_note_type(s: &str) -> Result<&str, AppError> {
 pub(crate) fn validate_note_title(raw: &str) -> Result<&str, AppError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(AppError::Validation(
-            "note title must not be empty".to_string(),
-        ));
+        return Err(AppError::validation("note title must not be empty"));
     }
     if trimmed.chars().count() > MAX_NOTE_TITLE_LEN {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "note title exceeds {MAX_NOTE_TITLE_LEN} chars"
         )));
     }
@@ -331,7 +329,7 @@ mod tests {
         let over = "x".repeat(MAX_NOTE_TITLE_LEN + 1);
         let err = validate_note_title(&over).unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains(&MAX_NOTE_TITLE_LEN.to_string()), "got: {msg}")
             }
             other => panic!("expected Validation, got: {other:?}"),
@@ -379,7 +377,7 @@ mod tests {
         let ws = seed_workspace(&db);
         let err = NoteStore::create(&db, &ws, "t", "freeform", "").unwrap_err();
         match err {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("invalid note type"), "got: {msg}");
             }
             other => panic!("expected Validation, got: {other:?}"),
@@ -391,7 +389,7 @@ mod tests {
         let db = make_test_db();
         let ws = seed_workspace(&db);
         let err = NoteStore::create(&db, &ws, "", "general", "").unwrap_err();
-        assert!(matches!(err, AppError::Validation(_)));
+        assert!(matches!(err, AppError::Validation { message: _, .. }));
     }
 
     #[test]
@@ -472,7 +470,7 @@ mod tests {
         let db = make_test_db();
         let ws = seed_workspace(&db);
         let err = NoteStore::list(&db, &ws, Some("freeform")).unwrap_err();
-        assert!(matches!(err, AppError::Validation(_)));
+        assert!(matches!(err, AppError::Validation { message: _, .. }));
     }
 
     #[test]

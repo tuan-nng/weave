@@ -6,12 +6,33 @@ use tracing::info;
 use uuid::Uuid;
 
 /// Domain representation of a provider row.
+///
+/// feat-039 widens the row from "one HTTP shape" to a discriminated union
+/// on `kind`. The HTTP shape is the pre-existing path; the CLI shape lets
+/// us pre-register Claude Code / Codex / OpenCode providers before their
+/// dispatch adapters land in feat-051.
+///
+/// Field order in the struct mirrors the SELECT column order in `map_row`.
+///
+/// Wire shape (JSON):
+///   * `id`, `type`, `kind`, `name`, `default_model`, `binary_path`,
+///     `args_json`, `env_json`, `permission_mode`, `created_at`
+///   * `config_json` is NEVER serialized (carries `api_key` for HTTP rows
+///     and the canonical `{"default_model": ...}` wrapper for CLI rows)
+///   * `api_key` is never present — HTTP rows get it via `config_json` only
+///     and the response strips it; CLI rows never have it
 #[derive(Debug, Clone, Serialize)]
 pub struct Provider {
     pub id: String,
     #[serde(rename = "type")]
     pub provider_type: String,
+    pub kind: String,
     pub name: String,
+    pub default_model: Option<String>,
+    pub binary_path: Option<String>,
+    pub args_json: Option<String>,
+    pub env_json: Option<String>,
+    pub permission_mode: Option<String>,
     #[serde(skip_serializing)]
     pub config_json: String,
     pub created_at: String,
@@ -24,7 +45,13 @@ pub struct Provider {
 pub struct ProviderStore;
 
 impl ProviderStore {
-    /// Insert a new provider. Returns the created row.
+    /// Insert a new HTTP provider. Returns the created row.
+    ///
+    /// For `kind="http"` rows the new `kind`, `default_model`, and CLI
+    /// fields are populated. The `config_json` is whatever the caller
+    /// built (typically `{"base_url":..., "api_key":..., "default_model":...}`).
+    ///
+    /// For `kind="cli"` rows, callers should use `create_cli` instead.
     pub fn create(
         db: &Db,
         provider_type: &str,
@@ -34,12 +61,83 @@ impl ProviderStore {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
+        // Best-effort extraction of `default_model` from the HTTP config
+        // JSON so the wire field is populated for existing callers that
+        // haven't been updated. For CLI rows the new `create_cli` writes
+        // the canonical `{"default_model": ...}` wrapper.
+        let default_model = extract_default_model_from_config(config_json);
+
         db.conn()
             .query_row(
-                "INSERT INTO providers (id, type, name, config_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 RETURNING id, type, name, config_json, created_at",
-                rusqlite::params![id, provider_type, name, config_json, now],
+                "INSERT INTO providers (
+                    id, type, kind, name, default_model,
+                    binary_path, args_json, env_json, permission_mode,
+                    config_json, created_at
+                 )
+                 VALUES (?1, ?2, 'http', ?3, ?4, NULL, NULL, NULL, NULL, ?5, ?6)
+                 RETURNING id, type, kind, name, default_model,
+                           binary_path, args_json, env_json, permission_mode,
+                           config_json, created_at",
+                rusqlite::params![id, provider_type, name, default_model, config_json, now],
+                Self::map_row,
+            )
+            .map_err(AppError::from)
+    }
+
+    /// Insert a new CLI provider. Returns the created row.
+    ///
+    /// Stores `config_json` as `{"default_model": <default_model>}` per the
+    /// locked-in decision to keep the `service/sessions.rs:318`
+    /// `default_model` extractor working for both kinds.
+    pub fn create_cli(
+        db: &Db,
+        provider_type: &str,
+        name: &str,
+        default_model: &str,
+        binary_path: &str,
+        args_json: &str,
+        env_json: &str,
+        permission_mode: &str,
+    ) -> Result<Provider, AppError> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        // The legacy `config_json` column stays NOT NULL and carries
+        // `{"default_model": ...}` for both kinds so the existing
+        // `service/sessions.rs:318` extractor (which only reads
+        // `default_model`) keeps working without code change.
+        let config_json = serde_json::json!({
+            "default_model": default_model,
+        })
+        .to_string();
+
+        db.conn()
+            .query_row(
+                "INSERT INTO providers (
+                    id, type, kind, name, default_model,
+                    binary_path, args_json, env_json, permission_mode,
+                    config_json, created_at
+                 )
+                 VALUES (
+                    ?1, ?2, 'cli', ?3, ?4,
+                    ?5, ?6, ?7, ?8,
+                    ?9, ?10
+                 )
+                 RETURNING id, type, kind, name, default_model,
+                           binary_path, args_json, env_json, permission_mode,
+                           config_json, created_at",
+                rusqlite::params![
+                    id,
+                    provider_type,
+                    name,
+                    default_model,
+                    binary_path,
+                    args_json,
+                    env_json,
+                    permission_mode,
+                    config_json,
+                    now,
+                ],
                 Self::map_row,
             )
             .map_err(AppError::from)
@@ -49,7 +147,9 @@ impl ProviderStore {
     pub fn get_by_id(db: &Db, id: &str) -> Result<Provider, AppError> {
         db.conn()
             .query_row(
-                "SELECT id, type, name, config_json, created_at
+                "SELECT id, type, kind, name, default_model,
+                        binary_path, args_json, env_json, permission_mode,
+                        config_json, created_at
                  FROM providers WHERE id = ?1",
                 [id],
                 Self::map_row,
@@ -67,7 +167,9 @@ impl ProviderStore {
     pub fn list(db: &Db) -> Result<Vec<Provider>, AppError> {
         let conn = db.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, type, name, config_json, created_at
+            "SELECT id, type, kind, name, default_model,
+                    binary_path, args_json, env_json, permission_mode,
+                    config_json, created_at
              FROM providers
              ORDER BY created_at ASC",
         )?;
@@ -108,15 +210,49 @@ impl ProviderStore {
     }
 
     /// Map a result row to a `Provider`.
+    ///
+    /// Column order must match every SELECT and RETURNING clause above:
+    ///   0  id
+    ///   1  type
+    ///   2  kind
+    ///   3  name
+    ///   4  default_model
+    ///   5  binary_path
+    ///   6  args_json
+    ///   7  env_json
+    ///   8  permission_mode
+    ///   9  config_json   (skipped from wire serialization)
+    ///   10 created_at
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
         Ok(Provider {
             id: row.get(0)?,
             provider_type: row.get(1)?,
-            name: row.get(2)?,
-            config_json: row.get(3)?,
-            created_at: row.get(4)?,
+            kind: row.get(2)?,
+            name: row.get(3)?,
+            default_model: row.get(4)?,
+            binary_path: row.get(5)?,
+            args_json: row.get(6)?,
+            env_json: row.get(7)?,
+            permission_mode: row.get(8)?,
+            config_json: row.get(9)?,
+            created_at: row.get(10)?,
         })
     }
+}
+
+/// Best-effort extraction of `default_model` from a provider's HTTP
+/// `config_json`. Returns `None` for malformed JSON or when the key is
+/// absent. The same `service/sessions.rs:318` extractor (which uses
+/// `serde_json::Value`) is the canonical read path; this helper is for
+/// the write path on `ProviderStore::create`.
+fn extract_default_model_from_config(config_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(config_json)
+        .ok()
+        .and_then(|v| {
+            v.get("default_model")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+        })
 }
 
 #[cfg(test)]
@@ -145,7 +281,16 @@ mod tests {
 
         assert!(!provider.id.is_empty());
         assert_eq!(provider.provider_type, "anthropic");
+        assert_eq!(provider.kind, "http");
         assert_eq!(provider.name, "My Anthropic");
+        assert_eq!(
+            provider.default_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
+        assert!(provider.binary_path.is_none());
+        assert!(provider.args_json.is_none());
+        assert!(provider.env_json.is_none());
+        assert!(provider.permission_mode.is_none());
         assert_eq!(provider.config_json, config);
         assert!(!provider.created_at.is_empty());
     }
@@ -159,6 +304,7 @@ mod tests {
 
         assert_eq!(fetched.id, created.id);
         assert_eq!(fetched.name, "Test");
+        assert_eq!(fetched.kind, "http");
         assert_eq!(fetched.config_json, config);
     }
 
@@ -194,6 +340,42 @@ mod tests {
 
         let providers = ProviderStore::list(&db).unwrap();
         assert_eq!(providers.len(), 3);
+        assert!(providers.iter().all(|p| p.kind == "http"));
+    }
+
+    #[test]
+    fn test_create_cli_provider() {
+        let db = test_db();
+        let provider = ProviderStore::create_cli(
+            &db,
+            "anthropic",
+            "My Claude Code",
+            "claude-sonnet-4-5",
+            "/usr/local/bin/claude",
+            r#"["--verbose"]"#,
+            r#"{"LOG_LEVEL":"info"}"#,
+            "accept-edits",
+        )
+        .unwrap();
+
+        assert!(!provider.id.is_empty());
+        assert_eq!(provider.provider_type, "anthropic");
+        assert_eq!(provider.kind, "cli");
+        assert_eq!(provider.name, "My Claude Code");
+        assert_eq!(provider.default_model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(
+            provider.binary_path.as_deref(),
+            Some("/usr/local/bin/claude")
+        );
+        assert_eq!(provider.args_json.as_deref(), Some(r#"["--verbose"]"#));
+        assert_eq!(
+            provider.env_json.as_deref(),
+            Some(r#"{"LOG_LEVEL":"info"}"#)
+        );
+        assert_eq!(provider.permission_mode.as_deref(), Some("accept-edits"));
+        // config_json wrapper preserves `default_model` for the
+        // service/sessions.rs:318 extractor.
+        assert!(provider.config_json.contains("claude-sonnet-4-5"));
     }
 
     #[test]

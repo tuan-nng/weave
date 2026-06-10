@@ -41,7 +41,13 @@ export interface Message {
 export interface Provider {
   id: string;
   type: string;
+  kind: "http" | "cli";
   name: string;
+  default_model: string | null;
+  binary_path: string | null;
+  args_json: string | null;
+  env_json: string | null;
+  permission_mode: string | null;
   created_at: string;
 }
 
@@ -213,11 +219,21 @@ export interface UpdateWorkspaceRequest {
 }
 
 export interface CreateProviderRequest {
+  // Default "http" when omitted. The Rust handler defaults missing `kind`
+  // to "http" for back-compat with pre-feat-039 callers.
+  kind?: "http" | "cli";
   type: string;
   name: string;
-  base_url: string;
-  api_key: string;
-  default_model: string;
+  // HTTP-only (required for kind=http, must NOT be set for kind=cli).
+  base_url?: string;
+  api_key?: string;
+  // Common to both kinds.
+  default_model?: string;
+  // CLI-only (required for kind=cli, must NOT be set for kind=http).
+  binary_path?: string;
+  args_json?: string;
+  env_json?: string;
+  permission_mode?: string;
 }
 
 export interface CreateSessionRequest {

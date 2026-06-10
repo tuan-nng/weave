@@ -151,10 +151,10 @@ pub async fn create_board(
         .map(|c| {
             let trimmed = c.name.trim();
             if trimmed.is_empty() {
-                return Err(AppError::Validation("column name must not be empty".into()));
+                return Err(AppError::validation("column name must not be empty"));
             }
             if trimmed.chars().count() > MAX_COLUMN_NAME_LEN {
-                return Err(AppError::Validation(format!(
+                return Err(AppError::validation(format!(
                     "column name must be at most {} characters",
                     MAX_COLUMN_NAME_LEN
                 )));
@@ -263,10 +263,10 @@ pub async fn create_column(
     }
     let name = body.name.trim();
     if name.is_empty() {
-        return Err(AppError::Validation("column name must not be empty".into()));
+        return Err(AppError::validation("column name must not be empty"));
     }
     if name.chars().count() > MAX_COLUMN_NAME_LEN {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "column name must be at most {} characters",
             MAX_COLUMN_NAME_LEN
         )));
@@ -303,10 +303,10 @@ pub async fn update_column(
     let name = body.name.as_deref().map(str::trim);
     if let Some(n) = name {
         if n.is_empty() {
-            return Err(AppError::Validation("column name must not be empty".into()));
+            return Err(AppError::validation("column name must not be empty"));
         }
         if n.chars().count() > MAX_COLUMN_NAME_LEN {
-            return Err(AppError::Validation(format!(
+            return Err(AppError::validation(format!(
                 "column name must be at most {} characters",
                 MAX_COLUMN_NAME_LEN
             )));
@@ -346,10 +346,10 @@ pub async fn create_card(
     }
     let title = body.title.trim();
     if title.is_empty() {
-        return Err(AppError::Validation("task title must not be empty".into()));
+        return Err(AppError::validation("task title must not be empty"));
     }
     if title.chars().count() > MAX_TASK_TITLE_LEN {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "task title must be at most {} characters",
             MAX_TASK_TITLE_LEN
         )));
@@ -743,10 +743,10 @@ pub async fn board_stream(
 
 fn validate_board_name(name: &str) -> Result<(), AppError> {
     if name.is_empty() {
-        return Err(AppError::Validation("board name must not be empty".into()));
+        return Err(AppError::validation("board name must not be empty"));
     }
     if name.chars().count() > MAX_BOARD_NAME_LEN {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "board name must be at most {} characters",
             MAX_BOARD_NAME_LEN
         )));
@@ -844,7 +844,7 @@ fn try_automate_lane_precheck(state: &AppState, column: &Column) -> Result<(), A
         _ => return Ok(()),
     };
     if state.specialists.get_by_name(specialist_id).is_none() {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "specialist '{specialist_id}' is not loaded; check resources/specialists/ \
              for a markdown file with `name: {specialist_id}` in its frontmatter"
         )));
@@ -852,10 +852,9 @@ fn try_automate_lane_precheck(state: &AppState, column: &Column) -> Result<(), A
     // Provider check is cheap; do it here too so the user sees the
     // clearer "no provider" error before the move.
     if ProviderStore::list(&state.db)?.is_empty() {
-        return Err(AppError::Validation(
+        return Err(AppError::validation(
             "no provider configured in workspace; add one via POST /api/providers \
-             before moving tasks to auto-trigger columns"
-                .into(),
+             before moving tasks to auto-trigger columns",
         ));
     }
     Ok(())

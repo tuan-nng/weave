@@ -225,7 +225,7 @@ impl ToolRegistry {
         if profile_name == "full" || self.profiles.contains_key(profile_name) {
             Ok(())
         } else {
-            Err(AppError::Validation(
+            Err(AppError::validation(
                 self.unknown_profile_error(profile_name),
             ))
         }
@@ -247,7 +247,7 @@ impl ToolRegistry {
         let tool_names = self
             .profiles
             .get(profile_name)
-            .ok_or_else(|| AppError::Validation(self.unknown_profile_error(profile_name)))?;
+            .ok_or_else(|| AppError::validation(self.unknown_profile_error(profile_name)))?;
 
         let defs: Vec<ToolDefinition> = tool_names
             .iter()
@@ -511,7 +511,7 @@ mod tests {
         let result = registry.resolve_profile("nonexistent");
         assert!(result.is_err());
         match result.unwrap_err() {
-            AppError::Validation(msg) => {
+            AppError::Validation { message: msg, .. } => {
                 assert!(msg.contains("nonexistent"));
                 assert!(msg.contains("unknown tool profile"));
             }

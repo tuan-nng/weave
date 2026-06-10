@@ -78,9 +78,7 @@ pub async fn update_workspace(
     // Fetch current workspace to check default protection
     let current = WorkspaceStore::get_by_id(&state.db, &id)?;
     if current.name == DEFAULT_NAME {
-        return Err(AppError::Validation(
-            "cannot rename default workspace".into(),
-        ));
+        return Err(AppError::validation("cannot rename default workspace"));
     }
 
     let workspace = WorkspaceStore::update_name(&state.db, &id, name)?;
@@ -95,9 +93,7 @@ pub async fn delete_workspace(
     // Fetch current workspace to check default protection
     let current = WorkspaceStore::get_by_id(&state.db, &id)?;
     if current.name == DEFAULT_NAME {
-        return Err(AppError::Validation(
-            "cannot delete default workspace".into(),
-        ));
+        return Err(AppError::validation("cannot delete default workspace"));
     }
 
     WorkspaceStore::delete(&state.db, &id, &current.name)?;
@@ -107,10 +103,10 @@ pub async fn delete_workspace(
 /// Validate workspace name: 1-100 chars after trimming.
 fn validate_name(name: &str) -> Result<(), AppError> {
     if name.is_empty() {
-        return Err(AppError::Validation("name must not be empty".into()));
+        return Err(AppError::validation("name must not be empty"));
     }
     if name.chars().count() > MAX_NAME_LEN {
-        return Err(AppError::Validation(format!(
+        return Err(AppError::validation(format!(
             "name must be at most {} characters",
             MAX_NAME_LEN
         )));
