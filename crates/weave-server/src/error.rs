@@ -34,6 +34,14 @@ pub enum AppError {
 
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+
+    /// A `CliRunner` (feat-043) subprocess failed before producing a
+    /// runnable child. Distinct from `ProviderError` so the HTTP layer
+    /// can surface a `cli_*` code without piggy-backing on the HTTP
+    /// provider envelope. `code` is one of `"cli_spawn_failed"`,
+    /// `"cli_process_failed"`, or `"cli_cancelled"`.
+    #[error("CLI process error: {message}")]
+    CliProcess { code: &'static str, message: String },
 }
 
 /// Errors specific to AI provider interactions.
@@ -96,6 +104,16 @@ impl IntoResponse for AppError {
                     "internal_error",
                     "Internal server error".to_string(),
                 )
+            }
+            AppError::CliProcess { code, .. } => {
+                // CLI subprocess failures map to 502 Bad Gateway (the
+                // downstream binary is the "upstream" from Weave's
+                // perspective). `cli_cancelled` is a normal control-flow
+                // path that the cancel handler short-circuits before
+                // the HTTP layer, but we still map it explicitly so
+                // the envelope shape is consistent if it ever does
+                // surface.
+                (StatusCode::BAD_GATEWAY, *code, self.to_string())
             }
         };
 

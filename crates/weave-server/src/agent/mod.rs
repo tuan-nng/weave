@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, ProviderError};
 
 pub mod anthropic;
+pub mod cli_runner;
 pub mod model_cache;
 pub mod registry;
 pub mod turn_context;
