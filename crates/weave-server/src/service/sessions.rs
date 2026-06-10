@@ -491,6 +491,18 @@ fn build_turn_context(
         },
         cli_resume_id,
         runtime_kind: session.runtime_kind,
+        // feat-046 wires the per-runtime `PermissionMapper` here
+        // (looking up `session.specialist_id` against the
+        // `SpecialistRegistry` to resolve the `ToolProfile`, then
+        // calling `ClaudeCodePermissionMapper::new().effective_permissions`).
+        // For feat-046 we only define the trait + Claude Code
+        // impl; the wiring of the mapper into session creation is
+        // feat-051's job. The empty snapshot is the HTTP default
+        // — it has no effect on Anthropic-native turns.
+        effective_permissions: crate::agent::permissions::PermissionSnapshot::empty(
+            session.runtime_kind,
+            crate::agent::permissions::ToolProfile::Full,
+        ),
         cancellation_token: cancel_token,
     }
 }
@@ -5148,6 +5160,12 @@ You are broken."#,
             codebase_root: Some(PathBuf::from("/tmp/agent-cwd")),
             cli_resume_id: Some("cli-resume-1".to_string()),
             runtime_kind: crate::agent::RuntimeKind::AnthropicApi,
+            // Empty HTTP snapshot — the test is on the Anthropic
+            // path, where the snapshot is a no-op.
+            effective_permissions: crate::agent::permissions::PermissionSnapshot::empty(
+                crate::agent::RuntimeKind::AnthropicApi,
+                crate::agent::permissions::ToolProfile::Full,
+            ),
             cancellation_token: cancel.clone(),
         };
 

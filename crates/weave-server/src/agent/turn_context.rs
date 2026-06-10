@@ -2,8 +2,9 @@
 //!
 //! [`TurnContext`] carries the runtime-facing state every `send_message`
 //! call needs: session / workspace identity, working directories, the
-//! CLI-native resume id (HTTP runtimes see `None`), the runtime kind, and
-//! the cancellation token.
+//! CLI-native resume id (HTTP runtimes see `None`), the runtime kind,
+//! the per-turn [`PermissionSnapshot`](super::permissions::PermissionSnapshot),
+//! and the cancellation token.
 //!
 //! It is the *runtime-facing* complement to
 //! [`MessageRequest`](super::MessageRequest), which is the *model-facing*
@@ -26,19 +27,33 @@
 //! not abort the turn. The full read/write cycle on the metadata column
 //! is owned by feat-047.
 //!
+//! `effective_permissions` is built by calling the per-runtime
+//! `PermissionMapper` (feat-046). HTTP runtimes always get an empty
+//! snapshot; CLI runtimes get the mapper's output for the session's
+//! `ToolProfile`. The runner (feat-043) concatenates the snapshot's
+//! `argv_flags` onto the CLI invocation and merges the `env_vars` into
+//! the child process env.
+//!
 //! ## Consumed by
 //!
 //! `AnthropicAgent::send_message` (native HTTP runtime) ignores every
 //! field today. The cancel token is already polled separately in
 //! `agent_loop` (`service/sessions.rs:1027`) and does not need to flow
 //! through the trait again. Future `CliCodingAgent` implementations
-//! (feat-043+) will read the full struct to drive subprocess argv / env
+//! (feat-051) will read the full struct to drive subprocess argv / env
 //! construction.
 
 use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
 
+use super::permissions::PermissionSnapshot;
+// `ToolProfile` is only referenced by `test_support` (used in test
+// builds). The production binary does not name it directly; silence
+// the warning there only — mirrors the re-export pattern in
+// `permissions/mod.rs:56` and `claude_code/mod.rs:28`.
+#[cfg_attr(not(test), allow(unused_imports))]
+use super::permissions::ToolProfile;
 use super::RuntimeKind;
 
 /// Per-turn context threaded through `CodingAgent::send_message`.
@@ -56,9 +71,11 @@ use super::RuntimeKind;
 /// - `cli_resume_id`: native CLI session id from the previous turn.
 ///   `None` for HTTP runtimes and for first turns; populated by feat-047
 ///   once a CLI turn completes.
-/// - `runtime_kind`: which runtime this turn is running under. Feat-046
-///   will replace this with a richer `PermissionSnapshot` once the
-///   per-runtime permission shape lands.
+/// - `runtime_kind`: which runtime this turn is running under. The
+///   per-runtime permission shape is in `effective_permissions`.
+/// - `effective_permissions`: the per-turn permission snapshot (feat-046)
+///   the runner (feat-043) appends to the CLI invocation's argv / env.
+///   Always present; HTTP runtimes see an empty snapshot (no flags).
 /// - `cancellation_token`: the session-scoped token from
 ///   `ActiveSessions`. Cancelling the registration cancels the token;
 ///   the agent loop polls on the same token at
@@ -80,9 +97,14 @@ pub struct TurnContext {
     /// CLI-native resume id from the previous turn. `None` for HTTP
     /// runtimes and for first turns.
     pub cli_resume_id: Option<String>,
-    /// Which runtime this turn is running under. Feat-046 replaces this
-    /// with a richer `PermissionSnapshot`.
+    /// Which runtime this turn is running under. The per-runtime
+    /// permission shape is in `effective_permissions`.
     pub runtime_kind: RuntimeKind,
+    /// Per-turn permission snapshot the runner (feat-043) appends to
+    /// the CLI invocation's argv / env. Built by the per-runtime
+    /// `PermissionMapper` (feat-046). HTTP runtimes always see an
+    /// empty snapshot.
+    pub effective_permissions: PermissionSnapshot,
     /// Cancellation token registered in `ActiveSessions` for this turn.
     pub cancellation_token: CancellationToken,
 }
@@ -94,9 +116,10 @@ pub(crate) mod test_support {
     use super::*;
 
     /// Build a `TurnContext` for tests with sensible defaults: a fresh
-    /// cancel token, `.` cwd, no codebase binding, no resume id, and the
-    /// default (pre-feat-038) `AnthropicApi` runtime kind. Tests that
-    /// need different values build the struct directly.
+    /// cancel token, `.` cwd, no codebase binding, no resume id, an
+    /// empty `PermissionSnapshot` (the HTTP default), and the
+    /// pre-feat-038 `AnthropicApi` runtime kind. Tests that need
+    /// different values build the struct directly.
     pub(crate) fn make_test_turn_context() -> TurnContext {
         TurnContext {
             session_id: "test-session".to_string(),
@@ -105,6 +128,10 @@ pub(crate) mod test_support {
             codebase_root: None,
             cli_resume_id: None,
             runtime_kind: RuntimeKind::default(),
+            effective_permissions: PermissionSnapshot::empty(
+                RuntimeKind::default(),
+                ToolProfile::Full,
+            ),
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -128,6 +155,14 @@ mod tests {
             ctx.runtime_kind,
             RuntimeKind::default(),
             "default uses the pre-feat-038 runtime kind"
+        );
+        assert!(
+            ctx.effective_permissions.argv_flags.is_empty(),
+            "test default must use the empty HTTP snapshot"
+        );
+        assert!(
+            ctx.effective_permissions.env_vars.is_empty(),
+            "test default must use the empty HTTP snapshot"
         );
         assert!(
             !ctx.cancellation_token.is_cancelled(),
