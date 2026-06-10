@@ -28,20 +28,19 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-10
-- **Latest commit:** `7bafe31 docs: PROGRESS.md — record feat-039 commit hash (075e721)`
-- **Active feature:** none — phase-7 multi-runtime strategy: feat-038 (committed `1dfabeb`) and feat-039 (committed `075e721`) are both `passing`; fix-069 is committed (`40b5032`); ready to pick the next `not_started` phase-7 feature.
-- **In-flight (uncommitted):** harness improvement — trimmed `PROGRESS.md` from 558 lines to ~80, moved historical entries to `PROGRESS-archive.md`, added state-file lifecycle rule to `CLAUDE.md`.
+- **Latest commit:** `15dc466 chore: trim PROGRESS.md, add PROGRESS-archive.md, document state-file lifecycle`
+- **Active feature:** none — phase-7 multi-runtime strategy: feat-038 (committed `1dfabeb`) and feat-039 (committed `075e721`) are both `passing`; fix-069 is committed (`40b5032`); harness improvement (PROGRESS.md trim + archive + lifecycle rule) committed in `15dc466`; ready to pick the next `not_started` phase-7 feature.
+- **In-flight (uncommitted):** none
 - **Build status:** green — `./init.sh` all 3 layers pass
 - **Test status:** green — 650 Rust tests (642 pre-feat-039 + 8 for the kind-discriminated union) + 113 frontend tests pass
 - **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** harness improvement (3 files: `PROGRESS.md`, `PROGRESS-archive.md`, `CLAUDE.md`)
+- **Uncommitted:** none
 
 ## Next Steps (in order)
 
-1. **Commit the harness improvement** in the working tree. Suggested message: `chore: trim PROGRESS.md, add PROGRESS-archive.md, document state-file lifecycle`. Stage the 3 modified/added files. Re-run `./init.sh` after staging.
-2. **Pick the next `not_started` phase-7 feature** from `feature_list.json`. Likely candidates in dependency order: `feat-040` (runtime×mode validation matrix), `feat-041` (per-turn `TurnContext`), or `feat-042` (per-adapter model cache — the 501 branch on `list_provider_models` for `kind=cli` rows added in feat-039 lands its first user here).
-3. **Set the chosen feature to `active`** in `feature_list.json` and proceed with the standard 7-phase feature-dev workflow (`/feature-dev:feature-dev start feat-NNN`).
-4. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
+1. **Pick the next `not_started` phase-7 feature** from `feature_list.json`. Likely candidates in dependency order: `feat-040` (runtime×mode validation matrix), `feat-041` (per-turn `TurnContext`), or `feat-042` (per-adapter model cache — the 501 branch on `list_provider_models` for `kind=cli` rows added in feat-039 lands its first user here).
+2. **Set the chosen feature to `active`** in `feature_list.json` and proceed with the standard 7-phase feature-dev workflow (`/feature-dev:feature-dev start feat-NNN`).
+3. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
 
