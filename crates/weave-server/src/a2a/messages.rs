@@ -79,15 +79,15 @@ pub async fn send_message(
             &state.db,
             &workspace_id,
             &provider_id,
-            None,                       // specialist_id — none for generic A2A
-            None,                       // model — use provider default
-            None,                       // cwd — no filesystem context
-            None,                       // parent_session_id — fresh session
-            body.context_id.as_deref(), // context_id — A2A task linking
-            None,                       // codebase_id — A2A path doesn't pick a codebase
-            None,                       // runtime_kind — use default (anthropic-api)
-            None,                       // mode — use default (native)
-            None,                       // runtime_metadata_json — none for native HTTP
+            None,                                  // specialist_id — none for generic A2A
+            None,                                  // model — use provider default
+            None,                                  // cwd — no filesystem context
+            None,                                  // parent_session_id — fresh session
+            body.context_id.as_deref(),            // context_id — A2A task linking
+            None,                                  // codebase_id — A2A path doesn't pick a codebase
+            body.runtime_kind.map(|k| k.as_str()), // runtime_kind — pass-through (feat-040)
+            body.mode.map(|m| m.as_str()),         // mode — pass-through (feat-040)
+            None,                                  // runtime_metadata_json — none for native HTTP
         )?
     };
 
@@ -129,4 +129,70 @@ fn first_provider_id(db: &crate::db::Db) -> Result<String, AppError> {
         .ok_or_else(|| {
             AppError::validation("no AI provider configured; add a provider via POST /api/providers before sending A2A messages")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{validate_runtime_mode_compat, RuntimeKind, SessionMode};
+    use serde_json::json;
+
+    /// The A2A `SendMessageRequest` deserializes `runtimeKind` and `mode`
+    /// (camelCase) into the typed `RuntimeKind` and `SessionMode` enums.
+    /// A value rejected by the runtime × mode validator must surface as
+    /// an `AppError::Validation` with code `"runtime_mode_incompatible"`.
+    ///
+    /// The full chokepoint (A2A handler → `create_session` → validator)
+    /// is covered by `test_kanban_autospawn_rejects_incompatible_pair`
+    /// in `service/sessions.rs`; this test confirms the A2A-specific
+    /// surface (deserialization + new fields) and the rejection logic
+    /// without constructing a full `AppState`.
+    #[test]
+    fn test_a2a_rejects_incompatible_pair() {
+        let body: SendMessageRequest = serde_json::from_value(json!({
+            "message": { "role": "user", "parts": [{ "type": "text", "text": "hello" }] },
+            "runtimeKind": "claude-code",
+            "mode": "native",
+        }))
+        .expect("SendMessageRequest should deserialize with the new fields");
+
+        // The handler at `send_message` (line ~88) maps the typed enums
+        // back to `&str` via `as_str()` before passing them to
+        // `create_session`, which is exactly the round-trip the
+        // validator will see on the wire.
+        let runtime = body.runtime_kind.expect("runtime_kind populated");
+        let mode = body.mode.expect("mode populated");
+        assert_eq!(runtime, RuntimeKind::ClaudeCode);
+        assert_eq!(mode, SessionMode::Native);
+
+        match validate_runtime_mode_compat(runtime, mode) {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "runtime_mode_incompatible");
+                assert!(message.contains("claude-code"), "msg: {message}");
+                assert!(message.contains("native"), "msg: {message}");
+                assert!(message.contains("wrapped"), "msg: {message}");
+            }
+            other => panic!("expected Validation error, got: {other:?}"),
+        }
+    }
+
+    /// Backward compatibility: a request body without the new fields
+    /// must still parse (defaulting to `None`) so existing A2A clients
+    /// keep working with the pre-feat-040 contract.
+    #[test]
+    fn test_a2a_request_without_runtime_mode_still_parses() {
+        let body: SendMessageRequest = serde_json::from_value(json!({
+            "message": { "role": "user", "parts": [{ "type": "text", "text": "hello" }] },
+        }))
+        .expect("legacy bodies without runtimeKind/mode must still parse");
+        assert!(body.runtime_kind.is_none());
+        assert!(body.mode.is_none());
+
+        // The handler resolves `None`/`None` to the platform defaults
+        // via `parse_runtime_kind` / `parse_mode`. Confirm those defaults
+        // are a valid pair — a regression here would 400 every legacy
+        // A2A client on its first message.
+        assert_eq!(RuntimeKind::default(), RuntimeKind::AnthropicApi);
+        assert_eq!(SessionMode::default(), SessionMode::Native);
+    }
 }

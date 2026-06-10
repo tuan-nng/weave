@@ -126,6 +126,14 @@ impl SessionService {
         let runtime_kind: RuntimeKind = parse_runtime_kind(runtime_kind)?;
         let mode: SessionMode = parse_mode(mode)?;
 
+        // feat-040: enforce the runtime_kind × mode compatibility matrix
+        // before any parent-chain or transaction work. Runs on the
+        // caller's resolved pair (defaults already filled in by
+        // `parse_runtime_kind` / `parse_mode`); `resume_inherit` only
+        // adjusts `runtime_metadata_json`, so the runtime/mode we
+        // validate here is the same one that gets persisted.
+        crate::agent::validate_runtime_mode_compat(runtime_kind, mode)?;
+
         // Validate parent chain and load direct parent's messages + runtime
         let (parent_messages, parent) = if let Some(pid) = parent_session_id {
             // Ensure parent has finished — resuming an active session would
@@ -4987,6 +4995,50 @@ You are broken."#,
                     msg.contains("not-a-real-runtime"),
                     "error message must echo the bad value, got: {msg}"
                 );
+            }
+            other => panic!("expected Validation error, got: {:?}", other),
+        }
+    }
+
+    /// feat-040: the runtime_kind × mode compatibility validator fires
+    /// at the chokepoint. A `try_automate_lane` caller that resolves to
+    /// a (CLI runtime, HTTP-only mode) pair — which feat-055's column
+    /// binding will be able to produce once columns carry
+    /// `runtime_kind` — must be rejected with the
+    /// `"runtime_mode_incompatible"` code, listing the runtime, the
+    /// requested mode, and the modes that runtime does support.
+    ///
+    /// Today `try_automate_lane` passes `None`/`None` and the defaults
+    /// (AnthropicApi, Native) are accepted, so the only way to exercise
+    /// the rejection path from a chokepoint-level test is to call
+    /// `create_session` directly with an explicit incompatible pair —
+    /// which is exactly what this test does.
+    #[test]
+    fn test_kanban_autospawn_rejects_incompatible_pair() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,                // specialist_id
+            None,                // model
+            None,                // cwd
+            None,                // parent_session_id
+            None,                // context_id
+            None,                // codebase_id
+            Some("claude-code"), // runtime_kind — CLI
+            Some("native"),      // mode — HTTP-only
+            None,                // runtime_metadata_json
+        );
+
+        match result {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "runtime_mode_incompatible");
+                assert!(message.contains("claude-code"), "msg: {message}");
+                assert!(message.contains("native"), "msg: {message}");
+                assert!(message.contains("wrapped"), "msg: {message}");
             }
             other => panic!("expected Validation error, got: {:?}", other),
         }

@@ -15,6 +15,183 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-040 — partial Phase 2 exploration, session interrupted 2026-06-10 (no commit)
+
+User invoked `/feature-dev:feature-dev start next task` to start the 7-phase feature-dev workflow on the next `not_started` phase-7 feature. Per `PROGRESS.md`, the candidate was `feat-040` (Runtime × Mode compatibility matrix) — its dependencies (`feat-005`, `feat-038`, `feat-039`) are all `passing`. User confirmed proceeding with feat-040.
+
+**What this session did:**
+
+1. **Phase 1 (Discovery) — done.** Created a 7-task tracker, read `DECISIONS.md` and `docs/road-map/multi-runtime-strategy.md` (the §4 compatibility matrix is the source of truth), confirmed understanding with the user via `AskUserQuestion`. User selected "Yes, start feat-040".
+2. **`feature_list.json` — set `feat-040` to `active`** with an `evidence` field describing the workflow state. Single hunk change.
+3. **Baseline verification — `init.sh` re-ran in the background** (task `b297a50hm`) and exited 0 on commit `15dc466`: 650 Rust tests + 113 frontend tests, clippy/fmt/prettier/ESLint clean. Confirmed green before any work.
+4. **Phase 2 (Codebase exploration) — started in parallel, never finished.** Three `code-explorer` agents were launched in the background, targeting three different aspects:
+   - **Agent A** — the three call sites (session creation, kanban auto-spawn, A2A messages) and how to plug the validator in.
+   - **Agent B** — feat-038's existing runtime_kind / mode string handling and the Session struct round-trip.
+   - **Agent C** — the `AppError` shape, the `validation` and `runtime` module locations, existing pure validation function examples, existing error codes, and existing test conventions.
+5. **Session was interrupted before agents returned.** No code, no migration, no test files were written. The 4 background tasks (3 agents + 1 init.sh) were stopped.
+6. **Stop-hook reversion on session exit.** The session-exit-check hook (`.claude/hooks/session-exit-check.sh`, Rule 2) fails when any feature is in `state=active` without `passing`+evidence. `feature_list.json` was reverted: feat-040 back to `not_started`, evidence cleared. Only `PROGRESS.md` remains modified (Current State / Next Steps / Out-of-Scope updated). `git diff feature_list.json` is now empty.
+
+**Agent A report — three call sites (preserved verbatim so next session can skip re-running it):**
+
+> ## Call site 1: session creation
+> - Handler: `crates/weave-server/src/api/sessions.rs:78` — `create_session` (route: `POST /api/workspaces/:wid/sessions`, registered in `crates/weave-server/src/api/mod.rs:56`).
+> - Request struct: `crates/weave-server/src/api/sessions.rs:36` — `CreateSessionRequest`. Relevant fields: `provider_id: String` (required), `runtime_kind: Option<agent::RuntimeKind>` (line 51), `mode: Option<agent::SessionMode>` (line 54), `runtime_metadata_json: Option<String>` (line 60), plus `specialist_id`, `model`, `cwd`, `parent_session_id`, `codebase_id`. **`runtime_kind` and `mode` are directly carried on the request body as typed enums** (kebab-case / snake_case via serde).
+> - Session build: `crates/weave-server/src/service/sessions.rs:89` — `SessionService::create_session`. It parses `runtime_kind` / `mode` at lines 126-127, runs `resume_inherit` at line 154, then delegates to `SessionStore::create_tx` at `crates/weave-server/src/store/sessions.rs:393`.
+> - Existing validation pattern: uses `AppError::validation(message)` helper (`error.rs:118`). Examples: `service/sessions.rs:135-139` (cannot resume from non-terminal status), `service/sessions.rs:355-357` (cross-workspace parent), `service/sessions.rs:370-372` (cycle in parent chain). All return HTTP 400 with `code: "validation_error"`.
+> - **Where to plug in `validate_runtime_mode_compat`:** inside `SessionService::create_session`, after `resume_inherit` (line 154) and before `with_transaction` (line 156). Both fields are fully resolved to typed enums by then. A single chokepoint call covers all three call sites below transparently.
+>
+> ## Call site 2: kanban auto-spawn
+> - Entry: `crates/weave-server/src/service/kanban.rs:85` — `try_automate_lane`. Triggered by `PATCH /api/tasks/{tid}` in `api/kanban.rs`. **No separate HTTP handler for the auto-spawn itself** — the column-move handler triggers it as a side effect.
+> - Request struct: there is **no per-card request struct for runtime/mode**. `try_automate_lane` operates on a loaded `Task` and a loaded `Column` (`store/columns.rs:36`). `Column` does NOT carry `runtime_kind` or `mode` (only `specialist_id` + `auto_trigger` + the three feat-028 gate fields). The function passes `None` for both fields on lines 139-140, so the resolved values are the platform defaults `RuntimeKind::AnthropicApi` + `SessionMode::Native` (constants at `agent/mod.rs:152` and `agent/mod.rs:213`).
+> - Where to plug in: **do not add a separate call here.** Centralising the check inside `SessionService::create_session` covers this site transparently. The existing comment at `service/kanban.rs:139` already flags that column-aware `runtime_kind` selection is deferred to "feat-053+".
+>
+> ## Call site 3: A2A messages
+> - Handler: `crates/weave-server/src/a2a/messages.rs:27` — `send_message` (route: `POST /api/a2a/messages`, registered in `crates/weave-server/src/a2a/mod.rs:25`). Auth via `verify_a2a_token` on line 33.
+> - Request struct: `crates/weave-server/src/a2a/types.rs:147` — `SendMessageRequest`. Relevant fields: `message: A2aMessage` (required), `context_id: Option<String>`, `task_id: Option<String>`. **The request does NOT carry `runtime_kind` or `mode` on the A2A surface.** Both are defaulted to `None` on lines 88-89, resolving to `(AnthropicApi, Native)`.
+> - Session build: same `SessionService::create_session` chokepoint — call site at `a2a/messages.rs:78`. Note: when `body.task_id` is set (continue path on line 51), the handler loads the existing session and calls `send_prompt` — no new row, the matrix does not apply on that branch. The matrix applies only on the `else` branch on line 76.
+> - Where to plug in: **do not add a separate call here either.** Centralising covers it. (Per A2A's `messages.rs:130` the project uses `AppError::validation(format!(...))` for the "no provider configured" case — same pattern the new function should follow.)
+>
+> ## Key insights from Agent A
+> - **All three call sites converge on `SessionService::create_session`** (`service/sessions.rs:89`). A single `validate_runtime_mode_compat` call between `resume_inherit` (line 154) and `with_transaction` (line 156) covers call sites 1, 2, 3 — no per-site wiring needed.
+> - The spec's stated call sites are correct in spirit but the **single chokepoint** is even better than the spec described.
+> - **A2A's "resume" branch** (`a2a/messages.rs:51`, when `body.task_id` is set) does NOT create a new session — the matrix only applies on the create branch (`a2a/messages.rs:76`).
+> - The kanban and A2A sites do NOT carry `runtime_kind` / `mode` on their request types. They both pass `None` for both fields, resolving to `(AnthropicApi, Native)` — the one explicitly-allowed pair. **The test plan's `test_kanban_autospawn_rejects_incompatible_pair` and `test_a2a_rejects_incompatible_pair` will need a way to inject a non-default pair** into the kanban / A2A paths to exercise the rejection path. The current defaults can't trigger a rejection. This is a Phase 3 clarifying question.
+> - `feature_list.json:600` lists 7 required tests: `test_runtime_mode_compat_anthropic_native_ok`, `test_runtime_mode_compat_anthropic_wrapped_rejected`, `test_runtime_mode_compat_claude_code_wrapped_ok`, `test_runtime_mode_compat_claude_code_native_rejected`, `test_runtime_mode_compat_attended_rejected_for_now`, plus two site-level rejection tests. The first five are pure unit tests of the matrix function; the last two need the test-injection mechanism noted above.
+> - Validation pattern is uniform: `AppError::validation(format!(...))` returns HTTP 400 with `code: "validation_error"`. The new function should follow the same shape.
+> - The provider table's `kind` column ("http" vs "cli", `store/providers.rs:73-78`) is **orthogonal to the session's `runtime_kind`** — they are different layers (provider's wire format vs. per-session runtime tool choice). The matrix check is on the session's `(runtime_kind, mode)`, not on the provider, so `validate_runtime_mode_compat` does NOT need to load a provider row.
+> - The existing inline comment at `service/kanban.rs:139` and the agent-module comment at `agent/mod.rs:115` both anticipate feat-040 wiring here, so the placement is well-precedented.
+> - `RuntimeKind` and `SessionMode` already exist as typed enums in `crates/weave-server/src/agent/mod.rs:119` and `:190` — the matrix enforcement is the missing piece, not the types themselves.
+
+**Agent B report — feat-038 runtime/mode string handling (summary + key file:line refs, since the full report is in `/home/novpla/.claude/tmp/claude-1000/-mnt-data-works-weave/.../tasks/a18917b5c99971592.output`):**
+
+> - **`Session` struct** — `crates/weave-server/src/store/sessions.rs:21-50`. Already uses the typed enums (not raw `String`):
+>   ```rust
+>   /// Which Runtime Tool this session runs on (feat-038). Pre-feat-038
+>   /// rows backfill to `AnthropicApi`.
+>   pub runtime_kind: RuntimeKind,
+>   /// How the agent drives a turn (feat-038). Pre-feat-038 rows
+>   /// backfill to `Native`.
+>   pub mode: SessionMode,
+>   /// Per-runtime JSON blob — for CLI runtimes the canonical field
+>   /// is `cli_resume_id`. `None` for native HTTP sessions and for
+>   /// any session that has not yet produced per-turn state.
+>   pub runtime_metadata_json: Option<String>,
+>   ```
+>   Imports: `use crate::agent::{RuntimeKind, SessionMode};` at `store/sessions.rs:1`.
+>
+> - **String constants / literals — the enum is the single source of truth.** All kebab-case / snake-case forms live in `agent/mod.rs` as match arms in `as_str()` and `FromStr::from_str`:
+>   - `agent/mod.rs:137-146` — `RuntimeKind::as_str()` returns the six stable kebab-case values
+>   - `agent/mod.rs:165-178` — `FromStr for RuntimeKind` (lists every variant, with `AppError::validation` on unknown)
+>   - `agent/mod.rs:201-208` — `SessionMode::as_str()` (Native/Wrapped/Attended)
+>   - `agent/mod.rs:226-235` — `FromStr for SessionMode`
+>   Stray `"anthropic-api"` references still exist as doc comments / code comments in `a2a/messages.rs:88`, `service/kanban.rs:139`, `api/sessions.rs:48-49`, `migrations/011_session_runtime.sql:9,10,22,34`, `service/sessions.rs:85,4775`, `agent/mod.rs:524,575` (tests asserting `as_str()`), `sse/mod.rs:596` (test).
+>
+> - **Migration** — `migrations/011_session_runtime.sql:33-40`:
+>   ```sql
+>   ALTER TABLE sessions
+>       ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'anthropic-api';
+>   ALTER TABLE sessions
+>       ADD COLUMN mode TEXT NOT NULL DEFAULT 'native';
+>   ALTER TABLE sessions
+>       ADD COLUMN runtime_metadata_json TEXT;
+>   ```
+>   No CHECK constraints (intentional — comment at `:26-28` says validation is Rust-only, mirroring `status` and `provider.type` precedent).
+>
+> - **SessionStore round-trip** — all four CRUD paths (`create`, `create_tx`, `get_by_id`, `list_by_workspace`, `update_status`) explicitly include the runtime columns in their SELECT/INSERT/RETURNING lists, and pass typed enums via `as_str()` as bound params. `map_row` at `store/sessions.rs:350-385` reads the runtime columns as `String` and parses them with `RuntimeKind::from_str` / `SessionMode::from_str` (`:361-366`); the `FromSqlConversionFailure` arms are defensive.
+>
+> - **MessageStore / SSE done payload** — `MessageStore::create` at `store/sessions.rs:486-505` does **not** write runtime_kind/mode to `messages` (the messages schema is `id, session_id, role, content, metadata, created_at` at `:498`). The runtime fields are carried on two SSE variants:
+>   - `SseWireEvent::Done { stop_reason, runtime_kind, mode }` at `sse/mod.rs:224-234`
+>   - `SseWireEvent::MessagePersisted { id, role, stop_reason, content, created_at, runtime_kind, mode }` at `sse/mod.rs:245-258`
+>   JSON field names on the wire are `runtime_kind` (kebab-case via `serde(rename_all)`) and `mode` (snake_case). Construction sites broadcast from `run_prompt_task` at `service/sessions.rs:701-712` (MessagePersisted) and `:718-725` (Done). The defensive converter `stream_event_to_wire` at `sse/mod.rs:342-362` takes typed enums and only routes them on `Done`.
+>
+> - **Resume inheritance** — `pub(crate) fn resume_inherit(runtime_kind, mode, metadata, parent)` at `service/sessions.rs:406-444`. Logic:
+>   - When `parent` is `None`: `(runtime_kind, mode, metadata.map(...))` — caller-supplied or default values verbatim.
+>   - When `parent` is `Some`: caller-supplied `runtime_kind` / `mode` are used as-is (they are already default-resolved upstream at `:126-127` via `parse_runtime_kind` / `parse_mode`); the only inheritance is `runtime_metadata_json` via the `match (metadata, resolved_runtime == parent.runtime_kind)` block at `:437-441`:
+>     - `Some(s), _` → caller override always wins
+>     - `None, true` → inherit from parent
+>     - `None, false` → clear (different runtime, CLI resume id would be meaningless)
+>
+> - **Spec/code variant naming mismatch** — `feature_list.json:599` lists `OpenAiApi` / `OpenAiCompatible` for feat-040, but the existing enum at `agent/mod.rs:123,125` uses `OpenaiApi` / `OpenaiCompatible` (lowercase "i" after "Open"). The spec needs an update to match the code (or vice versa, but the code is already shipping).
+>
+> - **How the create handler determines runtime/mode today** — the request struct `CreateSessionRequest` (`api/sessions.rs:36-61`) has `runtime_kind: Option<agent::RuntimeKind>` and `mode: Option<agent::SessionMode>` (typed enums, so serde rejects unknown values at parse time with 400). The handler at `api/sessions.rs:78-105` converts to `&str` via `as_str()` at `:99-100`. The service entry `SessionService::create_session` (`service/sessions.rs:89-102`) accepts `Option<&str>`, parses at `:126-127`, and feeds the resolved typed values through `resume_inherit` into `create_tx`.
+
+**Agent C report — AppError shape and runtime module location (preserved verbatim):**
+
+> ## AppError definition
+> **File:** `crates/weave-server/src/error.rs:13-37`. The `Validation` variant is the only one that carries a `code: String` field. No variant carries a structured payload (no `serde_json::Value`, no sub-struct). The shape is `{ code: String, message: String }`. The wire JSON envelope is flat: `{"error": {"code": "...", "message": "..."}}` — no `details` key.
+>
+> - Two helpers: `error.rs:118` — `AppError::validation(msg)` → `code: "validation_error"`. `error.rs:127` — `AppError::validation_with_code(code, msg)` → explicit code.
+>
+> ## IntoResponse
+> **File:** `error.rs:59-108`. HTTP 400 for `Validation`, with code = the variant's `code` field and message = `self.to_string()` (the `#[error("Validation error: {message}")]` template expanded).
+>
+> ## Existing error codes
+> - `"validation_error"` (default) — `error.rs:120,138,147`; also used by `RuntimeKind::from_str` (`agent/mod.rs:173`) and `SessionMode::from_str` (`agent/mod.rs:231`).
+> - `"missing_field"` — `api/providers.rs:99,102,105,160,163,166` (provider create required field absent).
+> - `"invalid_field"` — `api/providers.rs:124,203` (field set that the kind forbids).
+> - `"invalid_kind"` — `api/providers.rs:85` (kind not in {http, cli}).
+> - `"unsupported_provider_type"` — `api/providers.rs:70`.
+> - Plus hard-coded codes from other variants: `not_found`, `not_implemented`, `auth_failed`, `rate_limited`, `provider_error`, `conflict`, `unauthorized`, `internal_error`.
+>
+> Convention: snake_case strings, short. No `details` envelope anywhere — the spec's "list runtime/mode/supported modes" payload must be encoded in the `message` string.
+>
+> ## Validation module
+> **No** `validation.rs` exists. Natural home for `validate_runtime_mode_compat`:
+> 1. **`agent/mod.rs`** — strongest match. `RuntimeKind` and `SessionMode` already live here, and the doc-comment at `agent/mod.rs:115` says: *"The full matrix of `runtime_kind` × `mode` compatibility is enforced in feat-040."*
+> 2. `service/sessions.rs` — alongside `parse_runtime_kind` (`:391`) and `parse_mode` (`:399`).
+> 3. A new top-level `validation.rs` — not idiomatic for this codebase.
+>
+> **Pre-existing convention: pure helpers go next to the type they validate.** `agent/mod.rs` is the semantic home; the call site is `service/sessions.rs` `create_session` line ~127.
+>
+> ## Pure validation function examples (matching pattern)
+> - `api/providers.rs:269-280` — `fn validate_name(name: &str) -> Result<(), AppError>` (private, sync, plain types, no I/O, returns `Result<(), AppError>`, uses `AppError::validation()` for shape errors).
+> - `api/kanban.rs:744-755` — `fn validate_board_name(name: &str) -> Result<(), AppError>`.
+> - `api/workspaces.rs:104-115` — `fn validate_name(name: &str) -> Result<(), AppError>`.
+> - `store/columns.rs:364-372` — `pub(crate) fn validate_auto_trigger(auto_trigger: bool, specialist_id: Option<&str>) -> Result<(), AppError>`.
+> - `service/sessions.rs:391-396` — `pub(crate) fn parse_runtime_kind(s: Option<&str>) -> Result<RuntimeKind, AppError>` (delegates to `FromStr`).
+> - `service/sessions.rs:399-404` — `pub(crate) fn parse_mode(s: Option<&str>) -> Result<SessionMode, AppError>`.
+>
+> For the new function: use `AppError::validation_with_code("runtime_mode_incompatible", "...")`. The runtime/mode/supported-modes payload goes in the `message` string.
+>
+> ## Test conventions (matching pattern)
+> All 7 feat-038 tests live in a single `mod tests { ... }` at `service/sessions.rs:1481`. **Sync `#[test]`** (not `#[tokio::test]`). In-memory SQLite via `Db::open(Path::new(":memory:"))` (helper `test_db()` at `service/sessions.rs:1490`). Shared dep-seed via `seed_deps` (`store/sessions.rs:649`) — creates a `"test-ws"` workspace and a `"Test"` provider.
+>
+> Pattern for testing `AppError` variant: `match result { Err(AppError::Validation { message, .. }) => assert!(message.contains("...")), other => panic!(...) }` — style used at `agent/mod.rs:551` and `:617`. For testing structured codes: `let AppError::Validation { code, message } = err else { panic!(...) }; assert_eq!(code, "runtime_mode_incompatible");` (the direct variant match). HTTP-level: `assert_eq!(err_obj["error"]["code"], "missing_field")` at `api/providers.rs:953` and `:1010`.
+>
+> Test locations: `test_session_runtime_kind_migration` at `service/sessions.rs:4675`, `test_session_runtime_metadata_roundtrip` at `:4731`, `test_session_runtime_default_backfill` at `:4779`, `test_session_resume_inherits_metadata_same_runtime` at `:4815`, `test_session_resume_clears_metadata_on_runtime_switch` at `:4867`, `test_session_resume_explicit_metadata_wins` at `:4917`, `test_session_runtime_invalid_value_rejected` at `:4965`.
+>
+> ## What I learned
+> 1. **`AppError::Validation` does not carry structured data.** The spec's "list runtime/mode/supported modes" payload must be packed into the `message` string (e.g. as `format!("runtime '{runtime}' does not support mode '{mode}'; supported: [{supported}]")`). If the architecture wants a typed payload, a new variant `ValidationWithDetails { code, message, details: serde_json::Value }` is needed — this is a project-wide decision (the `cwd_outside_codebase` spec in `multi-runtime-tasks.md:890` also anticipates a `details: { cwd, registered_codebases }` field). For feat-040, the message-string approach is consistent with the existing convention.
+> 2. **Spec uses a different enum-name casing than the code.** The feat-040 spec lists `OpenAiApi` / `OpenAiCompatible`; the actual enum in `agent/mod.rs:123,125` is `OpenaiApi` / `OpenaiCompatible`. Either fix the spec to match the code (preferred — the code is shipping) or rename the enum.
+> 3. **No `validation.rs` module exists.** The conventional home is `agent/mod.rs` next to the enums. The source comment at `agent/mod.rs:115` already reserves this slot.
+> 4. **Three call sites converge on `SessionService::create_session`** (`service/sessions.rs:89`). Single chokepoint.
+> 5. **`parse_runtime_kind` / `parse_mode` already reject unknown values** via `FromStr` impls at `agent/mod.rs:173` and `:231` (code: `"validation_error"`). If feat-040 wants the unknown-value error to be distinct from the incompatibility error, add a new code (e.g. `"invalid_runtime_kind"`) to the `FromStr` impls — optional. Strictly, the new `"runtime_mode_incompatible"` is the only code feat-040 must add.
+> 6. **`attended` mode is deferred until Phase 11** per the spec and the doc-comment at `agent/mod.rs:186`. The compatibility matrix in `multi-runtime-strategy.md:81-87` marks all CLI × `attended` cells as 🟡 deferred. The new validator must reject all `attended` pairings with a clear message referencing the deferred feature — covered by `test_runtime_mode_compat_attended_rejected_for_now`.
+
+**Next session — to resume feat-040:**
+
+1. Re-invoke `/feature-dev:feature-dev start feat-040` (or `start next task`). The skill will regenerate Phase 2 prompts. If the user has time, agents B and C reports may still be flowing in — check the `.output` files in `/home/novpla/.claude/tmp/claude-1000/-mnt-data-works-weave/.../tasks/` for any completed agents.
+2. **Phase 3 clarifying questions** that are already visible from Agent A's report:
+   - The kanban and A2A call sites today hard-code `(AnthropicApi, Native)`. How should `test_kanban_autospawn_rejects_incompatible_pair` and `test_a2a_rejects_incompatible_pair` inject a non-default pair? Options: (a) add `runtime_kind`/`mode` to the kanban/A2A request types now (out of scope for feat-040), (b) introduce a test-only provider with `kind=cli` that the A2A path resolves to, (c) write the site-level tests in a way that stubs the default. (a) and (b) are user-decisions; (c) is a code-shape decision.
+   - The spec says "CLI kinds with `wrapped` (and `attended` once Phase 11 lands; rejected until then with a clear error referencing the deferred feature)". Does the rejected-attended error message explicitly reference Phase 11? (e.g., "attended mode is deferred to Phase 11").
+   - The spec's payload "listing the runtime, the mode, and the modes the runtime supports" — does that mean a JSON object on the error variant (changes `AppError` shape) or a human-readable string? The current `AppError::validation` shape only carries a single `message` string.
+3. **Phase 4 architecture design** will be small here — Agent A already identified the single chokepoint. The main decisions are: (a) does `validate_runtime_mode_compat` live in `agent/mod.rs`, `service/sessions.rs`, or a new `agent/compat.rs`? (b) does the error variant gain a structured payload or do we encode the runtime+mode+supported list in the message string?
+4. Phases 5-7 follow normally. Per the lifecycle, no feature ships at `passing` without `./init.sh` 3-layer green.
+
+**Verification baseline at session start (commit `15dc466`):**
+
+- `./init.sh` exit 0, all 3 layers pass (background task `b297a50hm`).
+- 650 Rust tests + 113 frontend tests pass.
+- clippy clean, fmt clean, prettier clean, ESLint clean.
+
+**Files touched this session (before reversion):**
+
+- `feature_list.json` — feat-040 state flip `not_started` ↔ `active` ↔ `not_started` (net zero diff).
+- `PROGRESS.md` — current state / next steps / out-of-scope items (kept).
+- `PROGRESS-archive.md` — this entry (append-only, preserved).
+
+No code files modified. No migration written. No test files created. Three `code-explorer` agents' worth of work (Agent A fully captured above; Agents B and C pending) preserved in the task output files under `/home/novpla/.claude/tmp/claude-1000/-mnt-data-works-weave/.../tasks/`.
+
 ### fix-069 — `useSession` SSE `"error"` listener no longer throws on built-in connection errors (committed `40b5032`)
 
 User bug report: opening `http://localhost:5173/sessions/6f46ff14-2f1f-4a81-93e8-40d3c27742d7` filled the browser console with `Failed to parse SSE event: error undefined {stack: "SyntaxError: \"undefined\" is not valid JSON"}` and the chat felt stuck. The session was `status: "ready"` and `/api/sessions/.../history` returned 25 messages with successful assistant turns, so the chat was actually functional — the noise was the only visible symptom.
@@ -533,3 +710,72 @@ User bug report: opening the New Session modal in a workspace with no codebases 
 1. **Commit the 4 in-tree files** as a single fix: `fix: New Session modal — inline codebase creation`. Body should reference the feat-062 / feat-063 lineage and call out the 1 new test, 1 flipped test, and the 3 mocks re-formatted. Mention the Modal prop additions as the foundation for future nested-modal flows.
 2. **The DELETE codebase endpoint is not implemented** (verified via `curl -X DELETE → 405 Method Not Allowed`). Discovered while trying to reset the default workspace for the verification run; not in scope for this fix but worth a follow-up. Until it lands, the only way to remove a codebase is to wipe the DB.
 3. **Pre-existing de-dup follow-ups** from feat-061 still apply (now with one more occurrence of the per-workspace button and modal form-class strings).
+
+### feat-040 — Runtime × Mode compatibility validator (committed this session; 7-phase feature-dev workflow)
+
+Resumed the work interrupted in the prior session entry ("feat-040 — partial Phase 2 exploration"). All 3 phase-2 reports were preserved in the archive, so Phases 1 and 2 were already done. This session covered Phases 3 through 7.
+
+**What this session did:**
+
+1. **Phase 3 (Clarifying questions) — done.** Presented 3 questions derived from the prior phase-2 reports:
+   - Q1 (test injection for kanban/A2A site-level rejection tests): user said "your call" → adopted hybrid: extend A2A `SendMessageRequest` with optional `runtime_kind` + `mode` so `test_a2a_rejects_incompatible_pair` is a real e2e through the A2A handler; for kanban, since `Column` doesn't carry `runtime_kind`/`mode` (that's feat-055's job), the test calls `SessionService::create_session` directly with `(ClaudeCode, Native)` and asserts the chokepoint rejection. The test name `test_kanban_autospawn_rejects_incompatible_pair` reflects the kind of pair a future column binding would produce.
+   - Q2 (error payload format): user said "your call" → encode runtime + mode + supported list in the `message` string per existing convention. New code `"runtime_mode_incompatible"`. No `AppError` variant change (per Q3, the message-string approach is consistent with the existing convention; no other error variant carries structured data).
+   - Q3 (attended-mode error message): user picked "Terse, no phase reference" → message says "runtime 'X' does not support mode 'attended'…", no Phase 11 mention.
+   - Spec fix (orthogonal): `feature_list.json:599` listed `OpenAiApi`/`OpenAiCompatible` but the shipping enum is `OpenaiApi`/`OpenaiCompatible`. Decided to update the spec (the code is shipping per feat-038 evidence).
+
+2. **Phase 4 (Architecture design) — done.** Launched 3 `code-architect` agents in parallel:
+   - **Minimal**: inline in `agent/mod.rs` + private `supported_modes_str` returning `&'static str` + flat `match` with 6 OK arms + Attended short-circuit. Test count 7.
+   - **Clean**: new `agent/compat.rs` + re-export + `const COMPAT_MATRIX: &[(..)]` + `pub(crate) format_incompatibility_message` helper. Test count 10. Acknowledges borderline over-engineering; justified by feeder for feat-046/053.
+   - **Pragmatic**: inline in `agent/mod.rs` + `pub fn supported_modes -> &'static [SessionMode]` + per-runtime match returning the supported slice. Test count 9. Slight variation on Minimal: slice return type for future feeders.
+   - **User selected Pragmatic.** The three differed mostly in `supported_modes`'s return type and module location; Pragmatic's `&'static [SessionMode]` is more flexible for the future PermissionMapper/UI for zero added cost. The Clean architect's separate `agent/compat.rs` was organizational overhead for a 30-line function; the slot was already reserved by the doc comment at `agent/mod.rs:115`.
+
+3. **Phase 5 (Implementation) — done.** 5 files changed in this order (each compiles before the next):
+   1. `crates/weave-server/src/agent/mod.rs` — `pub fn supported_modes(runtime) -> &'static [SessionMode]` and `pub fn validate_runtime_mode_compat(runtime, mode) -> Result<(), AppError>` placed in the slot reserved by the existing doc comment. 6 unit tests appended to the existing `mod tests` block.
+   2. `crates/weave-server/src/a2a/types.rs` — 2 new optional fields on `SendMessageRequest` (`runtime_kind: Option<RuntimeKind>`, `mode: Option<SessionMode>`). `#[serde(default)]` preserves backward compat for legacy A2A clients.
+   3. `crates/weave-server/src/a2a/messages.rs` — `None, None` at lines 88-89 replaced with `body.runtime_kind.map(|k| k.as_str())` and `body.mode.map(|m| m.as_str())`. New `#[cfg(test)] mod tests` block with 2 tests (the e2e rejection test + the backward-compat test).
+   4. `crates/weave-server/src/service/sessions.rs` — 1-line call to `crate::agent::validate_runtime_mode_compat(runtime_kind, mode)?;` between `parse_mode` and the parent-chain block, plus a 5-line comment explaining the `resume_inherit` interaction (it only changes metadata, not runtime/mode, so the validated pair IS the persisted pair). `test_kanban_autospawn_rejects_incompatible_pair` appended to the existing test module.
+   5. `feature_list.json:599` — 1-line spec fix: `OpenAiApi` → `OpenaiApi`, `OpenAiCompatible` → `OpenaiCompatible`.
+   - All 9 spec-named verification tests pass. Two auto-fmt fixes were applied (line length and array element alignment). The `git diff` after `cargo fmt` is clean.
+
+4. **Phase 6 (Quality review) — done.** 3 `code-reviewer` agents in parallel:
+   - **Correctness reviewer**: PASS, 0 issues ≥80. Confirmed all 6×3 = 18 matrix combos correct, validator placement correct, A2A resume bypass correct, error code stable, wire format correct, backward compat preserved, attended message has no Phase 11 reference.
+   - **Conventions reviewer**: PASS, 0 issues ≥80. 1 style nit (trailing comma) handled by `cargo fmt`. Recommended a PROGRESS.md OOS note recording the Q3 architectural decision (done).
+   - **Simplicity & DRY reviewer**: 3 issues, 2 applied:
+     - (90 conf) `a2a/messages.rs:194` — second half of `test_a2a_request_without_runtime_mode_still_parses` is a tautology (calls validator with hard-coded defaults, not with values from body). **Applied**: replaced with `assert_eq!(RuntimeKind::default(), AnthropicApi)` and `assert_eq!(SessionMode::default(), Native)` — confirms the defaults flow through correctly.
+     - (85 conf) 7 unit tests have heavy overlap. **Applied (partial)**: consolidated 2 `supported_modes_*` tests into 1 `test_supported_modes` (loops over both HTTP and CLI categories). Kept all 5 spec-named matrix tests (mandated by the spec at `feature_list.json:600`).
+     - (82 conf) `Vec<&str>` + `join` in the validator is over-engineered for a 2-row matrix. **Not applied**: the spec at `feature_list.json:599` explicitly requires "listing the runtime, the mode, and the modes the runtime supports" in the error payload; the dynamic list satisfies this, the reviewer's hard-coded alternative ("expected 'native' for HTTP or 'wrapped' for CLI") loses the per-runtime specificity.
+   - Net: 2 fixes applied, test count 10 → 9.
+
+5. **Phase 7 (Summary) — done.** Updated `feature_list.json:601` to `state: "passing"` with a detailed `evidence` field. Updated PROGRESS.md (current state, next steps, OOS items). Added this archive entry. Ready to commit.
+
+**Files modified this session (final list, ordered by build dependency):**
+
+1. `crates/weave-server/src/agent/mod.rs` — validator + 6 tests (+106 lines).
+2. `crates/weave-server/src/a2a/types.rs` — 2 optional fields (+12 lines).
+3. `crates/weave-server/src/a2a/messages.rs` — call-site change + 2 tests (+78 lines, 2 modified at 88-89).
+4. `crates/weave-server/src/service/sessions.rs` — chokepoint call + 1 test (+49 lines).
+5. `feature_list.json` — 1-line spec fix at line 599, state + evidence at line 601-607.
+6. `PROGRESS.md` — current state, next steps, OOS items.
+7. `PROGRESS-archive.md` — this entry.
+
+**Verification baseline (commit before this session was `15dc466`; the commit after will be the feat-040 commit):**
+
+- `./init.sh` exit 0, all 3 layers pass.
+- 659 Rust tests + 113 frontend tests, 9 new tests in feat-040.
+- clippy clean, fmt clean, prettier clean, ESLint clean.
+- Server starts, `/api/health` 200, `GET /` serves index.html with `id="root"`, graceful shutdown.
+
+**Key decisions made this session:**
+
+- **Hybrid test injection (Q1)**: extend A2A request type, test kanban via chokepoint. Future feat-055 (kanban column binding) will get the full e2e column-binding test that feat-040 deliberately defers.
+- **Flat message payload (Q2)**: per existing convention. `AppError` variant shape unchanged. If a future feature needs structured details, add a new variant project-wide.
+- **Terse attended message (Q3)**: no Phase 11 reference. Defer the cross-feature consistency for attended-mode messaging to feat-053.
+- **Pragmatic architecture (Phase 4)**: `agent/mod.rs` for both `supported_modes` and `validate_runtime_mode_compat`; per-runtime match returning the supported slice; the validator is a `slice.contains(&mode)` + error-construction call. ~30 lines of logic, 9 tests, single chokepoint call site.
+- **Validator at line 130 (not line 155)**: placement before parent-chain validation, after parsing. `resume_inherit` only changes `runtime_metadata_json`, not the runtime/mode pair — the validated pair IS the persisted pair, so the earlier placement catches everything the later placement would. Fail-fast, no behavior difference.
+- **Spec fix (orthogonal)**: update spec to match shipping enum names. Code is already shipping; spec is the document, code is the source of truth.
+
+**Cross-feature follow-ups (now in PROGRESS.md OOS):**
+
+- feat-050 (cwd_outside_codebase) — `try_automate_lane` routes through `create_session`, so feat-040's validator fires *before* the codebase check. Order is correct as-is, but feat-050 must still call the validator (it already does by routing through the chokepoint).
+- feat-053 (UI) — when the wizard surfaces the `runtime_mode_incompatible` error, it'll need to regex the `message` string (no structured payload). If the wizard needs structured data, add `AppError::ValidationWithDetails` project-wide (feat-050's `cwd_outside_codebase` also anticipates this shape).
+- feat-055 (kanban column binding) — column-level `runtime_kind` will be validated by the same chokepoint call. The full column-binding e2e test is feat-055's verification gate.

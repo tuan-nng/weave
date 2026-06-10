@@ -150,6 +150,18 @@ pub struct SendMessageRequest {
     pub context_id: Option<String>,
     #[serde(default)]
     pub task_id: Option<String>,
+    /// Optional runtime override (defaults to `anthropic-api`).
+    /// Wire form: kebab-case, e.g. `"claude-code"`, `"openai-api"`.
+    /// Validated against `mode` by `validate_runtime_mode_compat`
+    /// (feat-040).
+    #[serde(default)]
+    pub runtime_kind: Option<crate::agent::RuntimeKind>,
+    /// Optional mode override (defaults to `native`).
+    /// Wire form: snake_case, e.g. `"native"`, `"wrapped"`, `"attended"`.
+    /// Validated against `runtime_kind` by `validate_runtime_mode_compat`
+    /// (feat-040).
+    #[serde(default)]
+    pub mode: Option<crate::agent::SessionMode>,
 }
 
 // ---------------------------------------------------------------------------

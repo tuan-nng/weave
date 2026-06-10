@@ -28,18 +28,17 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-10
-- **Latest commit:** `15dc466 chore: trim PROGRESS.md, add PROGRESS-archive.md, document state-file lifecycle`
-- **Active feature:** none — phase-7 multi-runtime strategy: feat-038 (committed `1dfabeb`) and feat-039 (committed `075e721`) are both `passing`; fix-069 is committed (`40b5032`); harness improvement (PROGRESS.md trim + archive + lifecycle rule) committed in `15dc466`; ready to pick the next `not_started` phase-7 feature.
-- **In-flight (uncommitted):** none
-- **Build status:** green — `./init.sh` all 3 layers pass
-- **Test status:** green — 650 Rust tests (642 pre-feat-039 + 8 for the kind-discriminated union) + 113 frontend tests pass
-- **Lint status:** green — clippy clean, fmt clean, prettier clean, ESLint clean
-- **Uncommitted:** none
+- **Latest commit:** `15dc466 chore: trim PROGRESS.md, add PROGRESS-archive.md, document state-file lifecycle` (no new commit yet — feat-040 implementation complete, about to be committed in this session)
+- **Active feature:** none — `feat-040` moved to `passing` this session. 7-phase `feature-dev` workflow ran end-to-end: Phase 1 (Discovery, from prior session), Phase 2 (Codebase exploration, 3 code-explorer reports preserved in PROGRESS-archive.md from prior session), Phase 3 (Clarifying questions, user confirmed via "your call" → 3 decisions: hybrid A2A extend + chokepoint test, message-string payload, terse attended message; spec also fixed to match shipping enum names), Phase 4 (Architecture, 3 code-architect agents, user selected Pragmatic), Phase 5 (Implementation, 5 files), Phase 6 (Quality review, 3 reviewers — Correctness + Conventions passed; Simplicity flagged 3 issues, 2 applied: redundant A2A test assertion dropped, 2 supported_modes tests consolidated to 1), Phase 7 (Summary, this entry).
+- **In-flight (uncommitted):** `feature_list.json` (feat-040 → `passing` + evidence), `crates/weave-server/src/agent/mod.rs` (validator + 6 tests), `crates/weave-server/src/a2a/types.rs` (2 optional fields), `crates/weave-server/src/a2a/messages.rs` (call-site + 2 tests), `crates/weave-server/src/service/sessions.rs` (chokepoint call + 1 test), `PROGRESS.md` (this file, current state + OOS updates)
+- **Build status:** green — `./init.sh` 3-layer gate passes
+- **Test status:** green — 659 Rust tests + 113 frontend tests, 9 new tests in feat-040
+- **Lint status:** green — clippy clean, fmt clean (auto-fixed), prettier clean, ESLint clean
 
 ## Next Steps (in order)
 
-1. **Pick the next `not_started` phase-7 feature** from `feature_list.json`. Likely candidates in dependency order: `feat-040` (runtime×mode validation matrix), `feat-041` (per-turn `TurnContext`), or `feat-042` (per-adapter model cache — the 501 branch on `list_provider_models` for `kind=cli` rows added in feat-039 lands its first user here).
-2. **Set the chosen feature to `active`** in `feature_list.json` and proceed with the standard 7-phase feature-dev workflow (`/feature-dev:feature-dev start feat-NNN`).
+1. **Commit feat-040.** All 5 implementation files are modified, `feature_list.json` is flipped to `passing` with evidence, `./init.sh` is green. Stage and commit with a feat message. Then `git push` and the user reviews the diff.
+2. **Pick the next `not_started` phase-7 feature.** Per the `feature_list.json` next-features list: `feat-041` (TurnContext extension to CodingAgent trait) has dependencies feat-005/009/038 all `passing` and is the natural next step in the multi-runtime foundation. `feat-042` (Per-Runtime-Tool model cache) depends on feat-005/007/039 and is independent of feat-041.
 3. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
@@ -62,6 +61,8 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - `MAX_TASK_TITLE_LEN` defined in two places: `tools/fs/mod.rs` and `api/kanban.rs` — fix: hoist to `store::tasks`
 - `type_complexity` clippy warning in `service/sessions.rs:1436` (test helper) — doesn't fail `just lint` because lint runs without `--all-targets`
 - **Tool-containment partial gap (security audit, feat-037 review)**: shell-body jail is by-design NOT enforced even for bound sessions — the `cwd`-arg / `fs_*` / explicit-`cwd` form of shell+git containment is enforced (feat-062), but a shell command body is not. The `docs/user/sessions.md` "How sessions use a codebase" section documents this trade-off explicitly.
+- **`AppError::Validation` is flat (feat-040 decision)**: the runtime × mode mismatch payload (runtime, mode, supported modes) is encoded in the `message` string, not as a structured `details` field. `feat-053` (session-creation wizard) will need to regex the message when surfacing the error. If a future feature needs a structured payload, add a new `AppError::ValidationWithDetails` variant project-wide (the `cwd_outside_codebase` spec in feat-050 also anticipates the same shape).
+- **feat-050 ordering note (feat-040 review)**: `try_automate_lane` routes through `SessionService::create_session`, so the `validate_runtime_mode_compat` call inside the chokepoint fires *before* the codebase check in feat-050. A wrapped session will pass feat-040's matrix first, then hit the codebase check second — the order is correct as-is.
 
 ## Session-Start Tips
 

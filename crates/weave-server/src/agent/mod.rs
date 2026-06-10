@@ -236,6 +236,71 @@ impl FromStr for SessionMode {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime × mode compatibility (feat-040)
+// ---------------------------------------------------------------------------
+
+/// Return the set of `SessionMode` values the given runtime supports.
+///
+/// Source of truth for the compatibility matrix defined in
+/// `docs/road-map/multi-runtime-strategy.md` §4. HTTP runtimes only
+/// support `Native`; CLI runtimes only support `Wrapped`. `Attended`
+/// is reserved for Phase 11 and is *not* included in any runtime's
+/// supported set today — `validate_runtime_mode_compat` rejects every
+/// `attended` pairing until Phase 11 lands.
+///
+/// Exposed publicly so downstream features (feat-046 `PermissionMapper`,
+/// feat-053 session-creation wizard) can filter or default against the
+/// same set without re-deriving the matrix.
+pub fn supported_modes(runtime: RuntimeKind) -> &'static [SessionMode] {
+    match runtime {
+        // HTTP runtimes: Weave drives the turn via a direct provider call.
+        RuntimeKind::AnthropicApi | RuntimeKind::OpenaiApi | RuntimeKind::OpenaiCompatible => {
+            &[SessionMode::Native]
+        }
+        // CLI runtimes: Weave drives the turn by spawning a CLI subprocess.
+        RuntimeKind::ClaudeCode | RuntimeKind::Codex | RuntimeKind::Opencode => {
+            &[SessionMode::Wrapped]
+        }
+    }
+}
+
+/// Enforce the `RuntimeKind` × `SessionMode` compatibility matrix at
+/// session-creation time. Every inbound path (POST
+/// `/api/workspaces/:wid/sessions`, A2A POST `/api/a2a/messages`,
+/// kanban `try_automate_lane`) routes through
+/// `SessionService::create_session`, which calls this after parsing
+/// both fields but before any parent-chain or transaction work.
+///
+/// Returns `Ok(())` for every allowed pair. Returns
+/// `AppError::Validation { code: "runtime_mode_incompatible", .. }`
+/// for every other combination, with a `message` listing the runtime,
+/// the requested mode, and the modes that runtime does support.
+pub fn validate_runtime_mode_compat(
+    runtime: RuntimeKind,
+    mode: SessionMode,
+) -> Result<(), AppError> {
+    let supported = supported_modes(runtime);
+    if supported.contains(&mode) {
+        Ok(())
+    } else {
+        let listed = supported
+            .iter()
+            .map(|m| m.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(AppError::validation_with_code(
+            "runtime_mode_incompatible",
+            format!(
+                "runtime '{}' does not support mode '{}'; supported modes: [{}]",
+                runtime.as_str(),
+                mode.as_str(),
+                listed,
+            ),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Request / message types
 // ---------------------------------------------------------------------------
 
@@ -633,5 +698,111 @@ mod tests {
         }
         let json = serde_json::to_string(&SessionMode::Native).unwrap();
         assert_eq!(json, "\"native\"");
+    }
+
+    // --- feat-040: runtime × mode compatibility ---
+
+    #[test]
+    fn test_supported_modes() {
+        // HTTP runtimes support only `native`; CLI runtimes support only
+        // `wrapped`. `attended` is reserved for Phase 11 and not in any
+        // runtime's supported set today.
+        for runtime in [
+            RuntimeKind::AnthropicApi,
+            RuntimeKind::OpenaiApi,
+            RuntimeKind::OpenaiCompatible,
+        ] {
+            assert_eq!(
+                supported_modes(runtime),
+                &[SessionMode::Native],
+                "HTTP runtime {runtime:?} must support only Native"
+            );
+        }
+        for runtime in [
+            RuntimeKind::ClaudeCode,
+            RuntimeKind::Codex,
+            RuntimeKind::Opencode,
+        ] {
+            assert_eq!(
+                supported_modes(runtime),
+                &[SessionMode::Wrapped],
+                "CLI runtime {runtime:?} must support only Wrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn test_runtime_mode_compat_anthropic_native_ok() {
+        assert!(
+            validate_runtime_mode_compat(RuntimeKind::AnthropicApi, SessionMode::Native).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_compat_anthropic_wrapped_rejected() {
+        let err = validate_runtime_mode_compat(RuntimeKind::AnthropicApi, SessionMode::Wrapped)
+            .expect_err("HTTP runtime + wrapped must be rejected");
+        match err {
+            AppError::Validation { code, message } => {
+                assert_eq!(code, "runtime_mode_incompatible");
+                assert!(message.contains("anthropic-api"), "msg: {message}");
+                assert!(message.contains("wrapped"), "msg: {message}");
+                assert!(message.contains("native"), "msg: {message}");
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_runtime_mode_compat_claude_code_wrapped_ok() {
+        assert!(
+            validate_runtime_mode_compat(RuntimeKind::ClaudeCode, SessionMode::Wrapped).is_ok()
+        );
+    }
+
+    #[test]
+    fn test_runtime_mode_compat_claude_code_native_rejected() {
+        let err = validate_runtime_mode_compat(RuntimeKind::ClaudeCode, SessionMode::Native)
+            .expect_err("CLI runtime + native must be rejected");
+        match err {
+            AppError::Validation { code, message } => {
+                assert_eq!(code, "runtime_mode_incompatible");
+                assert!(message.contains("claude-code"), "msg: {message}");
+                assert!(message.contains("native"), "msg: {message}");
+                assert!(message.contains("wrapped"), "msg: {message}");
+            }
+            other => panic!("expected Validation, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_runtime_mode_compat_attended_rejected_for_now() {
+        // Attended is deferred to Phase 11 — every runtime must reject it
+        // with the same `runtime_mode_incompatible` code. The HTTP case
+        // is the most likely user path (Anthropic API in attended mode
+        // is the closest to a real Phase 11 surface).
+        for runtime in [
+            RuntimeKind::AnthropicApi,
+            RuntimeKind::OpenaiApi,
+            RuntimeKind::OpenaiCompatible,
+            RuntimeKind::ClaudeCode,
+            RuntimeKind::Codex,
+            RuntimeKind::Opencode,
+        ] {
+            let err = validate_runtime_mode_compat(runtime, SessionMode::Attended)
+                .expect_err("attended must be rejected for every runtime");
+            match err {
+                AppError::Validation { code, message } => {
+                    assert_eq!(code, "runtime_mode_incompatible");
+                    assert!(message.contains("attended"), "msg: {message}");
+                    // No Phase 11 reference in the message (Q3 decision).
+                    assert!(
+                        !message.contains("phase"),
+                        "attended rejection must not reference Phase 11, got: {message}"
+                    );
+                }
+                other => panic!("expected Validation for {runtime:?}, got: {other:?}"),
+            }
+        }
     }
 }
