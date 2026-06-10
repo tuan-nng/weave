@@ -642,6 +642,62 @@ The parser exposes `session_id()` and `take_session_id()` — no tokio coupling,
 
 ---
 
+### feat-046 — PermissionMapper trait + Claude Code impl (phase-8, verification green, committed 24aa475)
+
+Phase 8 of the multi-runtime strategy. The `PermissionMapper` trait translates a Weave `(RuntimeKind, ToolProfile)` pair into a `PermissionSnapshot` — the opaque argv / env flags a CLI subprocess needs to honor the user's chosen tool surface. First concrete mapper is `ClaudeCodePermissionMapper` (the spec's "first implementation"). The snapshot is carried on `TurnContext::effective_permissions` so the runner (feat-043) and the `ClaudeCodeCodingAgent` (feat-051) can consume it.
+
+**New module layout (`agent/permissions/`):**
+
+- `mod.rs` — `PermissionMapper` trait, `PermissionSnapshot` struct, `ToolProfile` enum. Module-level `#![allow(dead_code)]` matches the `claude_code/parser.rs:52` precedent (the trait has no production caller until feat-051 wires the mapper into session creation).
+- `claude_code.rs` — `ClaudeCodePermissionMapper` impl + `ClaudeCodeModeMap` (mapping table). Re-exported at `permissions::ClaudeCodePermissionMapper` (mirrors `claude_code::ClaudeCodeStreamParser`).
+
+**Mapping table (applied verbatim from the spec):**
+
+| Weave `ToolProfile` | Claude Code `--permission-mode` | Allowlist (WEAVE_TOOL_ALLOWLIST) |
+|---------------------|----------------------------------|----------------------------------|
+| `Full`              | `bypassPermissions`              | fs_read, fs_write, shell_exec    |
+| `Implementation`    | `acceptEdits`                    | fs_read, fs_write, shell_exec    |
+| `Review`            | `plan`                           | fs_read                          |
+| `Planning`          | `plan`                           | fs_read                          |
+| `Reporting`         | `default`                        | (empty — no shell)               |
+
+**Snapshot shape (autonomous decision, documented in `permissions/mod.rs`):**
+
+`PermissionSnapshot` is `{ runtime_kind, tool_profile, argv_flags: Vec<String>, env_vars: BTreeMap<String, String> }`. The runner treats `argv_flags` and `env_vars` opaquely — concatenates them onto the CLI invocation's `args` / `env`. The mapper is the only place that knows the internal structure. `BTreeMap` (not `HashMap`) for deterministic key order in the JSON debug log. `Serialize + Deserialize` for round-trip through the JSON debug log.
+
+**Intentionally minimal mapping (per spec):**
+
+The allowlist is emitted to the CLI as `WEAVE_TOOL_ALLOWLIST` (JSON env var) so the journey translator (feat-048) can correlate which Weave tools the CLI was authorized to invoke — but the allowlist is NOT mirrored into Claude Code's own tool list. Claude Code's tool surface is the CLI's responsibility. Weave enforces containment separately (the `cwd`-arg / `fs_*` / explicit-`cwd` form per feat-062, plus the shell-body policy).
+
+**`TurnContext::effective_permissions` plumbed (feat-046 scope):**
+
+The `TurnContext` struct gains a new `effective_permissions: PermissionSnapshot` field. The two existing `TurnContext` construction sites (`service/sessions.rs::build_turn_context` and the test fixture at `service/sessions.rs:5144`) use `PermissionSnapshot::empty(runtime, ToolProfile::Full)` for feat-046. The actual mapper call (looking up `session.specialist_id` against the `SpecialistRegistry` to resolve the `ToolProfile`, then `ClaudeCodePermissionMapper::new().effective_permissions`) is feat-051's job — a doc comment at the call site flags the deferred wiring.
+
+**Verification:**
+
+- `./init.sh` exit 0, all 3 layers pass (after `cargo fmt` auto-fix on the multi-line vec![] in claude_code.rs).
+- 730 Rust tests + 113 frontend tests (+18 over feat-045: 9 in `permissions/mod.rs`, 9 in `permissions/claude_code.rs`). All 7 spec-named verification tests pass.
+- `cargo clippy -p weave-server -- -D warnings` clean. `cargo fmt --check` clean.
+
+**Simplify pass:**
+
+No findings. The trait / snapshot / enum / mapper separation is the minimal viable surface; the `BTreeMap` for env_vars matches the `CliInvocation::env` precedent; the re-export at the module root matches the `claude_code::ClaudeCodeStreamParser` precedent. The 2-token argv pair shape (`["--permission-mode", mode]`) is pinned by `test_permission_mapper_argv_always_two_tokens` so a future `--permission-mode=plan` refactor fails loudly.
+
+**Cross-feature follow-ups (now in PROGRESS.md OOS / DECISIONS.md):**
+
+- feat-047 (resume metadata) — the `Sender<String>` from feat-045's parser wires here; the runner reads `Session::runtime_metadata_json['cli_resume_id']` to pass `--resume <id>` to the next turn.
+- feat-048 (journey translator) — reads `WEAVE_TOOL_ALLOWLIST` from the child process env to attribute tool calls.
+- feat-051 (ClaudeCodeCodingAgent) — the first consumer of the trait. The registry pattern (analogous to `ProviderRegistry`) lands here. `add_provider` for a `kind=cli` row whose `binary_path` matches a registered `claude-code` adapter builds a `ClaudeCodeCodingAgent` that uses `CliRunner`, the parser, the mapper, and the journey translator together.
+- feat-058/059 (Codex, OpenCode) — sibling mappers in `agent/codex/permissions.rs` and `agent/opencode/permissions.rs`, sharing the same `PermissionSnapshot` shape.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- `build_turn_context` in `service/sessions.rs:483` passes `ToolProfile::Full` unconditionally because feat-046 is the trait + impl phase, not the integration phase. feat-051 must look up `session.specialist_id` → `SpecialistRegistry` → `tool_profile: Option<String>` → `ToolProfile::from_str` and pass that through. The default `Full` is safe (Anthropic HTTP ignores the snapshot; Claude Code in `bypassPermissions` is the most permissive but bounded by the FS-tool containment boundary).
+- The mapper is `Send + Sync` but not `Arc`d yet. feat-051 will wrap the registry in `Arc<dyn PermissionMapper>`; feat-046 keeps the concrete type to avoid the registry scaffolding landing before its first consumer.
+- `WEAVE_TOOL_ALLOWLIST` is the env-var name; not yet mentioned in any user-facing docs. The user-facing doc update is a small follow-up — likely paired with feat-051 when the end-to-end Claude Code wiring is observable in the UI.
+
+---
+
 ## Cross-Session Reference
 
 ### Completed Since Project Start (as of 2026-06-10)
@@ -683,6 +739,10 @@ The parser exposes `session_id()` and `take_session_id()` — no tokio coupling,
 - [x] **feat-034**: Graceful shutdown — SIGTERM/SIGINT/drain-cap race, parent CancellationToken in AppState, ActiveSessions::cancel_all, SseWireEvent::Shutdown + SseManager::broadcast_shutdown, Db::checkpoint (TRUNCATE), service::startup::reap_orphans (transactional mark-as-error), spawn cleanup task, run() extracted from main(). 12 new tests.
 - [x] **feat-036**: Session chat re-implementation (message_persisted SSE, useReducer, id-based handoff)
 - [x] **feat-037**: Native Anthropic tool-execution loop (agent_loop, ToolOutcome, JSON Schema validation, sanitize_tool_input, EventConverter deferred-emit, LoopLimit stop_reason). 7 spec tests cover basic happy path, unknown tool, validation error, exec error, loop limit, cancel mid-loop, and no-tool passthrough.
+- [x] **feat-043**: Per-turn CLI subprocess runner (`CliRunner` + `CliInvocation` + `CliRunResult`; SIGTERM/SIGKILL on cancel via process group; stdout line stream to mpsc + bounded 1 MiB/line + 256 KiB stderr with truncation marker; per-session process table for the cancel/reap path)
+- [x] **feat-044**: Fake CLI test harness (in-crate `[[bin]]` `fake_cli` with `--script <body>` + fixtures: `text-only`, `text+tool+done`, `echo-resume-id`, `resume-unknown-session`, `cancel-after-tool`; double-branch `fake_cli_path()` helper for env var + current_exe walk; `cli_runner::test_support::run_with_timeout` shared helper)
+- [x] **feat-045**: Claude Code `stream-json` parser (synchronous state machine with deferred-emission `ToolUseStart`; `Vec<(String, InFlightToolUse)>` for insertion order; passive `session_id()` / `take_session_id()` getters; malformed/unknown lines logged WARN and skipped, never fatal)
+- [x] **feat-046**: `PermissionMapper` trait + Claude Code implementation (typed `ToolProfile` enum, opaque `PermissionSnapshot { runtime_kind, tool_profile, argv_flags, env_vars }` with JSON debug shape; Claude Code mapping: `full→bypassPermissions`, `implementation→acceptEdits`, `review/planning→plan`, `reporting→default` no-shell; `WEAVE_TOOL_ALLOWLIST` JSON env var for the journey translator; `TurnContext::effective_permissions` plumbed; HTTP runtimes get an empty snapshot)
 - [x] **feat-061**: `+ New Session` button on `web/src/app/pages/sessions.tsx`. Extracted the inline New Session modal from `workspace.tsx` into `web/src/components/new-session-modal.tsx` (Provider select + Specialist dropdown via `useSpecialists` + Model input + inline `role="alert"` error, contract `{ workspaceId: string | null, onClose, onCreated? }` matching `CreateBoardModal` precedent). Refactored `workspace.tsx` to use the new component (page shrank 344 → 220 lines, ~124 net lines removed). Added a per-workspace `+ New Session in {name}` button to `sessions.tsx` (slate-secondary style matching boards/codebases) that opens the shared modal pre-bound to that workspace. Restructured `WorkspaceSessions` so a workspace with zero sessions still shows the heading + button (per the user's "show heading+button on empty" requirement). Updated `docs/user/sessions.md` to say "next to the workspace name" (placement) and to describe the specialist as a dropdown. 5 new page tests in `__tests__/sessions.test.tsx`. **Spec deviation**: the spec said "render the modal once per `WorkspaceSessions` block"; the implementation uses one shared modal at page level (matches boards/codebases precedent, TanStack Query dedupes the providers/specialists queries, the page-level modal control state is simpler).
 
 ### In Progress

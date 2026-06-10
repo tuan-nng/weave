@@ -28,17 +28,17 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-10
-- **Latest commit:** `5ce96f0` (feat-045). **feat-046** is the next one to implement.
-- **Active feature:** none. Next: pick the next `not_started` phase-8 feature — **feat-046** (`PermissionMapper` trait + Claude Code implementation; depends on feat-005/012/040/041 which are all `passing`).
+- **Latest commit:** `24aa475` (feat-046). **feat-047** (CLI-native resume metadata persistence) is the next one to implement.
+- **Active feature:** none. Next: pick the next `not_started` phase-8 feature — **feat-047** (depends on feat-005/008/038/041/043/045, all `passing`).
 - **In-flight (uncommitted):** none.
-- **Build status:** green — `./init.sh` 3-layer gate passes (712 Rust + 113 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, smoke test green)
-- **Test status:** green — 712 Rust tests + 113 frontend tests (15 new `test_claude_code_parser_*` in feat-045)
+- **Build status:** green — `./init.sh` 3-layer gate passes (730 Rust + 113 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, smoke test green)
+- **Test status:** green — 730 Rust tests + 113 frontend tests (18 new in feat-046: 9 in `permissions/mod.rs`, 9 in `permissions/claude_code.rs`)
 - **Lint status:** green — clippy clean (default targets), fmt clean, prettier clean, ESLint clean
-- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth. Confirmed green for the feat-044 commit (no flake triggered).
+- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth. Confirmed green for the feat-046 commit (no flake triggered).
 
 ## Next Steps (in order)
 
-1. **Pick the next phase-8 feature.** feat-046 (`PermissionMapper` trait + Claude Code implementation) is the natural successor — depends on feat-005/012/040/041, all `passing`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
+1. **Pick the next phase-8 feature.** feat-047 (CLI-native resume metadata persistence with message-history replay fallback) is the natural successor — depends on feat-005/008/038/041/043/045, all `passing`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
 2. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
