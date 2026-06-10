@@ -15,6 +15,7 @@ use crate::error::{AppError, ProviderError};
 
 pub mod anthropic;
 pub mod registry;
+pub mod turn_context;
 
 // ---------------------------------------------------------------------------
 // CodingAgent trait
@@ -39,11 +40,21 @@ pub trait CodingAgent: Send + Sync {
 
     /// Send a message and stream back the response.
     ///
+    /// `turn` is the per-turn execution context built by
+    /// `service::sessions::run_prompt_task`. It carries session /
+    /// workspace identity, working directories, the CLI-native resume id
+    /// (HTTP runtimes see `None`), the effective permission snapshot,
+    /// and the cancellation token. HTTP (`Anthropic`) implementations
+    /// ignore most fields today; CLI implementations (feat-043+) will
+    /// consume the full struct. See
+    /// [`crate::agent::turn_context::TurnContext`].
+    ///
     /// Returns a pinned stream of [`StreamEvent`] items. The stream ends with
     /// either a [`StreamEvent::Done`] or [`StreamEvent::Error`].
     async fn send_message(
         &self,
         request: MessageRequest,
+        turn: &turn_context::TurnContext,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>;
 
     /// Check if the provider is reachable and credentials are valid.

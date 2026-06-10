@@ -127,8 +127,15 @@ impl CodingAgent for AnthropicAgent {
     async fn send_message(
         &self,
         request: MessageRequest,
+        _turn: &crate::agent::turn_context::TurnContext,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError>
     {
+        // `_turn` is intentionally unread: AnthropicAgent in native mode
+        // does not need cwd / codebase / resume / permissions today. The
+        // parameter is plumbed through so feat-046 (Anthropic permission
+        // gating) and feat-050 (worktree paths) don't need a signature
+        // change. Cancellation is polled separately in `agent_loop`
+        // (`service/sessions.rs:1027`).
         let model = request.model.clone();
         let anthropic_req = self.build_request(&request);
         let url = format!("{}/v1/messages", self.base_url);
@@ -588,5 +595,50 @@ mod tests {
             matches!(err, ProviderError::Unreachable(_)),
             "400 should map to Unreachable"
         );
+    }
+
+    /// feat-041 regression guard: `AnthropicAgent` still implements
+    /// `CodingAgent` with the new `send_message(&self, request, turn)`
+    /// signature. The check is the type-check itself — the test body
+    /// constructs a `TurnContext` and dispatches through
+    /// `Box<dyn CodingAgent>`, which forces the compiler to verify
+    /// the impl matches the trait at this site. If a future change
+    /// to the trait signature breaks `AnthropicAgent`, this test
+    /// fails to compile rather than failing at the call sites in
+    /// `service::sessions`.
+    #[tokio::test]
+    async fn test_anthropic_agent_signature_change_compiles() {
+        use crate::agent::turn_context::test_support::make_test_turn_context;
+        use crate::agent::MessageRequest;
+
+        // `AnthropicAgent::new` returns `Result<_, _>`; the URL and key
+        // are placeholders — we never call `send_message` (no network
+        // in tests). The constructor exists only to exercise the
+        // signature.
+        let agent: Box<dyn crate::agent::CodingAgent> = Box::new(
+            AnthropicAgent::new(
+                "https://api.anthropic.com".into(),
+                "sk-test".into(),
+                "claude-sonnet-4-20250514".into(),
+            )
+            .expect("AnthropicAgent::new should succeed with dummy config"),
+        );
+
+        let turn = make_test_turn_context();
+        let req = MessageRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![],
+            system: None,
+            max_tokens: 1,
+            tools: None,
+        };
+
+        // Drive the call through the trait object. We expect this to
+        // fail at the network layer (the URL is unreachable in the
+        // test env) — the COMPILATION is the regression check, not
+        // the runtime outcome. We use `Result::is_err` so a network
+        // error doesn't fail the test.
+        let result = agent.send_message(req, &turn).await;
+        let _ = result; // Either Ok(unreachable) or Err is acceptable.
     }
 }

@@ -403,6 +403,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _req: crate::agent::MessageRequest,
+                _turn: &crate::agent::turn_context::TurnContext,
             ) -> Result<
                 std::pin::Pin<
                     Box<

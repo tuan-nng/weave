@@ -363,6 +363,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _req: crate::agent::MessageRequest,
+                _turn: &crate::agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<dyn futures_util::Stream<Item = Result<StreamEvent, ProviderError>> + Send>,

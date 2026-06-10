@@ -457,6 +457,44 @@ fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, m
     let _ = SessionStore::update_status(db, session_id, "error");
 }
 
+/// Build a [`TurnContext`] for the given session (feat-041).
+///
+/// The cwd / codebase_root derivation mirrors the canonical rule that
+/// also drives `ToolContext` (above) so the runtime context and the
+/// FS-tool containment boundary agree. `cli_resume_id` is parsed from
+/// `runtime_metadata_json`; a malformed JSON blob is silently swallowed
+/// (opportunistic metadata, not a required key — see
+/// `agent::turn_context` module docs).
+fn build_turn_context(
+    session: &crate::store::sessions::Session,
+    session_cwd: std::path::PathBuf,
+    cancel_token: CancellationToken,
+) -> crate::agent::turn_context::TurnContext {
+    let cli_resume_id: Option<String> = session
+        .runtime_metadata_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| {
+            v.get("cli_resume_id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        });
+
+    crate::agent::turn_context::TurnContext {
+        session_id: session.id.clone(),
+        workspace_id: session.workspace_id.clone(),
+        cwd: session_cwd.clone(),
+        codebase_root: if session.codebase_id.is_some() {
+            Some(session_cwd)
+        } else {
+            None
+        },
+        cli_resume_id,
+        runtime_kind: session.runtime_kind,
+        cancellation_token: cancel_token,
+    }
+}
+
 /// The spawned task that streams the agent response and persists the result.
 async fn run_prompt_task(
     db: Arc<Db>,
@@ -585,10 +623,20 @@ async fn run_prompt_task(
     let tool_ctx = crate::tools::ToolContext {
         session_id: session_id.to_string(),
         workspace_id: session.workspace_id.clone(),
-        cwd: session_cwd,
+        cwd: session_cwd.clone(),
         codebase_root,
         trace_collector: std::sync::Arc::new(trace_collector.clone()),
     };
+
+    // Build the per-turn runtime context (feat-041). The cwd /
+    // codebase_root derivation mirrors `ToolContext` above so the
+    // runtime context and the FS-tool containment boundary agree. The
+    // derivation is in `build_turn_context` so the test at
+    // `test_session_service_passes_turn_context` exercises the same
+    // code path; we keep the builder in `service::sessions` (not in
+    // `agent::turn_context`) so the agent module stays free of a
+    // `store::sessions::Session` upward dependency.
+    let turn_ctx = build_turn_context(&session, session_cwd, cancel_token.clone());
 
     // Drive the model ↔ tool-execution loop. This subsumes the
     // pre-feat-037 single-stream pipeline; tool calls now flow back into
@@ -606,6 +654,7 @@ async fn run_prompt_task(
         tool_defs,
         history,
         tool_ctx,
+        &turn_ctx,
         session.runtime_kind,
         session.mode,
     )
@@ -991,6 +1040,7 @@ async fn agent_loop(
     mut tool_defs: Option<Vec<agent::ToolDefinition>>,
     mut history: Vec<agent::Message>,
     tool_ctx: crate::tools::ToolContext,
+    turn_ctx: &crate::agent::turn_context::TurnContext,
     runtime_kind: agent::RuntimeKind,
     mode: agent::SessionMode,
 ) -> LoopResult {
@@ -1030,15 +1080,23 @@ async fn agent_loop(
             break;
         }
 
-        // Call the agent.
+        // Call the agent. The per-turn context is built once in
+        // `run_prompt_task` and reused across iterations — the cancel
+        // token and session/workspace ids don't change mid-loop. HTTP
+        // (`AnthropicAgent`) implementations ignore every field today;
+        // future `CliCodingAgent` (feat-043+) will read `cwd`,
+        // `cli_resume_id`, and `effective_permissions`.
         let stream = match agent
-            .send_message(agent::MessageRequest {
-                model: model.clone(),
-                messages: history.clone(),
-                system: system_prompt.clone(),
-                max_tokens,
-                tools: tool_defs.clone(),
-            })
+            .send_message(
+                agent::MessageRequest {
+                    model: model.clone(),
+                    messages: history.clone(),
+                    system: system_prompt.clone(),
+                    max_tokens,
+                    tools: tool_defs.clone(),
+                },
+                turn_ctx,
+            )
             .await
         {
             Ok(s) => s,
@@ -1499,9 +1557,22 @@ mod tests {
         Arc::new(Db::open(std::path::Path::new(":memory:")).unwrap())
     }
 
-    /// A mock agent that captures the MessageRequest it receives.
+    /// A mock agent that captures the `MessageRequest` and the
+    /// `TurnContext` it receives (feat-041). Used by
+    /// `test_turn_context_passes_cwd_and_codebase` to assert the
+    /// per-turn context reaches the agent intact.
     struct CapturingAgent {
         captured: Arc<Mutex<Option<MessageRequest>>>,
+        captured_turn: Arc<Mutex<Option<agent::turn_context::TurnContext>>>,
+    }
+
+    impl CapturingAgent {
+        fn new() -> Self {
+            Self {
+                captured: Arc::new(Mutex::new(None)),
+                captured_turn: Arc::new(Mutex::new(None)),
+            }
+        }
     }
 
     #[async_trait]
@@ -1520,6 +1591,7 @@ mod tests {
         async fn send_message(
             &self,
             request: MessageRequest,
+            turn: &agent::turn_context::TurnContext,
         ) -> Result<
             std::pin::Pin<
                 Box<
@@ -1531,6 +1603,7 @@ mod tests {
             crate::error::ProviderError,
         > {
             *self.captured.lock().unwrap() = Some(request);
+            *self.captured_turn.lock().unwrap() = Some(turn.clone());
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             tokio::spawn(async move {
                 let _ = tx
@@ -1950,6 +2023,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2089,6 +2163,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2288,6 +2363,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2453,6 +2529,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2569,6 +2646,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2683,6 +2761,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -2824,6 +2903,7 @@ mod tests {
             async fn send_message(
                 &self,
                 _request: MessageRequest,
+                _turn: &agent::turn_context::TurnContext,
             ) -> Result<
                 Pin<
                     Box<
@@ -3008,7 +3088,8 @@ mod tests {
     async fn test_specialist_system_prompt_injection() {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
-        let captured = Arc::new(Mutex::new(None));
+        let agent = CapturingAgent::new();
+        let captured = Arc::clone(&agent.captured);
         let registry = Arc::new(ProviderRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
@@ -3040,12 +3121,7 @@ You are a senior Rust engineer."#,
             r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
         )
         .unwrap();
-        registry.add_agent(
-            &provider.id,
-            Arc::new(CapturingAgent {
-                captured: Arc::clone(&captured),
-            }),
-        );
+        registry.add_agent(&provider.id, Arc::new(agent));
 
         // Create session WITH specialist_id set
         let session = crate::store::sessions::SessionStore::create(
@@ -3108,7 +3184,8 @@ You are a senior Rust engineer."#,
     async fn test_tool_profile_filtering() {
         let db = test_db();
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
-        let captured = Arc::new(Mutex::new(None));
+        let agent = CapturingAgent::new();
+        let captured = Arc::clone(&agent.captured);
         let registry = Arc::new(ProviderRegistry::new());
         let active = Arc::new(ActiveSessions::new());
         let sse = Arc::new(crate::sse::SseManager::new());
@@ -3152,12 +3229,7 @@ You are a planning specialist."#,
             r#"{"base_url":"http://localhost","api_key":"k","default_model":"mock"}"#,
         )
         .unwrap();
-        registry.add_agent(
-            &provider.id,
-            Arc::new(CapturingAgent {
-                captured: Arc::clone(&captured),
-            }),
-        );
+        registry.add_agent(&provider.id, Arc::new(agent));
 
         // Create session WITH specialist_id set to "planner"
         let session = crate::store::sessions::SessionStore::create(
@@ -3378,6 +3450,7 @@ You are broken."#,
         async fn send_message(
             &self,
             _request: MessageRequest,
+            _turn: &agent::turn_context::TurnContext,
         ) -> Result<
             std::pin::Pin<
                 Box<
@@ -5042,5 +5115,160 @@ You are broken."#,
             }
             other => panic!("expected Validation error, got: {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // feat-041: TurnContext verification
+    // -----------------------------------------------------------------------
+
+    /// `CodingAgent::send_message` receives the `TurnContext` built by
+    /// `run_prompt_task` intact. We bypass `run_prompt_task` (which
+    /// requires a registered provider + active SSE manager) and call the
+    /// trait method directly through `CapturingAgent`, asserting the
+    /// `cwd`, `codebase_root`, `session_id`, and `workspace_id` fields
+    /// match the values we constructed.
+    #[tokio::test]
+    async fn test_turn_context_passes_cwd_and_codebase() {
+        use crate::agent::turn_context::TurnContext;
+        use crate::agent::CodingAgent;
+        use std::path::PathBuf;
+        use tokio_util::sync::CancellationToken;
+
+        let agent = CapturingAgent::new();
+        let agent_arc: Arc<dyn CodingAgent> = Arc::new(CapturingAgent {
+            captured: Arc::clone(&agent.captured),
+            captured_turn: Arc::clone(&agent.captured_turn),
+        });
+
+        let cancel = CancellationToken::new();
+        let turn_ctx = TurnContext {
+            session_id: "s-passes".to_string(),
+            workspace_id: "w-passes".to_string(),
+            cwd: PathBuf::from("/tmp/agent-cwd"),
+            codebase_root: Some(PathBuf::from("/tmp/agent-cwd")),
+            cli_resume_id: Some("cli-resume-1".to_string()),
+            runtime_kind: crate::agent::RuntimeKind::AnthropicApi,
+            cancellation_token: cancel.clone(),
+        };
+
+        let req = MessageRequest {
+            model: "m".into(),
+            messages: vec![],
+            system: None,
+            max_tokens: 1,
+            tools: None,
+        };
+
+        // Drive the call. CapturingAgent returns a stream that emits
+        // `Done(EndTurn)` then closes; we drain it to be polite.
+        let stream = agent_arc
+            .send_message(req, &turn_ctx)
+            .await
+            .expect("CapturingAgent returns Ok");
+        let mut stream = stream;
+        use futures_util::StreamExt;
+        while stream.next().await.is_some() {}
+
+        // The captured TurnContext must match the one we passed in.
+        let captured_turn = agent
+            .captured_turn
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("CapturingAgent should have stored the turn");
+        assert_eq!(captured_turn.session_id, "s-passes");
+        assert_eq!(captured_turn.workspace_id, "w-passes");
+        assert_eq!(captured_turn.cwd, PathBuf::from("/tmp/agent-cwd"));
+        assert_eq!(
+            captured_turn.codebase_root,
+            Some(PathBuf::from("/tmp/agent-cwd"))
+        );
+        assert_eq!(captured_turn.cli_resume_id.as_deref(), Some("cli-resume-1"));
+        assert_eq!(
+            captured_turn.runtime_kind,
+            crate::agent::RuntimeKind::AnthropicApi
+        );
+        assert!(!captured_turn.cancellation_token.is_cancelled());
+
+        // Cancellation propagates from the original token (Arc-shared).
+        cancel.cancel();
+        assert!(captured_turn.cancellation_token.is_cancelled());
+    }
+
+    /// `SessionService` populates the per-turn context from the loaded
+    /// `Session` row: `cwd` and `codebase_root` are derived from
+    /// `session.cwd` and `session.codebase_id`; `cli_resume_id` is
+    /// parsed from `session.runtime_metadata_json` when present and
+    /// `None` otherwise (silent fallback on parse failure —
+    /// opportunistic metadata, not a required key). We exercise the
+    /// derivation logic directly here rather than spinning up the full
+    /// `send_prompt` task (which needs a registered provider, active
+    /// SSE manager, and live tools).
+    #[test]
+    fn test_session_service_passes_turn_context() {
+        use std::path::PathBuf;
+        use tokio_util::sync::CancellationToken;
+
+        // Calls the production `build_turn_context` builder. The cwd
+        // canonicalization (`session.cwd` or ".") is owned by
+        // `run_prompt_task`; the test passes a pre-computed `PathBuf`
+        // matching what the call site would supply.
+        let cancel = CancellationToken::new();
+        let build = |session: &crate::store::sessions::Session, cwd: PathBuf| {
+            super::build_turn_context(session, cwd, cancel.clone())
+        };
+
+        // Case 1: bound session, no metadata — `codebase_root` is Some,
+        // `cli_resume_id` is None.
+        let mut session = crate::store::sessions::Session {
+            id: "s-bound".into(),
+            workspace_id: "w-1".into(),
+            provider_id: "p-1".into(),
+            specialist_id: None,
+            parent_session_id: None,
+            context_id: None,
+            status: "ready".into(),
+            model: None,
+            cwd: Some("/tmp/proj".into()),
+            codebase_id: Some("cb-1".into()),
+            runtime_kind: crate::agent::RuntimeKind::AnthropicApi,
+            mode: crate::agent::SessionMode::Native,
+            runtime_metadata_json: None,
+            created_at: "2026-06-10T00:00:00Z".into(),
+            updated_at: "2026-06-10T00:00:00Z".into(),
+        };
+        let ctx = build(&session, PathBuf::from("/tmp/proj"));
+        assert_eq!(ctx.session_id, "s-bound");
+        assert_eq!(ctx.cwd, PathBuf::from("/tmp/proj"));
+        assert_eq!(ctx.codebase_root, Some(PathBuf::from("/tmp/proj")));
+        assert_eq!(ctx.cli_resume_id, None);
+        assert_eq!(ctx.runtime_kind, crate::agent::RuntimeKind::AnthropicApi);
+
+        // Case 2: unbound session (HTTP), metadata present and well-formed
+        // — `codebase_root` is None, `cli_resume_id` is Some.
+        session.codebase_id = None;
+        session.runtime_metadata_json = Some(r#"{"cli_resume_id":"res-abc"}"#.into());
+        let ctx = build(&session, PathBuf::from("/tmp/proj"));
+        assert_eq!(ctx.codebase_root, None);
+        assert_eq!(ctx.cli_resume_id.as_deref(), Some("res-abc"));
+
+        // Case 3: malformed JSON — `cli_resume_id` is None (silent).
+        session.runtime_metadata_json = Some("not-json".into());
+        let ctx = build(&session, PathBuf::from("/tmp/proj"));
+        assert_eq!(ctx.cli_resume_id, None);
+
+        // Case 4: well-formed JSON, no `cli_resume_id` key — None.
+        session.runtime_metadata_json = Some(r#"{"other_key":"v"}"#.into());
+        let ctx = build(&session, PathBuf::from("/tmp/proj"));
+        assert_eq!(ctx.cli_resume_id, None);
+
+        // Case 5: session with no cwd — call site would pass "."; the
+        // builder trusts the caller's canonicalization.
+        session.cwd = None;
+        session.codebase_id = None;
+        session.runtime_metadata_json = None;
+        let ctx = build(&session, PathBuf::from("."));
+        assert_eq!(ctx.cwd, PathBuf::from("."));
+        assert_eq!(ctx.codebase_root, None);
     }
 }
