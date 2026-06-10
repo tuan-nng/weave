@@ -595,7 +595,7 @@ The existing `cli_runner::tests` had a private `run_with_timeout` helper. The ne
 
 ---
 
-### feat-045 — Claude Code stream-json parser (phase-8, verification green, uncommitted)
+### feat-045 — Claude Code stream-json parser (phase-8, verification green, committed 5ce96f0)
 
 Phase 8 of the multi-runtime strategy. The Claude Code `stream-json` parser: a synchronous state machine that consumes one JSON line per call and returns 0+ `StreamEvent`s. Lives in a new `claude_code/` subdir (`mod.rs` + `parser.rs` + `parser_test.rs`, ~1079 lines total) with a 1-line `pub mod claude_code;` added to `agent/mod.rs`. Wires the fake CLI from feat-044 into the Weave `StreamEvent` vocabulary; the runner from feat-043 feeds the line stream; the journey translator (feat-048) will consume the events.
 
