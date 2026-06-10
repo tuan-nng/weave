@@ -7,6 +7,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::agent::anthropic::AnthropicAgent;
+use crate::agent::model_cache::ModelCache;
 use crate::agent::CodingAgent;
 use crate::db::Db;
 use crate::error::{AppError, ProviderError};
@@ -29,6 +30,11 @@ pub struct ProviderRegistry {
     /// 10s-TTL cache of the last `cached_health_summary` call. Each
     /// `AppState` (and each test) gets its own cache via `new()`.
     health_cache: Mutex<HealthCache>,
+    /// 5-min-TTL cache of per-provider model lists (feat-042). Mirrors
+    /// `HealthCache` discipline: invalidated from `add_agent` and
+    /// `remove_agent` so the cache never holds a stale entry for a
+    /// provider that just left the registry.
+    model_cache: ModelCache,
 }
 
 /// Cached result of a `cached_health_summary` probe. `fetched_at` is
@@ -51,6 +57,7 @@ impl ProviderRegistry {
                 fetched_at: None,
                 snapshot: Vec::new(),
             }),
+            model_cache: ModelCache::new(),
         }
     }
 
@@ -103,22 +110,30 @@ impl ProviderRegistry {
     ///
     /// Invalidates the health cache so the next `cached_health_summary`
     /// call re-probes (otherwise the new provider would be invisible
-    /// for up to 10s).
+    /// for up to 10s). Also invalidates the model cache (feat-042) so
+    /// a stale entry from a prior provider row with the same id can
+    /// never leak through.
     pub fn add_agent(&self, provider_id: &str, agent: Arc<dyn CodingAgent>) {
         let mut map = self.agents.lock().expect("registry lock poisoned");
         map.insert(provider_id.to_string(), agent);
+        drop(map);
         self.invalidate_health_cache();
+        self.model_cache.invalidate(provider_id);
     }
 
     /// Remove an agent (called after DB delete).
     ///
     /// Invalidates the health cache so the next `cached_health_summary`
     /// call re-probes (otherwise the removed provider would still
-    /// appear in `total` for up to 10s).
+    /// appear in `total` for up to 10s). Also invalidates the model
+    /// cache (feat-042) so the removed provider's cached model list
+    /// does not outlive its row.
     pub fn remove_agent(&self, provider_id: &str) {
         let mut map = self.agents.lock().expect("registry lock poisoned");
         map.remove(provider_id);
+        drop(map);
         self.invalidate_health_cache();
+        self.model_cache.invalidate(provider_id);
     }
 
     /// Return count of loaded agents.
@@ -194,6 +209,35 @@ impl ProviderRegistry {
         if let Ok(mut cache) = self.health_cache.lock() {
             cache.fetched_at = None;
         }
+    }
+
+    // ---- Model cache accessors (feat-042) ----
+
+    /// Look up the cached model list for `provider_id`. Returns
+    /// `Some((models, fresh))` if an entry exists, `None` otherwise.
+    /// `fresh` is `true` when the entry is younger than the cache TTL.
+    pub(crate) fn get_cached_models(
+        &self,
+        provider_id: &str,
+    ) -> Option<(Vec<crate::agent::ModelInfo>, bool)> {
+        self.model_cache.get(provider_id)
+    }
+
+    /// Store the freshly-fetched model list for `provider_id`. Overwrites
+    /// any existing entry.
+    pub(crate) fn put_cached_models(
+        &self,
+        provider_id: &str,
+        models: Vec<crate::agent::ModelInfo>,
+    ) {
+        self.model_cache.put(provider_id, models);
+    }
+
+    /// Invalidate the model-cache entry for `provider_id`. No-op if
+    /// absent. Exposed for the explicit `POST .../models` refresh
+    /// endpoint, which wants to drop a stale entry before re-fetching.
+    pub(crate) fn invalidate_models(&self, provider_id: &str) {
+        self.model_cache.invalidate(provider_id);
     }
 
     /// Create an agent instance from provider type and config_json.
@@ -456,6 +500,63 @@ mod tests {
             calls.load(Ordering::SeqCst),
             2,
             "registry mutation should invalidate cache"
+        );
+    }
+
+    /// 3. (feat-042 verification) `add_agent` and `remove_agent` both
+    /// invalidate the model-cache entry for the touched provider. This
+    /// is the symmetry test: put an entry, mutate the registry, the
+    /// entry must be gone. Without this wiring, a stale model list
+    /// from a prior provider row with the same id would leak through
+    /// for up to 5 minutes after the row was deleted.
+    #[test]
+    fn test_model_cache_invalidation_on_add_remove() {
+        use crate::agent::ModelInfo;
+
+        let registry = ProviderRegistry::new();
+        let agent = AnthropicAgent::new(
+            "https://api.anthropic.com".into(),
+            "sk-test".into(),
+            "claude-sonnet-4-20250514".into(),
+        )
+        .unwrap();
+
+        // Baseline: cache is empty.
+        assert!(registry.get_cached_models("p1").is_none());
+
+        // Put an entry directly via the registry accessor.
+        registry.put_cached_models(
+            "p1",
+            vec![ModelInfo {
+                id: "stale".into(),
+                name: "Stale".into(),
+                context_window: 1,
+            }],
+        );
+        assert!(registry.get_cached_models("p1").is_some());
+
+        // add_agent must drop the entry.
+        registry.add_agent("p1", Arc::new(agent));
+        assert!(
+            registry.get_cached_models("p1").is_none(),
+            "add_agent must invalidate the model cache"
+        );
+
+        // Re-populate, then remove_agent must also drop the entry.
+        registry.put_cached_models(
+            "p1",
+            vec![ModelInfo {
+                id: "stale-2".into(),
+                name: "Stale 2".into(),
+                context_window: 2,
+            }],
+        );
+        assert!(registry.get_cached_models("p1").is_some());
+
+        registry.remove_agent("p1");
+        assert!(
+            registry.get_cached_models("p1").is_none(),
+            "remove_agent must invalidate the model cache"
         );
     }
 }

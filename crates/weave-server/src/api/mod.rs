@@ -46,7 +46,7 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
         )
         .route(
             "/api/providers/{id}/models",
-            get(providers::list_provider_models),
+            get(providers::list_provider_models).post(providers::refresh_provider_models),
         )
         // Specialist routes
         .route("/api/specialists", get(specialists::list_specialists))

@@ -15,6 +15,71 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-042 — Per-Runtime-Tool model cache (phase-7)
+
+New `ModelCache` on `ProviderRegistry` (5-min TTL) mirrors the existing 10s `HealthCache` discipline: lives on the registry, invalidated on add/remove, owned by one struct, not by `AppState`. Free function `list_cli_models_via_shell` invokes the registered CLI binary with `--list-models`, parses the JSON output, and the cache write happens on the return path. New `POST /api/providers/:id/models` refresh endpoint for CLI providers; HTTP providers are rejected with 400 `invalid_kind` to keep the API symmetric. The pre-feat-042 `test_provider_cli_row_not_yet_dispatchable` (which asserted 501 + literal "feat-042" string) was deleted and replaced by `test_model_cache_miss_shells_out` which exercises the same HTTP path now that CLI rows ARE dispatchable.
+
+**Architecture decision (Clean)**
+
+Selected the "Clean: new `model_cache.rs` file" approach over the "Minimal: extend existing `HealthCache` in `registry.rs`" approach. The cache is a distinct concept (model lists, not health) with distinct TTL (5 min vs 10 s) and distinct data shape (Vec<ModelInfo> vs Vec<bool>). Co-locating with `HealthCache` would conflate two caches with different lifecycles; a new module + a new field on `ProviderRegistry` keeps the registry as the single coordination point without coupling the caches. The `list_cli_models_via_shell` free function is intentionally NOT a method on `ModelCache` so the future `CliCodingAgent::list_models` (feat-051) can call it without taking a cache reference — a 3-line wrapper.
+
+**Quality review (parallel agents, user picked "Fix security+cleanup")**
+
+Three reviewers ran in parallel — simplicity/DRY, correctness/security, conventions. Findings clustered into security + cleanup buckets; user picked "Fix security+cleanup" which applied seven fixes:
+
+1. **Bounded stdout read enforced DURING the read** (correctness). The 1 MiB cap was checked after `wait_with_output` collected the entire buffer into a heap `Vec<u8>`, so a 4 GB-emitting binary would OOM the server before the cap check ran. Wrote a custom `read_bounded<R: AsyncRead + Unpin>(reader, max_bytes)` helper that keeps at most `max_bytes` in a buffer while still draining the pipe past the cap (so the child never blocks on write). Two follow-up test assertions: `test_read_bounded_drops_bytes_past_cap` (unit test against a `Cursor`) and `test_list_cli_models_via_shell_timeout_kills_child` (integration; child sleeps 30s, test asserts return in <20s).
+
+2. **killpg on timeout** (correctness). Switched from `child.wait_with_output()` to `child.wait()` so we can call `killpg(SIGKILL)` on timeout (mirrors `tools::shell::ShellExecTool` precedent at `shell.rs:200-214`). Prior code only killed the direct child via `kill_on_drop`; grandchildren spawned by the binary would survive, hold the pipes open, and keep doing work. Doc comment claim of "matches the policy in `tools::shell::ShellExecTool`" was false before the fix.
+
+3. **Reject relative `binary_path` at create time** (conventions). `create_cli_provider` accepted any non-empty path; the shell-out in `list_cli_models_via_shell` calls `Command::new(binary)` with no `current_dir`, so a relative path like `claude` would resolve against the server's cwd — surprising. Added `if !Path::new(binary_path.trim()).is_absolute() { return 400 invalid_field }`. New assertion inside `test_provider_kind_validation` exercises the rejection.
+
+4. **Replaced in-line `truncate_cli_stderr` with `tools::truncate_bytes`** (simplicity). Identical UTF-8-boundary logic in two places. `truncate_bytes` is `pub(crate)` and reachable from `agent/`. Net: -10 lines.
+
+5. **Deleted dead `invalidate_all` / `len` / `is_empty`** (simplicity). No caller today; the symmetry claim ("mirrors `HealthCache::invalidate_health_cache`") was miscited — `HealthCache` does not have an `invalidate_all`. Three tests (`test_model_cache_invalidate_missing_key`, `test_model_cache_invalidate_all`, `test_model_cache_default_ttl`) deleted as collateral. Net: -15 lines.
+
+6. **Tightened cache accessor visibility from `pub` to `pub(crate)`** (simplicity). `get_cached_models` / `put_cached_models` / `invalidate_models` exist solely so the API layer can reach the cache through `state.registry`; no external caller. `pub(crate)` matches the `HealthCache` discipline and prevents future external dependencies on a mutable cache map.
+
+7. **Collapsed module-level doc from 5 sections to 3** (conventions). The `turn_context.rs:1-37` precedent uses 3 short sections (`Populated by` / `Consumed by`); my first cut had 5 (`Why a cache?` / `Where the cache lives` / `Persistence` / `Concurrency` / `TTL vs health-cache TTL`). The `Concurrency` section was implementation trivia that belongs on the impl, not at module level. The `Where the cache lives` section was wiring, not module-level API. The `TTL vs health-cache TTL` section duplicated the constant doc. New module doc is `Why` / `Lifetime` / `Concurrency contract`.
+
+**One finding deferred**: `env_json` is parsed and persisted by `create_cli_provider` but NOT passed to the child. The reviewer flagged this as a footgun — operator-set env vars the user expected to see are silently dropped. Two correct paths: (a) actually pass it with an allowlist, or (b) drop from the wire. Both are out of scope for feat-042. Added a doc comment in `list_cli_models_via_shell` noting that `env_json` is intentionally NOT passed and feat-051 will wire it with a proper allowlist that rejects `LD_PRELOAD` / `PATH`. Defer the actual wiring to feat-051.
+
+**One finding noted but not fixed**: `args_json` runtime parse failure now surfaces as a 502 `Unreachable` instead of a silent warn-and-fallback. The create-time validation makes this a data-integrity bug worth surfacing.
+
+**Files touched (4 modified, 1 new)**
+
+**New:**
+- `crates/weave-server/src/agent/model_cache.rs` (~550 lines including 13 tests) — `ModelCache` struct, free function `list_cli_models_via_shell`, `read_bounded` helper, `kill_process_group_tree` Unix-only helper.
+
+**Modified:**
+- `crates/weave-server/src/agent/mod.rs` — `pub mod model_cache;` (1 line).
+- `crates/weave-server/src/agent/registry.rs` — `model_cache: ModelCache` field on `ProviderRegistry` (mirrors `health_cache` field); `add_agent` and `remove_agent` now invalidate the model cache after the agents-map mutation; new `pub(crate)` accessors `get_cached_models` / `put_cached_models` / `invalidate_models`; new test `test_model_cache_invalidation_on_add_remove`.
+- `crates/weave-server/src/api/providers.rs` — `list_provider_models` rewritten as cache-aware kind-dispatching handler (was 501 short-circuit on kind=cli); new `refresh_provider_models` handler (POST); `create_cli_provider` validates `binary_path` is absolute; 3 new tests; `test_provider_cli_row_not_yet_dispatchable` deleted.
+- `crates/weave-server/src/api/mod.rs` — extended route: `.get(list_provider_models).post(refresh_provider_models)` (1 line change).
+- `feature_list.json` — `feat-042` flipped to `passing` with full evidence paragraph.
+- `PROGRESS.md` — current state section updated with feat-042 evidence; out-of-scope list extended.
+
+**Verification**
+
+- 6 spec-named verification tests pass: `test_model_cache_hit`, `test_model_cache_miss_shells_out`, `test_model_cache_invalidation_on_add_remove`, `test_model_cache_refresh_endpoint`, `test_model_cache_refresh_rejected_for_http`, `test_model_cache_ttl_expiry`.
+- 7 supporting tests in `agent/model_cache.rs` cover: invalidate contract, wrapped JSON shape, nonzero exit, missing binary, unparseable stdout, timeout kills child, read_bounded drops bytes past cap.
+- 1 supporting test in `api/providers.rs` covers the relative-binary_path rejection inside `test_provider_kind_validation`.
+- Full `./init.sh` 3-layer gate green from the committed tree: 677 Rust tests + 113 frontend tests, clippy clean, `cargo fmt --check` clean, server starts, `/api/health` 200, `GET /` serves index.html, graceful shutdown.
+
+**Key decisions made this session:**
+
+- **Cache lives on `ProviderRegistry`, not `AppState`** — mirrors the `HealthCache` precedent, keeps the registry as the single coordination point for cache invalidation when the agent map mutates. Zero field proliferation in `AppState`.
+- **`list_cli_models_via_shell` is a free function, not a method on `ModelCache` or `ProviderRegistry`** — future `CliCodingAgent::list_models` (feat-051) will be a 3-line wrapper that doesn't take a cache reference.
+- **HTTP refresh endpoint rejected with 400 `invalid_kind`** — keeps the API symmetric. The HTTP runtime's `list_models` is the single source of truth; there is no "refresh" path because the agent's call is cheap. The CLI path is expensive (binary spawn) so it earns a refresh.
+- **`env_json` is intentionally NOT passed to the child in feat-042** — feat-051 will wire it with a proper allowlist. Today the child inherits the Weave process's env, which is the safe-by-default choice.
+- **`args_json` runtime parse failure surfaces as 502** — was warn-and-fallback, now error. The create-time validation guarantees the row is well-formed; a runtime parse failure is a data-integrity bug worth surfacing.
+
+**Out-of-scope items noticed (deferred):**
+
+- `env_json` wiring with allowlist → feat-051 (CLI dispatch adapter).
+- `test_provider_migration_backfills_http` (api/providers.rs:1182-1256) uses a fixed-path TempDir (`std::env::temp_dir().join("weave-test-migration-backfill.db")`) which could flake under parallel execution (same pattern as the precommit-hook git-tool test flake from feat-041). Pre-existing; not a regression introduced by feat-042. Fix in a follow-up: switch to `tempfile::TempDir::new().unwrap().into_path()` or include a UUID.
+
+---
+
 ### feat-041 — TurnContext extension to CodingAgent trait (committed `b30cd62`)
 
 Phase 7 of the multi-runtime strategy. The `CodingAgent` trait now threads a per-turn `TurnContext` through `send_message`, so future CLI runtimes (feat-043+) can consume cwd, codebase_root, cli_resume_id, runtime_kind, and the cancellation token. The HTTP `AnthropicAgent` accepts the parameter as `_turn` and ignores it.

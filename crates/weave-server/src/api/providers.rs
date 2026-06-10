@@ -3,7 +3,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::Path as FsPath;
 
+use crate::agent::model_cache::list_cli_models_via_shell;
 use crate::api::responses::DataResponse;
 use crate::error::AppError;
 use crate::store::providers::{Provider, ProviderStore};
@@ -169,8 +171,20 @@ fn create_cli_provider(
     if default_model.trim().is_empty() {
         return Err(AppError::validation("default_model must not be empty"));
     }
-    if binary_path.trim().is_empty() {
+    let binary_path_trimmed = binary_path.trim();
+    if binary_path_trimmed.is_empty() {
         return Err(AppError::validation("binary_path must not be empty"));
+    }
+    // The shell-out in `list_cli_models_via_shell` invokes
+    // `Command::new(binary)` with no `current_dir`, so a relative
+    // path would resolve against the server's cwd — surprising and
+    // not what an operator expects. Require an absolute path so the
+    // row is unambiguous regardless of where the server was started.
+    if !FsPath::new(binary_path_trimmed).is_absolute() {
+        return Err(AppError::validation_with_code(
+            "invalid_field",
+            format!("binary_path must be an absolute path: '{binary_path_trimmed}'"),
+        ));
     }
     if permission_mode.trim().is_empty() {
         return Err(AppError::validation("permission_mode must not be empty"));
@@ -211,7 +225,7 @@ fn create_cli_provider(
         &body.provider_type,
         name,
         default_model.trim(),
-        binary_path.trim(),
+        binary_path_trimmed,
         &args_json_canonical,
         &env_json_canonical,
         permission_mode.trim(),
@@ -244,24 +258,81 @@ pub async fn delete_provider(
 
 /// GET /api/providers/{id}/models
 ///
-/// `kind="cli"` rows return 501 `NotImplemented` — the CLI model list
-/// lands in feat-042 (per-adapter model cache) and is intentionally not
-/// in feat-039 scope.
+/// Cache-aware model list. On a hit (any age), returns the cached
+/// `Vec<ModelInfo>` without invoking the underlying agent or shelling
+/// out. On a miss, fetches fresh and stores the result. `kind="http"`
+/// rows fetch via the registered agent (the `AnthropicAgent` returns
+/// `Ok(vec![])` today — the cache makes the stub cheap to call
+/// repeatedly). `kind="cli"` rows shell out to the registered binary
+/// with `<binary_path> <args_json...> --list-models` and parse the
+/// JSON stdout.
 pub async fn list_provider_models(
     axum::Extension(state): axum::Extension<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<DataResponse<Vec<crate::agent::ModelInfo>>>, AppError> {
-    // Short-circuit on kind BEFORE looking up the agent so CLI rows
-    // produce a clear 501 rather than a spurious 404 from the registry.
     let provider = ProviderStore::get_by_id(&state.db, &id)?;
-    if provider.kind == "cli" {
-        return Err(AppError::NotImplemented(
-            "CLI model list not available until feat-042".to_string(),
+
+    // Cache hit (fresh or stale) short-circuits both code paths — the
+    // public surface returns the same `Vec<ModelInfo>` either way; the
+    // freshness flag is internal to the cache.
+    if let Some((models, _fresh)) = state.registry.get_cached_models(&id) {
+        return Ok(Json(DataResponse { data: models }));
+    }
+
+    let models = match provider.kind.as_str() {
+        "http" => {
+            let agent = state.registry.get_agent(&id)?;
+            agent.list_models().await?
+        }
+        "cli" => list_cli_models_via_shell(&provider).await?,
+        other => {
+            return Err(AppError::validation_with_code(
+                "invalid_kind",
+                format!("unsupported kind: '{other}' (only 'http' and 'cli' supported)"),
+            ));
+        }
+    };
+
+    state.registry.put_cached_models(&id, models.clone());
+    Ok(Json(DataResponse { data: models }))
+}
+
+/// POST /api/providers/{id}/models — force-refresh the model-cache
+/// entry for `provider_id`. Rejects `kind="http"` rows with a 400
+/// (`AppError::validation_with_code("invalid_kind", ...)`) so the API
+/// is symmetric: there is no "refresh" path for HTTP runtimes because
+/// the registry's agent is the single source of truth, and the agent's
+/// `list_models` is cheap to call (Anthropic's HTTP call is the
+/// expensive side, and that lives outside this slice).
+///
+/// For `kind="cli"` rows, drops the cached entry, re-shells-out, and
+/// stores the fresh result. Returns the fresh `Vec<ModelInfo>` in the
+/// 200 body so the caller can update its UI without a second GET.
+pub async fn refresh_provider_models(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DataResponse<Vec<crate::agent::ModelInfo>>>, AppError> {
+    let provider = ProviderStore::get_by_id(&state.db, &id)?;
+
+    if provider.kind != "cli" {
+        return Err(AppError::validation_with_code(
+            "invalid_kind",
+            format!(
+                "POST /api/providers/:id/models only supports kind=cli; \
+                 this provider is kind={}",
+                provider.kind
+            ),
         ));
     }
 
-    let agent = state.registry.get_agent(&id)?;
-    let models = agent.list_models().await?;
+    // Drop the cached entry (no-op if absent).
+    state.registry.invalidate_models(&id);
+
+    // Re-shell-out fresh. The shell-out maps shell failures to
+    // `ProviderError`, which the IntoResponse impl renders as 502
+    // (`provider_error`).
+    let models = list_cli_models_via_shell(&provider).await?;
+    state.registry.put_cached_models(&id, models.clone());
     Ok(Json(DataResponse { data: models }))
 }
 
@@ -322,7 +393,7 @@ mod tests {
             )
             .route(
                 "/api/providers/{id}/models",
-                axum::routing::get(list_provider_models),
+                axum::routing::get(list_provider_models).post(refresh_provider_models),
             )
             .layer(axum::Extension(state))
             .layer(axum::Extension(start_time))
@@ -1020,6 +1091,7 @@ mod tests {
             "args_json": "not-json"
         }"#;
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1043,6 +1115,40 @@ mod tests {
         assert!(
             msg.contains("args_json"),
             "error message should name the offending field: {msg}"
+        );
+
+        // kind=cli with relative binary_path → 400 invalid_field
+        // (feat-042 hardening: the shell-out resolves against the
+        // server's cwd, so relative paths are an ambiguity footgun).
+        let body = r#"{
+            "kind": "cli",
+            "type": "anthropic",
+            "name": "Bad",
+            "default_model": "m",
+            "binary_path": "claude",
+            "permission_mode": "default"
+        }"#;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_json = extract_json(&resp_body);
+        assert_eq!(resp_json["error"]["code"], "invalid_field");
+        let msg = resp_json["error"]["message"].as_str().unwrap();
+        assert!(
+            msg.contains("absolute"),
+            "error message should mention absolute path: {msg}"
         );
     }
 
@@ -1197,13 +1303,48 @@ mod tests {
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 
-    /// 6. CLI rows can be created but are not yet dispatchable; the
-    /// `GET /api/providers/:id/models` endpoint returns 501.
+    /// 6. CLI rows ARE dispatchable as of feat-042: the
+    /// `GET /api/providers/:id/models` endpoint shells out to the
+    /// registered binary and returns the parsed model list. Replaces
+    /// the pre-feat-042 `test_provider_cli_row_not_yet_dispatchable`
+    /// (which asserted a 501 and a literal "feat-042" string).
     #[tokio::test]
-    async fn test_provider_cli_row_not_yet_dispatchable() {
+    async fn test_model_cache_miss_shells_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The CLI row's binary path is set via the create_provider
+        // endpoint, which validates `binary_path` is non-empty but does
+        // NOT check that the binary exists (that lands in feat-051's
+        // dispatch adapter). The test therefore points the row at a
+        // tempfile bash script that emits the canonical bare-array
+        // shape.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script_path = tmp.path().join("fake_cli.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\n\
+             echo '[{\"id\":\"a\",\"name\":\"A\",\"context_window\":1000},{\"id\":\"b\",\"name\":\"B\",\"context_window\":2000}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cli_body_with_binary = format!(
+            r#"{{
+                "kind": "cli",
+                "type": "anthropic",
+                "name": "My Claude Code",
+                "default_model": "claude-sonnet-4-5",
+                "binary_path": "{}",
+                "args_json": "[]",
+                "env_json": "{{}}",
+                "permission_mode": "accept-edits"
+            }}"#,
+            script_path.display()
+        );
+
         let app = test_app();
 
-        // Create CLI row
+        // Create the CLI row.
         let response = app
             .clone()
             .oneshot(
@@ -1211,7 +1352,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/providers")
                     .header("content-type", "application/json")
-                    .body(Body::from(cli_body()))
+                    .body(Body::from(cli_body_with_binary))
                     .unwrap(),
             )
             .await
@@ -1223,7 +1364,136 @@ mod tests {
         let json = extract_json(&body);
         let provider_id = json["data"]["id"].as_str().unwrap().to_string();
 
-        // GET models on a CLI row returns 501
+        // GET models — first call is a cache miss, must shell out.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/providers/{}/models", provider_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        let models = json["data"].as_array().unwrap();
+        assert_eq!(
+            models.len(),
+            2,
+            "shell-out must yield the two model entries"
+        );
+        assert_eq!(models[0]["id"], "a");
+        assert_eq!(models[1]["context_window"], 2000);
+    }
+
+    /// 4. (feat-042 verification) `POST /api/providers/:id/models`
+    /// force-refreshes the cache for a CLI row and returns the fresh
+    /// model list. After a refresh that re-shells-out with a different
+    /// script, the second GET returns the new models (cache was
+    /// updated by the refresh, not just invalidated).
+    #[tokio::test]
+    async fn test_model_cache_refresh_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let script_path = tmp.path().join("fake_cli.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\n\
+             echo '[{\"id\":\"v1\",\"name\":\"V1\",\"context_window\":1000}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cli_body_with_binary = format!(
+            r#"{{
+                "kind": "cli",
+                "type": "anthropic",
+                "name": "Refresher",
+                "default_model": "m",
+                "binary_path": "{}",
+                "args_json": "[]",
+                "env_json": "{{}}",
+                "permission_mode": "default"
+            }}"#,
+            script_path.display()
+        );
+
+        let app = test_app();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(cli_body_with_binary))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let provider_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Prime the cache with v1.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/providers/{}/models", provider_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(json["data"][0]["id"], "v1");
+
+        // Rewrite the script to emit v2.
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\n\
+             echo '[{\"id\":\"v2\",\"name\":\"V2\",\"context_window\":2000}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // POST refresh — drops the cached entry, re-shells-out, stores v2.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/providers/{}/models", provider_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(
+            json["data"][0]["id"], "v2",
+            "refresh body must return the fresh model list"
+        );
+
+        // Subsequent GET returns v2 (cache was updated, not just dropped).
         let response = app
             .oneshot(
                 Request::builder()
@@ -1233,16 +1503,63 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let json = extract_json(&body);
-        assert_eq!(json["error"]["code"], "not_implemented");
-        assert!(json["error"]["message"]
+        assert_eq!(
+            json["data"][0]["id"], "v2",
+            "GET after refresh must return the refreshed model list"
+        );
+    }
+
+    /// 5. (feat-042 verification) `POST /api/providers/:id/models`
+    /// rejects `kind="http"` rows with a 400 carrying the
+    /// `invalid_kind` code. The endpoint is CLI-only by design — the
+    /// HTTP runtime has no shell-out to refresh.
+    #[tokio::test]
+    async fn test_model_cache_refresh_rejected_for_http() {
+        let app = test_app();
+
+        // Create an HTTP provider.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let provider_id = extract_json(&body)["data"]["id"]
             .as_str()
             .unwrap()
-            .contains("feat-042"));
+            .to_string();
+
+        // POST /models is rejected for HTTP.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/providers/{}/models", provider_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(json["error"]["code"], "invalid_kind");
     }
 
     /// 7. DELETE on a CLI provider that has referencing sessions
