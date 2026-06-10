@@ -36,6 +36,7 @@ If baseline verification is failing, repair that first. Do not stack new work on
 
 - **WIP = 1.** Exactly one feature in `active` state at any time. Pick from `feature_list.json`.
 - **Verification gates state.** A feature moves from `active` to `passing` only after its verification command succeeds. The agent does not edit state directly.
+- **State file lifecycle.** `PROGRESS.md` is a **rolling** file, target ~80 lines. After committing a feature/fix, move its detailed journal entry to `PROGRESS-archive.md`. `PROGRESS.md` holds only: `## Current State` + `## Next Steps` + quick architectural pointer + active out-of-scope list. `PROGRESS-archive.md` holds the full session entry, the completed-features list, and the session-notes timeline (append-only — never delete historical entries). If `PROGRESS-archive.md` grows beyond ~1500 lines, split by quarter (e.g. `PROGRESS-archive-2026-Q2.md` with the latest quarter always in `PROGRESS-archive.md`).
 - **No refactoring before core verification.** Functional correctness first, then performance, then style.
 - **Stay in scope.** Do not modify files unrelated to the active feature. If you find an unrelated issue, log it in `PROGRESS.md` under "Out-of-Scope Items Noticed" — do not fix it inline.
 - **Leave clean state.** Every session ends with the exit checklist green (see below).
