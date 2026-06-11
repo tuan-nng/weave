@@ -15,6 +15,78 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-051 — `ClaudeCodeCodingAgent` end-to-end (phase-8)
+
+Phase 8 deliverable. Wires the first CLI Runtime Tool end-to-end: `ClaudeCodeCodingAgent` implements the `CodingAgent` trait, integrating every prior Phase-7/8 component into a single per-turn path. Five components converge inside `send_message`: `CliRunner` (feat-043) spawns the per-turn subprocess; `ClaudeCodeStreamParser` (feat-045) parses `stream-json` lines into the universal `StreamEvent` contract; `ClaudeCodePermissionMapper` (feat-046) injects `--permission-mode <profile>` and the `WEAVE_TOOL_ALLOWLIST` metadata env var; `JourneyTranslator` (feat-048) maps `StreamEvent`s to `TraceEvent`s; feat-047 resume metadata (the parser-captured `session_id` and the runner-detected `did_reject` flag) flows back to `run_prompt_task` via a side-channel `Arc<Mutex<HashMap<session_id, TurnOutcome>>>` on `ProviderRegistry` (consumed via `take_turn_outcome` so the map doesn't leak). The side-channel is the key shape decision: the `CodingAgent` trait stays narrow (single `Stream` return value) while the agent's spawned task writes per-turn metadata for the loop driver to read after the stream returns.
+
+**Architecture decisions (user picked all 4 recommended options)**
+
+Four clarifying questions were presented to the user before implementation. All four were answered with the recommended option:
+- **Tool execution shape** — runtime-aware branch in `agent_loop` (no separate tool loop for CLI runtimes; the CLI itself runs the tools, and the journey translator maps the resulting `ToolUseStart` / `ToolResult` events).
+- **Replay policy** — current turn fails, next turn replays (`ResumeState::Replayed`).
+- **Kanban wiring** — yes, honor CLI providers (`try_automate_lane` reads `provider.kind` to set `runtime_kind=claude-code` and `mode=wrapped`).
+- **Permission mapper** — yes, wire the mapper (was completed via `build_turn_context` taking `&SpecialistRegistry` and applying `ClaudeCodePermissionMapper`).
+
+**Phase 4 (architecture) — ProviderConfig widening**
+
+`ProviderConfig` (in `agent/registry.rs`) widened from a `Http { base_url, api_key, default_model }` struct to an untagged enum: `Http { base_url, api_key, default_model } | Cli { default_model, binary_path, args_json, env_json, permission_mode }`. The untagged form keeps the existing HTTP row's JSON shape stable; the `Cli` variant's fields are marked `#[allow(dead_code)]` for v1 because the registry still dispatches by binary basename rather than by `provider_type`. Future runtimes (Codex, OpenCode) add new `Cli`-variant rows with a different `provider_type` and a different basename.
+
+**Files touched (actual)**
+
+- **NEW** `crates/weave-server/src/agent/claude_code/agent.rs` (~730 LoC, 4 unit tests) — `ClaudeCodeCodingAgent` struct, `impl CodingAgent`, `extract_text` helper, `build_args` / `build_env` / `build_invocation` helpers, a `ReceiverStream<T>` wrapper mirroring the `agent::anthropic::mod` precedent. The `parser.drain_pending()` call replaces the previous `parser.flush()` shim in both the `Success` and `ExitError` branches (Phase-6 review fix).
+- **NEW** `crates/weave-server/src/service/sessions_wrapped_tests.rs` (478 LoC, 7 e2e tests + 1 sanity check) — the spec's 7 e2e flows for the CLI Runtime Tool, plus a `test_take_turn_outcome_empty_default` that exercises the registry's side-channel default.
+- **MODIFIED** `crates/weave-server/src/agent/claude_code/mod.rs` — `mod agent;` + `pub use agent::ClaudeCodeCodingAgent;`.
+- **MODIFIED** `crates/weave-server/src/agent/claude_code/parser.rs` — `drain_pending()` method added; `flush()` retained as a single-event back-compat shim that now calls `drain_pending().into_iter().next()`. Doc comment corrected (the old "Repeated calls drain in order" claim was wrong — `flush` is single-event; `drain_pending` is the multi-event path).
+- **MODIFIED** `crates/weave-server/src/agent/claude_code/parser_test.rs` — new `test_claude_code_parser_drain_pending_returns_all_in_flight` test (locks in the corrected `drain_pending` contract).
+- **MODIFIED** `crates/weave-server/src/agent/registry.rs` — `ProviderConfig` widened; new `turn_outcomes: Arc<Mutex<HashMap<...>>>` and `active_child_processes: Arc<ActiveChildProcesses>` fields on `ProviderRegistry`; new `with_shared_process_registry` constructor; new `take_turn_outcome` / `turn_outcomes_arc` / `get_agent` accessors; new `create_cli_agent_from_row` (basename dispatch: `claude` | `fake_cli` → `ClaudeCodeCodingAgent`); `load_from_db` now branches on `provider.kind`.
+- **MODIFIED** `crates/weave-server/src/agent/model_cache.rs` — doc comment updated to reflect that the `env_json` allowlist + `binary_path` basename allowlist are now delivered at the `create_cli_provider` chokepoint.
+- **MODIFIED** `crates/weave-server/src/api/providers.rs` — `validate_env_keys` denylist function + `DANGEROUS_ENV_KEYS` table (LD_PRELOAD, PATH, LD_LIBRARY_PATH, DYLD_*, plus the full `LD_*` / `DYLD_*` families) added; `create_cli_provider` now hard-rejects unrecognized `binary_path` basenames at request time (was previously warn-and-persist) so the row never reaches the `list_cli_models_via_shell` shell-out path; new `build_claude_code_agent` helper instantiates the `ClaudeCodeCodingAgent` from a freshly-created CLI row.
+- **MODIFIED** `crates/weave-server/src/service/sessions.rs` — `build_turn_context` extended to take `&SpecialistRegistry` and apply the `ClaudeCodePermissionMapper` to populate `effective_permissions`; reads `cli_resume_id` from `session.runtime_metadata_json` via `parse_cli_resume_id`; `run_prompt_task` reads the side-channel outcome at end-of-turn to drive the `ResumeState::Native` decision. Two existing tests updated to pass `let specialists = Arc::new(SpecialistRegistry::default());`.
+- **MODIFIED** `crates/weave-server/src/service/kanban.rs` — `try_automate_lane` reads `provider.kind` to set `(runtime_kind, mode)` for auto-spawned sessions; for wrapped sessions, defaults `cwd` to the first registered codebase in the workspace via `CodebaseStore::list_by_workspace` so the `validate_wrapped_session_cwd` chokepoint passes (Phase-6 review fix for the production-breaking kanban-CLI auto-spawn path); if the workspace has no codebases, surfaces a clear `cwd_outside_codebase` error.
+- **MODIFIED** `crates/weave-server/src/service/mod.rs` — `#[cfg(test)] mod sessions_wrapped_tests;`.
+- **MODIFIED** `crates/weave-server/src/store/kanban_test_helpers.rs` — new `seed_cli_provider` helper for the kanban tests.
+- **MODIFIED** `feature_list.json` — feat-051 state `not_started` → `passing` with comprehensive evidence.
+- **MODIFIED** `PROGRESS.md` — Current State (latest commit → feat-050; staged for commit: feat-051), Next Steps, 6 new out-of-scope items.
+
+**Verification gate (all 7 spec tests + 3-layer init.sh)**
+
+```
+cargo test -p weave-server -- test_claude_code_wrapped_session_create               → 1 passed
+cargo test -p weave-server -- test_claude_code_wrapped_streams_via_sse              → 1 passed
+cargo test -p weave-server -- test_claude_code_wrapped_resume_first_turn_native_second → 1 passed
+cargo test -p weave-server -- test_claude_code_wrapped_cancel_mid_stream           → 1 passed
+cargo test -p weave-server -- test_claude_code_wrapped_falls_back_to_replay        → 1 passed
+cargo test -p weave-server -- test_claude_code_wrapped_records_journey              → 1 passed
+cargo test -p weave-server -- test_native_anthropic_still_passes_through_loop       → 1 passed
+./init.sh  # 3-layer gate
+→ 786 Rust tests + 113 frontend tests pass (was 765 + 113 before feat-051; +7 new from Phase-6 review fixes)
+→ clippy + cargo fmt + prettier + ESLint clean
+→ server starts; /api/health and / respond
+```
+
+**Phase 6 (Quality Review) outcomes — 3-way fanout (correctness / security / performance)**
+
+Four issues at confidence ≥ 80. All four fixed.
+
+1. **Correctness [90]** — `try_automate_lane` for CLI providers failed in production: `create_session` rejects wrapped sessions without a `cwd` inside a registered codebase, and the kanban path was passing `cwd: None` + `codebase_id: None`. **Fix**: `try_automate_lane` now resolves the first registered codebase in the workspace via `CodebaseStore::list_by_workspace` and passes its `id` as `codebase_id` when `mode == "wrapped"`. The A2A path is unchanged (still passes `None` deliberately). New tests: `test_try_automate_lane_cli_provider_with_codebase_succeeds`, `test_try_automate_lane_cli_provider_no_codebase_fails_clearly`.
+2. **Correctness [95]** — `ClaudeCodeStreamParser::flush()` returned only the FIRST pending event on truncated streams, silently dropping subsequent `ToolUseStart` blocks. The agent's `while let Some(event) = parser.flush()` loop only ever ran once. **Fix**: added `pub fn drain_pending(&mut self) -> Vec<StreamEvent>` to the parser (returns the full in-flight Vec from `flush_pending()`); both agent drain loops (in `Success` and `ExitError` branches) updated to `for event in parser.drain_pending()`. `flush()` retained as a single-event back-compat shim. New test: `test_claude_code_parser_drain_pending_returns_all_in_flight`.
+3. **Security [95]** — `create_cli_provider` allowed arbitrary `binary_path` values to be persisted; the row then reached the `list_cli_models_via_shell` shell-out. **Fix**: `create_cli_provider` now hard-rejects unrecognized `binary_path` basenames at request time with 400 + `invalid_field`. The v1 allowlist is `claude` (real Claude Code) and `fake_cli` (conformance harness). Two existing tests that used `fake_cli.sh` as a placeholder were updated to use the in-allowlist `fake_cli` name. New test: `test_create_cli_provider_rejects_unknown_basename`.
+4. **Security [90]** — `env_json` from the request body was merged into the subprocess env with no filtering; the `model_cache.rs:143-148` doc comment promised feat-051 would deliver a denylist. **Fix**: new `validate_env_keys` function in `api/providers.rs` rejects `DANGEROUS_ENV_KEYS` (LD_PRELOAD, PATH, LD_LIBRARY_PATH, DYLD_*, plus the full `LD_*` / `DYLD_*` families) at request time with 400 + `invalid_field`. The `model_cache.rs` doc comment updated to reflect delivery. New tests: `test_validate_env_keys_rejects_dynamic_linker_keys`, `test_validate_env_keys_allows_safe_keys`, `test_create_cli_provider_rejects_dangerous_env`.
+
+**Performance review was clean at ≥80 confidence.** One MEDIUM observation (redundant `String::from_utf8_lossy` in `ExitError` branch, not hot-path) — left as-is per the "fix only ≥80 confidence" rule.
+
+**Out-of-scope items noticed (logged, not fixed)**
+
+- **Real-binary smoke test** — the fake_cli harness is the conformance target; a real `claude` binary is not assumed to be present in CI. Manual check by an operator who has `claude` installed is the v1 way to validate the real binary. The `<binary> --version` health check fires on the registered binary path, so a row pointing at a missing `claude` will fail health_check and the provider list surfaces the error.
+- **v1 prompt-via-argv limitation** — the agent passes the entire user prompt as a single argv value via `--prompt <text>`. Real Claude Code does not parse this; v2 will use `--input-format stream-json` over stdin. Documented in `extract_text`'s doc comment.
+- **`stdio transport for tool results` (v2)** — tool results flow through the parser's stdout lines, not Weave-side re-execution. The journey translator tracks the orphan-vs-completed state but does not (yet) replay the tool call if the response is truncated.
+- **`did_reject` detection only looks at stderr** — the structured `error{code:resume_unknown_session}` event on stdout is also captured, but the rejection detector is `stderr`-only. A future detector could union both.
+- **`build_env` ordering: `permission_snapshot.env_vars` overrides `self.env`** — intentional per the design decision (the permission layer is the trust boundary for runtime env). If a future provider config layer wants to override, the precedence will need to be reconsidered.
+
+**Next steps for the next session (post-feat-051)**
+
+feat-052 (settings page kind-aware provider form) is the natural successor — depends on feat-020, feat-039, feat-042, all `passing`. The kind picker, CLI form (binary_path picker, args array editor, env map editor, permission_mode dropdown), and HTTP form (base_url, api_key password, default_model + datalist) are the UX surface; the backend endpoint is already done (feat-039). Frontend lint gate (Prettier, ESLint, tsc) is the verification.
+
 ### feat-050 — Workspace-scoped CLI session validation (phase-8)
 
 Phase 8 deliverable. Wrapped-mode sessions (any `mode=wrapped` + any CLI runtime_kind) MUST have `cwd` inside a registered `Codebase` row for the workspace. New `pub fn validate_wrapped_session_cwd(db, workspace_id, cwd) -> Result<(), AppError>` in `crates/weave-server/src/agent/mod.rs` — same free-function shape as feat-040's `validate_runtime_mode_compat`. Wired into `SessionService::create_session` at the same chokepoint, gated on `mode == SessionMode::Wrapped`. A2A `POST /api/a2a/messages` and kanban `try_automate_lane` both route through the same chokepoint — no A2A-side or kanban-side change required for the validator to fire on every inbound path. Native (HTTP) sessions skip the check entirely. The `dunce` crate was added as a new dep for cross-platform path canonicalization (handles macOS `/tmp` → `/private/tmp` and Windows UNC paths). Error code: `cwd_outside_codebase` with three message shapes (no cwd, canonicalize failed, no registered codebases) and the registered-codebase list when available. The `CodebaseStore::find_by_cwd_prefix` helper stays `#[allow(dead_code)]` (the validator does its canonicalization at the service layer, not in the store).

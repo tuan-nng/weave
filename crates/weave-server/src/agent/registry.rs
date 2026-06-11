@@ -7,18 +7,53 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::agent::anthropic::AnthropicAgent;
+use crate::agent::claude_code::ClaudeCodeCodingAgent;
 use crate::agent::model_cache::ModelCache;
 use crate::agent::CodingAgent;
 use crate::db::Db;
 use crate::error::{AppError, ProviderError};
+use crate::service::ActiveChildProcesses;
 use crate::store::providers::ProviderStore;
 
-/// Config fields extracted from `config_json` for agent construction.
+/// Per-provider config extracted from `config_json` for agent
+/// construction (feat-039 widening). The HTTP shape is the pre-
+/// existing 3-field object; the CLI shape carries binary / args /
+/// env / permission mode. Deserialized as untagged so a single
+/// `config_json` blob is parsed into the variant matching its
+/// fields.
+///
+/// `Http` and `Cli` are mutually exclusive: the `create_provider`
+/// API handler validates the per-kind invariant and rejects
+/// mixed-field payloads with a 400. The `untagged` deserializer
+/// here is the read-side mirror of that validation.
 #[derive(Debug, Deserialize)]
-pub struct ProviderConfig {
-    pub base_url: String,
-    pub api_key: String,
-    pub default_model: String,
+#[serde(untagged)]
+pub enum ProviderConfig {
+    /// HTTP provider shape: `{ base_url, api_key, default_model }`.
+    Http {
+        base_url: String,
+        api_key: String,
+        default_model: String,
+    },
+    /// CLI provider shape: `{ default_model, binary_path, args_json,
+    /// env_json, permission_mode }`. All fields required by the
+    /// `create_cli_provider` handler. Args and env are JSON strings
+    /// (stored in the row's dedicated columns too, but the config
+    /// keeps a copy for round-trip / debug log consistency).
+    Cli {
+        #[allow(dead_code)]
+        default_model: String,
+        #[allow(dead_code)]
+        binary_path: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        args_json: String,
+        #[allow(dead_code)]
+        #[serde(default)]
+        env_json: String,
+        #[allow(dead_code)]
+        permission_mode: String,
+    },
 }
 
 /// Thread-safe registry of live agent instances.
@@ -35,6 +70,35 @@ pub struct ProviderRegistry {
     /// `remove_agent` so the cache never holds a stale entry for a
     /// provider that just left the registry.
     model_cache: ModelCache,
+    /// Per-session metadata populated by `ClaudeCodeCodingAgent` at
+    /// end-of-stream and consumed by `run_prompt_task` after the
+    /// `agent_loop` returns. Keyed by `session_id`. Entries are
+    /// `take`-then-clear so a re-read returns `None` (the next turn
+    /// starts fresh). Held as an `Arc<Mutex<…>>` so the same
+    /// allocation is shared with every `ClaudeCodeCodingAgent` the
+    /// registry constructs (the agent's spawned parser/translator
+    /// task holds an `Arc` clone and writes into it at end-of-stream).
+    /// The accessor `take_turn_outcome` locks the inner `Mutex`
+    /// through the `Arc` — same allocation as the agents see.
+    turn_outcomes: Arc<Mutex<HashMap<String, TurnOutcome>>>,
+    /// Shared CLI child pid table (feat-049). The `CliRunner` inside
+    /// every `ClaudeCodeCodingAgent` writes to this; the HTTP cancel
+    /// handler and the cold-start reaper read from it. Kept on
+    /// the registry so `create_agent` can thread it into the
+    /// `CliRunner::with_registry` constructor without a separate
+    /// plumbing path.
+    active_child_processes: Arc<ActiveChildProcesses>,
+}
+
+/// Per-turn metadata surfaced by `ClaudeCodeCodingAgent` (feat-051).
+/// See `agent::claude_code::agent::TurnOutcome` for the field-level
+/// docs; this is the registry's view of the same shape (re-exported
+/// here so callers don't have to depend on the `claude_code` module
+/// to read the registry).
+#[derive(Debug, Default, Clone)]
+pub struct TurnOutcome {
+    pub captured_cli_resume_id: Option<String>,
+    pub did_reject: bool,
 }
 
 /// Cached result of a `cached_health_summary` probe. `fetched_at` is
@@ -49,7 +113,9 @@ struct HealthCache {
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(10);
 
 impl ProviderRegistry {
-    /// Create an empty registry.
+    /// Create an empty registry with a fresh `ActiveChildProcesses`
+    /// table. Use this in tests; use [`ProviderRegistry::with_shared_process_registry`]
+    /// in production to share the AppState-level table.
     pub fn new() -> Self {
         Self {
             agents: Mutex::new(HashMap::new()),
@@ -58,7 +124,62 @@ impl ProviderRegistry {
                 snapshot: Vec::new(),
             }),
             model_cache: ModelCache::new(),
+            turn_outcomes: Arc::new(Mutex::new(HashMap::new())),
+            active_child_processes: Arc::new(ActiveChildProcesses::new()),
         }
+    }
+
+    /// Build a registry that shares the given `ActiveChildProcesses`
+    /// table. Production wiring: `AppState` constructs one
+    /// `ActiveChildProcesses` and shares it across the
+    /// `ProviderRegistry` and the cancel handler / reaper (feat-049).
+    pub fn with_shared_process_registry(registry: Arc<ActiveChildProcesses>) -> Self {
+        Self {
+            agents: Mutex::new(HashMap::new()),
+            health_cache: Mutex::new(HealthCache {
+                fetched_at: None,
+                snapshot: Vec::new(),
+            }),
+            model_cache: ModelCache::new(),
+            turn_outcomes: Arc::new(Mutex::new(HashMap::new())),
+            active_child_processes: registry,
+        }
+    }
+
+    /// Borrow the shared `ActiveChildProcesses` registry. The
+    /// `CliRunner` inside each `ClaudeCodeCodingAgent` already
+    /// holds an `Arc` clone; this is the escape hatch for tests
+    /// that want to assert on the pid table directly.
+    pub fn active_child_processes(&self) -> Arc<ActiveChildProcesses> {
+        Arc::clone(&self.active_child_processes)
+    }
+
+    /// Take the per-session turn outcome (feat-051). Removes the
+    /// entry on read so the next turn starts fresh. Returns
+    /// `TurnOutcome::default()` (both fields `None` / `false`) for
+    /// HTTP runtimes, for first turns before the agent has had a
+    /// chance to populate the map, and for `session_id`s the agent
+    /// never touched.
+    pub fn take_turn_outcome(&self, session_id: &str) -> TurnOutcome {
+        let mut map = self
+            .turn_outcomes
+            .lock()
+            .expect("turn outcomes lock poisoned");
+        map.remove(session_id).unwrap_or_default()
+    }
+
+    /// Borrow the shared `turn_outcomes` map as an `Arc<Mutex<…>>`
+    /// (feat-051). The `ClaudeCodeCodingAgent` constructor takes
+    /// one of these so its spawned parser/translator task can write
+    /// outcomes into the SAME map the `run_prompt_task` consumer
+    /// reads from via `take_turn_outcome`. Production wiring
+    /// (`api/providers::create_cli_provider`) calls
+    /// `turn_outcomes_arc()` on the AppState's registry and passes
+    /// the `Arc` clone into the agent. Tests construct a fresh
+    /// registry and pass the same `Arc` to both the agent and the
+    /// reader side.
+    pub fn turn_outcomes_arc(&self) -> Arc<Mutex<HashMap<String, TurnOutcome>>> {
+        Arc::clone(&self.turn_outcomes)
     }
 
     /// Load all providers from DB and construct agents.
@@ -69,9 +190,22 @@ impl ProviderRegistry {
         let providers = ProviderStore::list(db)?;
         let mut map = self.agents.lock().expect("registry lock poisoned");
         let mut loaded = 0u32;
+        let turn_outcomes = Arc::clone(&self.turn_outcomes);
 
         for provider in &providers {
-            match Self::create_agent(&provider.provider_type, &provider.config_json) {
+            // Per-kind config. The `ProviderConfig` enum's untagged
+            // deserialize handles both shapes; CLI rows serialize
+            // `{"default_model": ...}` to the legacy `config_json`
+            // column (per `ProviderStore::create_cli`), so a CLI
+            // load-from-db on the legacy column would parse as
+            // `Http` and miss the `binary_path` field — so we
+            // thread the structured per-kind fields directly
+            // instead of going through `config_json` for CLI rows.
+            let result = match provider.kind.as_str() {
+                "cli" => Self::create_cli_agent_from_row(provider, Arc::clone(&turn_outcomes)),
+                _ => Self::create_agent(&provider.provider_type, &provider.config_json),
+            };
+            match result {
                 Ok(agent) => {
                     map.insert(provider.id.clone(), agent);
                     loaded += 1;
@@ -248,14 +382,91 @@ impl ProviderRegistry {
         let config: ProviderConfig = serde_json::from_str(config_json)
             .map_err(|e| ProviderError::Unreachable(format!("invalid config_json: {e}")))?;
 
-        match provider_type {
-            "anthropic" => {
-                let agent =
-                    AnthropicAgent::new(config.base_url, config.api_key, config.default_model)?;
+        match (provider_type, config) {
+            (
+                "anthropic",
+                ProviderConfig::Http {
+                    base_url,
+                    api_key,
+                    default_model,
+                },
+            ) => {
+                let agent = AnthropicAgent::new(base_url, api_key, default_model)?;
+                Ok(Arc::new(agent))
+            }
+            (other, _) => Err(ProviderError::Unreachable(format!(
+                "unsupported provider type or config shape for kind=http: {other}"
+            ))),
+        }
+    }
+
+    /// Build a CLI agent directly from a `Provider` row's
+    /// dedicated CLI columns (binary_path, args_json, env_json,
+    /// permission_mode, default_model). This bypasses
+    /// `create_agent`'s `config_json` deserialization because the
+    /// legacy column carries only `{"default_model": ...}` for
+    /// CLI rows.
+    fn create_cli_agent_from_row(
+        provider: &crate::store::providers::Provider,
+        turn_outcomes: Arc<Mutex<HashMap<String, TurnOutcome>>>,
+    ) -> Result<Arc<dyn CodingAgent>, ProviderError> {
+        // The current `provider_type` discriminator is `"anthropic"`
+        // for both HTTP and CLI rows. The CLI-row dispatch is by
+        // binary basename: `claude` → `ClaudeCodeCodingAgent`.
+        // Matching is by basename, not the full path, so a row
+        // pointing at `/opt/.../claude` (a symlink or alt install)
+        // still routes to the right agent. Future CLIs (Codex,
+        // OpenCode) get their own match arms.
+        let binary_path_str = provider
+            .binary_path
+            .as_deref()
+            .ok_or_else(|| ProviderError::Unreachable("CLI provider missing binary_path".into()))?;
+        let basename = std::path::Path::new(binary_path_str)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        match basename {
+            "claude" | "fake_cli" => {
+                let binary_path = std::path::PathBuf::from(binary_path_str);
+                let args_str = provider.args_json.as_deref().unwrap_or("[]");
+                let args: Vec<String> = serde_json::from_str(args_str)
+                    .map_err(|e| ProviderError::Unreachable(format!("invalid args_json: {e}")))?;
+                let env_str = provider.env_json.as_deref().unwrap_or("{}");
+                let env: std::collections::BTreeMap<String, String> = serde_json::from_str(env_str)
+                    .map_err(|e| ProviderError::Unreachable(format!("invalid env_json: {e}")))?;
+                let default_model = provider
+                    .default_model
+                    .clone()
+                    .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+                let permission_mode = provider
+                    .permission_mode
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
+                // Cold-start reload path: the load_from_db
+                // constructor builds a fresh `ActiveChildProcesses`
+                // (the AppState-level one is not in scope here).
+                // The HTTP-create path (`api/providers::create_cli_provider`)
+                // uses the AppState's shared registry instead so
+                // cancel and reaper see the same pid table.
+                let registry = Arc::new(ActiveChildProcesses::new());
+                // The `turn_outcomes` map is shared with the
+                // reader side via the `Arc<Mutex<…>>` accessor on
+                // `ProviderRegistry` — `take_turn_outcome` locks
+                // the same allocation. `load_from_db` passes the
+                // `Arc` in so reloads share the same map.
+                let agent = ClaudeCodeCodingAgent::new(
+                    binary_path,
+                    args,
+                    env,
+                    default_model,
+                    permission_mode,
+                    registry,
+                    turn_outcomes,
+                );
                 Ok(Arc::new(agent))
             }
             other => Err(ProviderError::Unreachable(format!(
-                "unsupported provider type: {other}"
+                "unsupported CLI binary basename: {other}"
             ))),
         }
     }

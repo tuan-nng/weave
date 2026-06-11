@@ -162,6 +162,32 @@ pub fn seed_provider(db: &Db) -> String {
     provider.id
 }
 
+/// Seed a `kind=cli` provider with the given `binary_path` and
+/// `default_model` (feat-051). Returns the provider id.
+///
+/// The basename in `binary_path` must be in feat-051's allowlist
+/// (`claude` or `fake_cli`) — passing a different basename is a test
+/// bug. Used by kanban lane-automation tests that exercise the
+/// CLI-provider auto-spawn path. Goes through the DB layer
+/// (`ProviderStore::create_cli`) so it bypasses the HTTP handler's
+/// env-denylist / basename-allowlist gates; that's the right
+/// shape for a unit test of `try_automate_lane` (the test is
+/// about the kanban logic, not the request validation).
+pub fn seed_cli_provider(db: &Db, binary_path: &str, default_model: &str) -> String {
+    let provider = crate::store::providers::ProviderStore::create_cli(
+        db,
+        "anthropic",
+        "Test CLI",
+        default_model,
+        binary_path,
+        "[]",
+        "{}",
+        "default",
+    )
+    .expect("seed cli provider");
+    provider.id
+}
+
 /// Insert a specialist into the registry at `specialists`.
 ///
 /// `SpecialistRegistry::insert` takes `&mut self`, but the test `AppState`

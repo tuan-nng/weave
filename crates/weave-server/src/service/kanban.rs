@@ -34,6 +34,13 @@ pub fn build_initial_prompt(task: &Task) -> String {
 /// providers globally has zero providers here. The decision per the feat-025
 /// spec is: fail with a 400 if no provider exists; otherwise pick the first
 /// in `created_at ASC` order (which `ProviderStore::list` already returns).
+///
+/// Note: feat-051's `try_automate_lane` inlined this logic so it could
+/// branch on `provider.kind` before deciding the session's
+/// `runtime_kind` / `mode`. The free function stays as a
+/// `#[allow(dead_code)]` helper for the A2A messages path
+/// (`a2a/messages.rs::first_provider_id`) which has its own copy.
+#[allow(dead_code)]
 fn first_provider_id(db: &crate::db::Db) -> Result<String, AppError> {
     ProviderStore::list(db)?
         .into_iter()
@@ -109,7 +116,32 @@ pub async fn try_automate_lane(
     // to the user so they can fix it. Future improvement: move the
     // pre-check into the HTTP handler so the task isn't moved when
     // setup is invalid.
-    let provider_id = first_provider_id(&state.db)?;
+    let provider = ProviderStore::list(&state.db)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            AppError::validation(
+                "no provider configured in workspace; add one via POST /api/providers \
+                 before moving tasks to auto-trigger columns",
+            )
+        })?;
+    let provider_id = provider.id.clone();
+
+    // feat-051: honor the provider's `kind` so a CLI provider creates
+    // a wrapped session, not a native one. The default
+    // (pre-feat-051) behavior was "always native / anthropic-api";
+    // a CLI row now selects `RuntimeKind::ClaudeCode` and
+    // `SessionMode::Wrapped`. A missing/garbled `kind` falls back
+    // to the legacy default — the spec says a stuck or old row
+    // should keep working until the operator migrates.
+    let (runtime_kind, mode) = match provider.kind.as_str() {
+        "cli" => (
+            Some(crate::agent::RuntimeKind::ClaudeCode.as_str()),
+            Some(crate::agent::SessionMode::Wrapped.as_str()),
+        ),
+        // "http" or anything else (legacy) — preserve the pre-051 default.
+        _ => (None, None),
+    };
 
     // Pre-check 2: specialist is loaded. The DB doesn't FK on specialist_id
     // (specialists live on disk), so a typo'd `column.specialist_id` would
@@ -126,6 +158,36 @@ pub async fn try_automate_lane(
     // spawned streaming task will transition it to `ready` then back to
     // `ready`/`completed`/etc. as the agent runs.
     let workspace_id = workspace_id_for_task(&state.db, &task.id)?;
+    // feat-051: wrapped sessions (CLI providers) require a `cwd`
+    // inside a registered codebase — `validate_wrapped_session_cwd`
+    // (service/sessions.rs) rejects a `None` cwd with a 400. The
+    // A2A path passes `None` deliberately (no filesystem context);
+    // the kanban path can do better — pick the first registered
+    // codebase in the workspace as a sensible default cwd. If the
+    // workspace has no codebases, surface that as a clear error
+    // BEFORE the validator's more cryptic "no cwd supplied" so the
+    // operator knows what to fix.
+    let codebase_id: Option<String> = if mode == Some("wrapped") {
+        let codebases =
+            crate::store::codebases::CodebaseStore::list_by_workspace(&state.db, &workspace_id)?;
+        match codebases.into_iter().next() {
+            Some(cb) => Some(cb.id),
+            None => {
+                return Err(AppError::validation_with_code(
+                    "cwd_outside_codebase",
+                    format!(
+                        "kanban auto-spawn for a CLI provider requires the workspace \
+                         to have at least one registered codebase (kanban tasks don't \
+                         carry their own cwd). Register a codebase for workspace \
+                         '{workspace_id}' via POST /api/codebases, or move the task to a \
+                         non-CLI provider lane."
+                    ),
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let session = SessionService::create_session(
         &state.db,
         &workspace_id,
@@ -134,11 +196,11 @@ pub async fn try_automate_lane(
         None,
         None,
         None,
-        None, // context_id — not used in kanban lane automation
-        None, // codebase_id — kanban auto-spawn does not pick a codebase; tasks don't yet carry one
-        None, // runtime_kind — use default (anthropic-api); the column-aware kanban UX lands in feat-053+
-        None, // mode — use default (native)
-        None, // runtime_metadata_json — none
+        None,                   // context_id — not used in kanban lane automation
+        codebase_id.as_deref(), // feat-051: default to first codebase for CLI providers
+        runtime_kind,           // feat-051: honor CLI provider's runtime_kind
+        mode,                   // feat-051: honor CLI provider's mode
+        None,                   // runtime_metadata_json — none
     )?;
 
     // Link the session to the task. `session_id: Some(Some(sid))` is the
@@ -320,6 +382,7 @@ mod tests {
     };
     use chrono::Utc;
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     fn default_column(id: &str, auto_trigger: bool, specialist_id: Option<&str>) -> Column {
         Column {
@@ -418,6 +481,93 @@ mod tests {
                 assert!(msg.contains("not loaded"), "got: {msg}");
             }
             other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // feat-051: CLI provider auto-spawn defaults cwd to the workspace's
+    // first registered codebase. Without this default, the
+    // `validate_wrapped_session_cwd` check at `create_session` rejects
+    // the auto-spawn with `cwd_outside_codebase` (the task carries no
+    // cwd of its own).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_try_automate_lane_cli_provider_with_codebase_succeeds() {
+        use crate::store::codebases::CodebaseStore;
+        use crate::store::kanban_test_helpers::seed_cli_provider;
+
+        let mut state = make_test_state();
+        // Seed a CLI provider whose binary is in the allowlist
+        // (basename `fake_cli`).
+        let _provider_id =
+            seed_cli_provider(&state.db, "/usr/local/bin/fake_cli", "claude-sonnet-4-5");
+        // Seed a real task under a real workspace so
+        // `workspace_id_for_task` succeeds — that's the same path
+        // the pre-fix code would have hit `cwd_outside_codebase`
+        // on. Use `task_with_real_id` which builds a complete
+        // workspace→board→column→task chain.
+        let task = task_with_real_id(&state.db, "task-cli-ok");
+        // Seed a codebase in the task's workspace. The kanban
+        // auto-spawn must pick this as the default cwd for the
+        // wrapped session.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _codebase_id = CodebaseStore::create(
+            &state.db,
+            "ws-real",
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .expect("seed codebase")
+        .id;
+        // Specialist must be loaded (the path's pre-check requires it).
+        let specialists = Arc::get_mut(&mut state.specialists).expect("unique");
+        crate::store::kanban_test_helpers::seed_specialist(specialists, "dev", "You are dev.");
+        // Fire the auto-spawn. The pre-fix code would have failed at
+        // `create_session` with `cwd_outside_codebase`. We just assert
+        // we did NOT hit that specific error — other downstream
+        // failures (SSE, fake_cli shell-out) are acceptable here.
+        let column = default_column("col-test", true, Some("dev"));
+        let result = try_automate_lane(&state, &task, &column).await;
+        if let Err(err) = &result {
+            if let AppError::Validation { code, message } = err {
+                assert_ne!(
+                    code, "cwd_outside_codebase",
+                    "kanban auto-spawn must default cwd to the first codebase, \
+                     not surface the pre-fix cwd_outside_codebase error. \
+                     Got: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_try_automate_lane_cli_provider_no_codebase_fails_clearly() {
+        use crate::store::kanban_test_helpers::seed_cli_provider;
+
+        let mut state = make_test_state();
+        let _provider_id =
+            seed_cli_provider(&state.db, "/usr/local/bin/fake_cli", "claude-sonnet-4-5");
+        // Real task so `workspace_id_for_task` succeeds; no
+        // codebase in the workspace.
+        let task = task_with_real_id(&state.db, "task-cli-no-cb");
+        let specialists = Arc::get_mut(&mut state.specialists).expect("unique");
+        crate::store::kanban_test_helpers::seed_specialist(specialists, "dev", "You are dev.");
+        let column = default_column("col-test", true, Some("dev"));
+        let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
+        match err {
+            AppError::Validation { code, message } => {
+                assert_eq!(
+                    code, "cwd_outside_codebase",
+                    "got code={code} msg={message}"
+                );
+                assert!(
+                    message.contains("at least one registered codebase"),
+                    "message must guide the operator, got: {message}"
+                );
+            }
+            other => panic!("expected Validation cwd_outside_codebase, got {other:?}"),
         }
     }
 

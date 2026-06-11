@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path as FsPath;
+use std::sync::Arc;
 
 use crate::agent::model_cache::list_cli_models_via_shell;
 use crate::api::responses::DataResponse;
@@ -151,6 +152,66 @@ fn create_http_provider(
     Ok((StatusCode::CREATED, Json(DataResponse { data: provider })))
 }
 
+/// Env-key denylist for CLI providers (feat-051, was promised in
+/// `model_cache.rs:143-148`).
+///
+/// The CLI subprocess inherits its environment from us. Keys in this
+/// set would let a row caller hijack the dynamic linker, replace
+/// `PATH`, or otherwise escape the Weave process's trust boundary —
+/// none are ever useful for a Claude Code / Codex / OpenCode call,
+/// so the request is rejected with a 400.
+///
+/// Matching is case-insensitive (the C runtime normalizes env keys
+/// on Linux/macOS, so `ld_preload` and `LD_PRELOAD` are the same
+/// key to the child). The set is deliberately small and auditable;
+/// `LD_*` and `DYLD_*` are the entire families the dynamic linker
+/// honors, and `PATH` is the only one that matters for shell
+/// resolution.
+const DANGEROUS_ENV_KEYS: &[&str] = &[
+    // Linux/BSD dynamic linker
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_BIND_NOW",
+    "LD_DEBUG",
+    "LD_DEBUG_OUTPUT",
+    "LD_PROFILE",
+    "LD_PROFILE_OUTPUT",
+    "LD_SHOW_AUXV",
+    "LD_USE_LOAD_BIAS",
+    // macOS dynamic linker
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    // Shell / loader
+    "PATH",
+    "LD_PRELOAD_ARCH",
+];
+
+/// Reject a `env_json` map containing any denylisted key. Returns
+/// `Err(AppError::validation_with_code("invalid_field", ...))` on the
+/// first match. The handler surfaces this as a 400.
+fn validate_env_keys(env: &BTreeMap<String, String>) -> Result<(), AppError> {
+    for key in env.keys() {
+        if DANGEROUS_ENV_KEYS
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(key))
+        {
+            return Err(AppError::validation_with_code(
+                "invalid_field",
+                format!(
+                    "env_json key '{key}' is not allowed for CLI providers \
+                     (dynamic-linker / shell-loader key; see DANGEROUS_ENV_KEYS \
+                     in api/providers.rs)"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Handle `kind="cli"` — pre-register a CLI provider. No agent registration
 /// in this slice; the dispatch adapter lands in feat-051.
 fn create_cli_provider(
@@ -203,6 +264,11 @@ fn create_cli_provider(
             "env_json must be a JSON object of string→string: {e}"
         ))
     })?;
+    // feat-051: reject dynamic-linker / shell-loader keys so a
+    // malicious row can't hijack the child process. The set is in
+    // `validate_env_keys` above and matches the promise in
+    // `model_cache.rs:143-148`.
+    validate_env_keys(&parsed_env)?;
 
     // Re-serialize the validated JSON so the row stores canonicalized
     // output (no trailing whitespace, no escaped key order surprises).
@@ -220,6 +286,31 @@ fn create_cli_provider(
         ));
     }
 
+    // feat-051: basename allowlist gate. We persist the row, but only
+    // if the basename is in the registered dispatcher set. The
+    // v1 set is `claude` (real Claude Code) and `fake_cli` (the
+    // conformance harness); future runtimes (Codex, OpenCode) add
+    // their basenames to this match when their adapters land.
+    //
+    // The check is at request time so the row never reaches
+    // `list_cli_models_via_shell` (which would otherwise shell out
+    // to an arbitrary user-supplied binary with arbitrary
+    // `args_json`).
+    let basename = std::path::Path::new(binary_path_trimmed)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if !matches!(basename, "claude" | "fake_cli") {
+        return Err(AppError::validation_with_code(
+            "invalid_field",
+            format!(
+                "binary_path basename '{basename}' is not a registered CLI dispatcher; \
+                 feat-051 supports 'claude' (real Claude Code) and 'fake_cli' (conformance \
+                 harness). Future runtimes (Codex, OpenCode) extend the allowlist."
+            ),
+        ));
+    }
+
     let provider = ProviderStore::create_cli(
         &state.db,
         &body.provider_type,
@@ -231,7 +322,95 @@ fn create_cli_provider(
         permission_mode.trim(),
     )?;
 
+    // feat-051: register a `ClaudeCodeCodingAgent` in the runtime
+    // registry. The dispatcher is by binary basename (per the
+    // spec's "matching is by binary basename for now" rule):
+    //   * `claude`     → real Claude Code
+    //   * `fake_cli`   → test harness (conformance suite)
+    // The runner is built with the AppState's SHARED
+    // `ActiveChildProcesses` table so the HTTP cancel handler
+    // and the cold-start reaper (feat-049) reach the same pid
+    // table the runner writes to.
+    let agent = build_claude_code_agent(state, &provider);
+    if let Some(agent) = agent {
+        state.registry.add_agent(&provider.id, agent);
+    }
+
     Ok((StatusCode::CREATED, Json(DataResponse { data: provider })))
+}
+
+/// Build a `ClaudeCodeCodingAgent` from a freshly-created CLI
+/// provider row (feat-051). Returns `None` when the row's
+/// `binary_path` basename has no registered adapter (the row
+/// still gets persisted; this just means no agent is registered
+/// in the runtime).
+fn build_claude_code_agent(
+    state: &crate::AppState,
+    provider: &Provider,
+) -> Option<Arc<dyn crate::agent::CodingAgent>> {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use crate::agent::claude_code::ClaudeCodeCodingAgent;
+
+    let binary_path_str = provider.binary_path.as_deref()?;
+    let basename = std::path::Path::new(binary_path_str)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if !matches!(basename, "claude" | "fake_cli") {
+        return None;
+    }
+    let binary_path = PathBuf::from(binary_path_str);
+    let args_str = provider.args_json.as_deref().unwrap_or("[]");
+    let args: Vec<String> = match serde_json::from_str(args_str) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                provider_id = %provider.id,
+                error = %e,
+                "create_cli_provider: invalid args_json; skipping agent registration"
+            );
+            return None;
+        }
+    };
+    let env_str = provider.env_json.as_deref().unwrap_or("{}");
+    let env: BTreeMap<String, String> = match serde_json::from_str(env_str) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                provider_id = %provider.id,
+                error = %e,
+                "create_cli_provider: invalid env_json; skipping agent registration"
+            );
+            return None;
+        }
+    };
+    let default_model = provider
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+    let permission_mode = provider
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let agent = ClaudeCodeCodingAgent::new(
+        binary_path,
+        args,
+        env,
+        default_model,
+        permission_mode,
+        // Share the AppState-level pid table. The HTTP cancel
+        // handler reads it; the cold-start reaper reads /proc
+        // independently but uses the same table to deduplicate.
+        state.registry.active_child_processes(),
+        // Share the registry's `turn_outcomes` map. The agent's
+        // spawn task writes into it; `run_prompt_task` reads
+        // back via `take_turn_outcome`.
+        state.registry.turn_outcomes_arc(),
+    );
+    Some(Arc::new(agent) as Arc<dyn crate::agent::CodingAgent>)
 }
 
 /// DELETE /api/providers/{id}
@@ -1325,7 +1504,11 @@ mod tests {
         // tempfile bash script that emits the canonical bare-array
         // shape.
         let tmp = tempfile::TempDir::new().unwrap();
-        let script_path = tmp.path().join("fake_cli.sh");
+        // Basename must be in feat-051's allowlist (`claude` or
+        // `fake_cli`); use `fake_cli` so the create-CLI-row path
+        // doesn't reject the row before the model-cache shell-out
+        // gets a chance to run.
+        let script_path = tmp.path().join("fake_cli");
         std::fs::write(
             &script_path,
             "#!/bin/sh\n\
@@ -1406,7 +1589,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let script_path = tmp.path().join("fake_cli.sh");
+        // Same allowlist constraint as the miss test above — basename
+        // `fake_cli` is in feat-051's dispatcher allowlist.
+        let script_path = tmp.path().join("fake_cli");
         std::fs::write(
             &script_path,
             "#!/bin/sh\n\
@@ -1656,5 +1841,146 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    // -----------------------------------------------------------------
+    // feat-051: env denylist + binary basename allowlist
+    //
+    // These tests lock in the request-time gates added in response to
+    // the code-review feedback on the env-injection / arbitrary-binary
+    // threat models. The gates reject with 400 *before* the row is
+    // persisted, so a bad row never reaches the `list_cli_models_via_shell`
+    // shell-out path.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_validate_env_keys_rejects_dynamic_linker_keys() {
+        use std::collections::BTreeMap;
+
+        // Each of these keys is a real dynamic-linker / shell-loader
+        // variable; the request is rejected with `invalid_field`.
+        for dangerous in [
+            "LD_PRELOAD",
+            "ld_preload", // case-insensitive
+            "LD_LIBRARY_PATH",
+            "LD_AUDIT",
+            "DYLD_INSERT_LIBRARIES",
+            "PATH",
+        ] {
+            let mut env = BTreeMap::new();
+            env.insert(dangerous.to_string(), "/tmp/evil".to_string());
+            let err = validate_env_keys(&env).expect_err("must reject");
+            match err {
+                AppError::Validation { code, message } => {
+                    assert_eq!(
+                        code, "invalid_field",
+                        "validate_env_keys({env:?}) should be invalid_field"
+                    );
+                    assert!(
+                        message.contains(dangerous),
+                        "error message must name the offending key, got: {message}"
+                    );
+                }
+                other => panic!("expected AppError::Validation, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_env_keys_allows_safe_keys() {
+        use std::collections::BTreeMap;
+
+        // None of these can hijack the dynamic linker or the loader.
+        let mut env = BTreeMap::new();
+        env.insert("LOG_LEVEL".to_string(), "info".to_string());
+        env.insert("WEAVE_PROJECT".to_string(), "demo".to_string());
+        env.insert("HOME".to_string(), "/home/agent".to_string());
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-...".to_string());
+        assert!(validate_env_keys(&env).is_ok(), "safe keys must pass");
+    }
+
+    #[tokio::test]
+    async fn test_create_cli_provider_rejects_dangerous_env() {
+        let app = test_app();
+        let body = r#"{
+            "kind": "cli",
+            "type": "anthropic",
+            "name": "Evil",
+            "default_model": "m",
+            "binary_path": "/usr/local/bin/claude",
+            "env_json": "{\"LD_PRELOAD\":\"/tmp/evil.so\"}",
+            "permission_mode": "default"
+        }"#;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "LD_PRELOAD must be rejected at request time"
+        );
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_json = extract_json(&resp_body);
+        assert_eq!(resp_json["error"]["code"], "invalid_field");
+        assert!(
+            resp_json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("LD_PRELOAD"),
+            "error must name the offending key, got: {resp_json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_cli_provider_rejects_unknown_basename() {
+        let app = test_app();
+        // `/bin/sh` is the canonical arbitrary-binary attack surface
+        // the basename allowlist exists to block.
+        let body = r#"{
+            "kind": "cli",
+            "type": "anthropic",
+            "name": "Sh",
+            "default_model": "m",
+            "binary_path": "/bin/sh",
+            "permission_mode": "default"
+        }"#;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "unrecognized basename must be rejected at request time, not just warned"
+        );
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_json = extract_json(&resp_body);
+        assert_eq!(resp_json["error"]["code"], "invalid_field");
+        assert!(
+            resp_json["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("sh"),
+            "error must name the basename, got: {resp_json}"
+        );
     }
 }

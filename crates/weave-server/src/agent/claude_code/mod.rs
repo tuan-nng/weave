@@ -23,6 +23,7 @@
 //! Each feature adds a sibling module under `claude_code/`. This file
 //! is the public re-export point for the whole subdir.
 
+mod agent;
 mod parser;
 
 #[cfg(test)]
@@ -43,6 +44,9 @@ pub use parser::ClaudeCodeStreamParser;
 
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use translator::JourneyTranslator;
+
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use agent::ClaudeCodeCodingAgent;
 
 use serde_json::Value;
 

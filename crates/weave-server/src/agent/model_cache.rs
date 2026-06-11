@@ -140,12 +140,15 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(15);
 /// spawned by the CLI do not hold the pipes open after the parent
 /// exits.
 ///
-/// `env_json` is parsed and persisted by `create_cli_provider` but is
-/// intentionally NOT passed to the child in this slice — feat-051
-/// (`CliCodingAgent`) will wire env with a proper allowlist that
-/// rejects dangerous keys like `LD_PRELOAD` and `PATH`. Today the
-/// child inherits the Weave process's environment, which is the
-/// safe-by-default choice.
+/// `env_json` is parsed and persisted by `create_cli_provider`. The
+/// request handler at `api/providers.rs::validate_env_keys` rejects a
+/// denylist of dynamic-linker / shell-loader keys (LD_PRELOAD, PATH,
+/// etc.) so a malicious row can't hijack the child process. The child
+/// inherits those persisted safe entries (or, if `env_json` is empty,
+/// the Weave process's environment, which is the safe-by-default
+/// choice). The `binary_path` is also allowlisted to `claude` /
+/// `fake_cli` at request time so this shell-out can't be pointed at
+/// an arbitrary binary.
 pub async fn list_cli_models_via_shell(
     provider: &Provider,
 ) -> Result<Vec<ModelInfo>, ProviderError> {

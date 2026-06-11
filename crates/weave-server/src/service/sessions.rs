@@ -508,12 +508,44 @@ fn parse_cli_resume_id(metadata_json: Option<&str>) -> Option<String> {
 /// `runtime_metadata_json` via [`parse_cli_resume_id`]; a malformed
 /// JSON blob is silently swallowed (opportunistic metadata, not a
 /// required key — see `agent::turn_context` module docs).
+///
+/// `effective_permissions` is built by the per-runtime
+/// `PermissionMapper` (feat-046). For HTTP runtimes, the snapshot is
+/// empty (HTTP agents never see a `argv_flags` / `env_vars` payload).
+/// For CLI runtimes, the snapshot is derived from the session's
+/// `ToolProfile` — which the caller (a `Specialist`) carries on its
+/// YAML frontmatter — via `ClaudeCodePermissionMapper`. The mapper
+/// is a synchronous, pure function; calling it here costs nothing
+/// and the snapshot is small.
 fn build_turn_context(
     session: &crate::store::sessions::Session,
     session_cwd: std::path::PathBuf,
     cancel_token: CancellationToken,
+    specialists: &SpecialistRegistry,
 ) -> crate::agent::turn_context::TurnContext {
     let cli_resume_id = parse_cli_resume_id(session.runtime_metadata_json.as_deref());
+
+    // Resolve the session's `ToolProfile` from its specialist. The
+    // specialist may be missing (e.g., a session created without a
+    // specialist_id, or the YAML file was deleted after creation);
+    // fall back to `ToolProfile::Full` — the most permissive
+    // default, matching the pre-feat-046 behavior.
+    let tool_profile: crate::agent::permissions::ToolProfile = session
+        .specialist_id
+        .as_deref()
+        .and_then(|id| specialists.get_by_name(id))
+        .and_then(|s| s.tool_profile.clone())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(crate::agent::permissions::ToolProfile::Full);
+
+    // Build the permission snapshot via the per-runtime mapper.
+    // HTTP runtimes get an empty snapshot (the mapper's HTTP arm
+    // returns `PermissionSnapshot::empty` for every profile).
+    // CLI runtimes get a snapshot with `--permission-mode <profile>`
+    // and the `WEAVE_TOOL_ALLOWLIST` env var.
+    use crate::agent::permissions::PermissionMapper;
+    let effective_permissions = crate::agent::permissions::ClaudeCodePermissionMapper::new()
+        .effective_permissions(session.runtime_kind, tool_profile);
 
     crate::agent::turn_context::TurnContext {
         session_id: session.id.clone(),
@@ -526,18 +558,7 @@ fn build_turn_context(
         },
         cli_resume_id,
         runtime_kind: session.runtime_kind,
-        // feat-046 wires the per-runtime `PermissionMapper` here
-        // (looking up `session.specialist_id` against the
-        // `SpecialistRegistry` to resolve the `ToolProfile`, then
-        // calling `ClaudeCodePermissionMapper::new().effective_permissions`).
-        // For feat-046 we only define the trait + Claude Code
-        // impl; the wiring of the mapper into session creation is
-        // feat-051's job. The empty snapshot is the HTTP default
-        // — it has no effect on Anthropic-native turns.
-        effective_permissions: crate::agent::permissions::PermissionSnapshot::empty(
-            session.runtime_kind,
-            crate::agent::permissions::ToolProfile::Full,
-        ),
+        effective_permissions,
         cancellation_token: cancel_token,
     }
 }
@@ -683,7 +704,7 @@ async fn run_prompt_task(
     // code path; we keep the builder in `service::sessions` (not in
     // `agent::turn_context`) so the agent module stays free of a
     // `store::sessions::Session` upward dependency.
-    let turn_ctx = build_turn_context(&session, session_cwd, cancel_token.clone());
+    let turn_ctx = build_turn_context(&session, session_cwd, cancel_token.clone(), &specialists);
 
     // Drive the model ↔ tool-execution loop. This subsumes the
     // pre-feat-037 single-stream pipeline; tool calls now flow back into
@@ -779,10 +800,15 @@ async fn run_prompt_task(
     // blob that `build_turn_context` consumed at the start of this turn.
     // The inline `match` computes the per-turn `ResumeState` for the SSE
     // wire and decides whether to persist a fresh `cli_resume_id` or clear
-    // the stored id on a rejection. `did_reject` is hard-wired to `false`
-    // today — the runner that populates it is feat-051's
-    // `ClaudeCodeCodingAgent`; feat-047 establishes the data path and the
-    // state machine.
+    // the stored id on a rejection.
+    //
+    // For CLI runtimes, the `did_reject` signal is populated by the
+    // `ClaudeCodeCodingAgent` (feat-051) via the
+    // `ProviderRegistry::take_turn_outcome` side channel — the agent's
+    // spawned parser/translator task writes the outcome when the line
+    // stream ends, and we read it back here. For HTTP runtimes, no
+    // agent populates the map, so `take_turn_outcome` returns the
+    // default (`did_reject = false`).
     //
     // Branch semantics (all four arms are reachable once the runner
     // exists in feat-051; today only the `(false, _, _)` and
@@ -808,7 +834,21 @@ async fn run_prompt_task(
     // deserialize on a string that has not changed since turn start.
     let had_resume_attempt =
         turn_ctx.cli_resume_id.is_some() && session.runtime_kind == RuntimeKind::ClaudeCode;
-    let did_reject = false; // feat-051's runner populates this from `CliRunResult`.
+    // feat-051: pull the per-turn outcome from the registry side
+    // channel. The agent's spawned task populated it at end-of-stream;
+    // `take` clears the entry so the next turn starts fresh. For HTTP
+    // runtimes (and any session the agent never touched) the map has
+    // no entry and `did_reject` stays `false`.
+    let turn_outcome = registry.take_turn_outcome(session_id);
+    let did_reject = turn_outcome.did_reject;
+    // Prefer the agent's captured id (set by the parser) over the
+    // loop driver's `LoopResult` field — the agent's id is the
+    // source of truth. Today both paths produce the same value;
+    // the future journey translator move into the agent's
+    // spawned task makes the agent's id authoritative.
+    let captured_cli_resume_id = turn_outcome
+        .captured_cli_resume_id
+        .or(captured_cli_resume_id);
     let should_persist_capture = captured_cli_resume_id.is_some()
         && !matches!(
             stop_reason,
@@ -5707,8 +5747,9 @@ You are broken."#,
         // `run_prompt_task`; the test passes a pre-computed `PathBuf`
         // matching what the call site would supply.
         let cancel = CancellationToken::new();
+        let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::default());
         let build = |session: &crate::store::sessions::Session, cwd: PathBuf| {
-            super::build_turn_context(session, cwd, cancel.clone())
+            super::build_turn_context(session, cwd, cancel.clone(), &specialists)
         };
 
         // Case 1: bound session, no metadata — `codebase_root` is Some,
@@ -5865,7 +5906,9 @@ You are broken."#,
         // return the stored id.
         let session = SessionStore::get_by_id(&db, &session.id).expect("refetch");
         let cancel = CancellationToken::new();
-        let turn_ctx = super::build_turn_context(&session, PathBuf::from("."), cancel);
+        let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::default());
+        let turn_ctx =
+            super::build_turn_context(&session, PathBuf::from("."), cancel, &specialists);
         assert_eq!(turn_ctx.cli_resume_id.as_deref(), Some("turn-1-id"));
         assert_eq!(turn_ctx.runtime_kind, RuntimeKind::ClaudeCode);
     }

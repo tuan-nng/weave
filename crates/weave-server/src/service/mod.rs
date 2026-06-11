@@ -2,6 +2,9 @@ pub mod kanban;
 pub mod sessions;
 pub mod startup;
 
+#[cfg(test)]
+mod sessions_wrapped_tests;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

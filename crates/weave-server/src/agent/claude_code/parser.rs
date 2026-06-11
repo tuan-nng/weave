@@ -241,15 +241,26 @@ impl ClaudeCodeStreamParser {
 
     /// Drain any pending deferred `ToolUseStart` events at end-of-stream.
     /// Returns the first one if any are pending, or `None` if no
-    /// `tool_use` was in flight. Repeated calls drain in order; the
-    /// in-flight map is empty after the last pending block is emitted.
+    /// `tool_use` was in flight. Repeated calls return `None` once the
+    /// in-flight map is empty.
+    ///
+    /// Single-event back-compat shim — prefer [`Self::drain_pending`]
+    /// when the caller can iterate the full Vec, so a truncated
+    /// stream with multiple in-flight tool_uses emits them all in
+    /// registration order rather than dropping all but the first.
+    pub fn flush(&mut self) -> Option<StreamEvent> {
+        self.drain_pending().into_iter().next()
+    }
+
+    /// Drain every pending deferred `ToolUseStart` event at end-of-stream
+    /// and return them in registration order. Returns an empty `Vec` if
+    /// no `tool_use` was in flight.
     ///
     /// Callers should invoke this after the `LineStream` returns `None`
-    /// so that a CLI that exits without emitting `done` (e.g., it
-    /// crashed or was cancelled mid-stream) still surfaces its
-    /// in-flight `tool_use` blocks.
-    pub fn flush(&mut self) -> Option<StreamEvent> {
-        self.flush_pending().into_iter().next()
+    /// so a CLI that exits without emitting `done` (crash, cancel) still
+    /// surfaces every in-flight `tool_use` block.
+    pub fn drain_pending(&mut self) -> Vec<StreamEvent> {
+        self.flush_pending()
     }
 
     // --- private helpers ---

@@ -471,6 +471,58 @@ fn test_claude_code_parser_flush_drains_pending_at_end_of_stream() {
 }
 
 // ---------------------------------------------------------------------------
+// 11b. test_claude_code_parser_drain_pending_returns_all_in_flight —
+//      the `drain_pending` method (used by the agent's truncated-stream
+//      recovery path) must return EVERY in-flight tool_use in
+//      registration order, not just the first. A truncated stream
+//      (CLI crash, cancel mid-`tool_use`) leaves the parser with
+//      multiple pending blocks; dropping all but the first would lose
+//      the model's tool calls on the SSE wire.
+//
+//      Triggered by the code-review feedback on feat-051 — the
+//      single-event `flush` shim silently dropped events when the
+//      agent called it in a `while let Some(...)` loop. This test
+//      locks in the corrected `drain_pending` contract.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_claude_code_parser_drain_pending_returns_all_in_flight() {
+    let mut p = ClaudeCodeStreamParser::new();
+    p.feed_line(r#"{"type":"session_id","id":"sess-1"}"#)
+        .unwrap();
+    p.feed_line(r#"{"type":"tool_use","id":"toolu_a","name":"read_file","input":{"path":"/a"}}"#)
+        .unwrap();
+    p.feed_line(r#"{"type":"tool_use","id":"toolu_b","name":"write_file","input":{"path":"/b"}}"#)
+        .unwrap();
+    // No `done` line — CLI exited non-zero mid-stream.
+    let r = p.drain_pending();
+    assert_eq!(
+        r.len(),
+        2,
+        "drain_pending must return every in-flight tool_use, got {r:?}"
+    );
+    assert_eq!(
+        r[0],
+        StreamEvent::ToolUseStart {
+            id: "toolu_a".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "/a"})
+        }
+    );
+    assert_eq!(
+        r[1],
+        StreamEvent::ToolUseStart {
+            id: "toolu_b".into(),
+            name: "write_file".into(),
+            input: serde_json::json!({"path": "/b"})
+        }
+    );
+    // A second drain is a no-op — the in-flight map is empty.
+    assert!(p.drain_pending().is_empty());
+    // `flush` (single-event back-compat shim) also returns None now.
+    assert_eq!(p.flush(), None);
+}
+
+// ---------------------------------------------------------------------------
 // 12. test_claude_code_parser_tool_use_with_complete_input — the fake's
 //     `text+tool+done` shape: `tool_use` carries a complete `input` AND
 //     no subsequent `input_json_delta`. The parser must still defer to
