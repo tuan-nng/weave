@@ -48,6 +48,13 @@ export interface Provider {
   args_json: string | null;
   env_json: string | null;
   permission_mode: string | null;
+  /// feat-053: per-provider health snapshot from `ProviderRegistry`'s
+  /// 10s `HealthCache`. `false` when the cache has never been warmed
+  /// for this provider id (the conservative default — the wizard
+  /// treats unseen-cache as unhealthy and grey-out non-selectable).
+  /// The frontend doesn't probe on its own; the next health check
+  /// tick will flip it.
+  healthy: boolean;
   created_at: string;
 }
 
@@ -236,12 +243,35 @@ export interface CreateProviderRequest {
   permission_mode?: string;
 }
 
+/// feat-053: matches the backend's `CreateSessionRequest` after the
+/// runtime/mode widening in feat-038. The legacy `cwd` field is gone
+/// (use `codebase_id` instead — the server copies the codebase's path
+/// onto the session); `runtime_kind` / `mode` / `runtime_metadata_json`
+/// are the new optional fields. The kebab-case strings map 1:1 to the
+/// backend's `RuntimeKind` / `SessionMode` enums; unknown values get
+/// rejected with 400 at parse time, so we don't need to mirror the
+/// Rust enums in TS.
 export interface CreateSessionRequest {
   provider_id: string;
   specialist_id?: string;
   model?: string;
-  cwd?: string;
+  codebase_id?: string;
   parent_session_id?: string;
+  /// One of the values the backend accepts in `RuntimeKind`:
+  /// `"anthropic-api"`, `"claude-code"`, `"codex"`, `"opencode"`.
+  /// The wizard picks this from the chosen provider's `kind`
+  /// (`http` → `"anthropic-api"`, `cli` → `"claude-code"`); the
+  /// type is the union of wire strings for clarity.
+  runtime_kind?: "anthropic-api" | "claude-code" | "codex" | "opencode";
+  /// One of the values the backend accepts in `SessionMode`:
+  /// `"native"` or `"wrapped"`. The wizard pairs this with
+  /// `runtime_kind` per the runtime×mode matrix (see
+  /// `web/src/lib/runtime-matrix.ts`).
+  mode?: "native" | "wrapped";
+  /// Per-runtime JSON blob. Most call sites leave this `undefined`;
+  /// the wizard only forwards it on resume flows. Shape is keyed
+  /// on `runtime_kind` (e.g. `{cli_resume_id: "..."}` for CLI).
+  runtime_metadata_json?: string | null;
 }
 
 // ---------------------------------------------------------------------------

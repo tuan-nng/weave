@@ -116,6 +116,16 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             axum::routing::patch(kanban::update_task).delete(kanban::delete_task),
         )
         .route("/api/boards/{bid}/stream", get(kanban::board_stream))
+        // Unbound tasks (feat-053): workspace-wide list of active tasks
+        // not bound to a session. New-session wizard Step 4 input. The
+        // `?unbound=true` filter is required; the handler returns 400
+        // for missing/false. Mounted at /api/workspaces/{wid}/tasks to
+        // mirror the boards / codebases / sessions workspace-scope
+        // pattern.
+        .route(
+            "/api/workspaces/{wid}/tasks",
+            get(kanban::list_unbound_tasks),
+        )
         // Codebase routes (feat-032). list/create are workspace-scoped;
         // get/delete are at the top level and take `?wid=` for the
         // cross-workspace 404 guard.

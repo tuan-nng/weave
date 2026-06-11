@@ -12,11 +12,16 @@ use uuid::Uuid;
 /// us pre-register Claude Code / Codex / OpenCode providers before their
 /// dispatch adapters land in feat-051.
 ///
+/// feat-053 adds `healthy: bool` — populated by `list_providers` from the
+/// in-memory `ProviderRegistry::cached_health_for` cache. The store layer
+/// sets it to `false` (the cold-cache default); the handler enriches it
+/// before serialization.
+///
 /// Field order in the struct mirrors the SELECT column order in `map_row`.
 ///
 /// Wire shape (JSON):
 ///   * `id`, `type`, `kind`, `name`, `default_model`, `binary_path`,
-///     `args_json`, `env_json`, `permission_mode`, `created_at`
+///     `args_json`, `env_json`, `permission_mode`, `healthy`, `created_at`
 ///   * `config_json` is NEVER serialized (carries `api_key` for HTTP rows
 ///     and the canonical `{"default_model": ...}` wrapper for CLI rows)
 ///   * `api_key` is never present — HTTP rows get it via `config_json` only
@@ -33,6 +38,13 @@ pub struct Provider {
     pub args_json: Option<String>,
     pub env_json: Option<String>,
     pub permission_mode: Option<String>,
+    /// feat-053: per-provider health snapshot from `ProviderRegistry`'s
+    /// 10s `HealthCache`. `false` when the cache has never been warmed
+    /// in this process lifetime (the conservative default; the wizard
+    /// hides unproven providers rather than offering broken ones).
+    /// The store layer always sets this to `false`; the handler in
+    /// `api/providers.rs::list_providers` enriches it from the registry.
+    pub healthy: bool,
     #[serde(skip_serializing)]
     pub config_json: String,
     pub created_at: String,
@@ -223,6 +235,11 @@ impl ProviderStore {
     ///   8  permission_mode
     ///   9  config_json   (skipped from wire serialization)
     ///   10 created_at
+    ///
+    /// `healthy` is NOT read from the database — the column does not
+    /// exist there. The store layer writes `false` (the unseen-cache
+    /// default); the API handler enriches from `ProviderRegistry`
+    /// before serialization (feat-053).
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
         Ok(Provider {
             id: row.get(0)?,
@@ -234,6 +251,7 @@ impl ProviderStore {
             args_json: row.get(6)?,
             env_json: row.get(7)?,
             permission_mode: row.get(8)?,
+            healthy: false,
             config_json: row.get(9)?,
             created_at: row.get(10)?,
         })

@@ -259,6 +259,49 @@ impl TaskStore {
         Self::list(db, workspace_id, Some(board_id), None, None, None)
     }
 
+    /// List active tasks in `workspace_id` that are not currently
+    /// bound to a session (feat-053).
+    ///
+    /// Used by the new-session wizard's Step 4 "attach to a task"
+    /// picker. The "unbound + active" predicate is the canonical
+    /// "this task is ready for someone to pick it up" signal in
+    /// the kanban model: a task is `active` until done/archived,
+    /// and the lane-automation flow binds a session via
+    /// `tasks.session_id` when a card moves into an
+    /// `auto_trigger=true` column. A `NULL` `session_id` means
+    /// the card is sitting in the queue, not currently in flight.
+    ///
+    /// Equivalent SQL:
+    ///   SELECT t.* FROM tasks t
+    ///   JOIN boards b ON b.id = t.board_id
+    ///   WHERE b.workspace_id = ?1
+    ///     AND t.status = 'active'
+    ///     AND t.session_id IS NULL
+    ///   ORDER BY t.position ASC, t.id ASC
+    ///   LIMIT 500
+    ///
+    /// Hard Constraint #5 (workspace-scoping) is enforced via the
+    /// JOIN. `DEFAULT_LIST_LIMIT` (500) caps the result; a future
+    /// pagination follow-up can add `?limit=&offset=` when a single
+    /// workspace ever holds more than 500 unbound active tasks.
+    pub fn list_unbound_in_workspace(db: &Db, workspace_id: &str) -> Result<Vec<Task>, AppError> {
+        let conn = db.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SELECT_COLS}
+             FROM tasks t
+             JOIN boards b ON b.id = t.board_id
+             WHERE b.workspace_id = ?1
+               AND t.status = 'active'
+               AND t.session_id IS NULL
+             ORDER BY t.position ASC, t.id ASC
+             LIMIT {DEFAULT_LIST_LIMIT}"
+        ))?;
+        let rows: Vec<Task> = stmt
+            .query_map([workspace_id], Self::map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Update task status with validation, scoped to a workspace.
     ///
     /// Validates against `VALID_TASK_STATUSES` before hitting the database.
@@ -1142,5 +1185,129 @@ mod tests {
         let updated = TaskStore::update(&db, &task.id, &ws, &second).unwrap();
         assert_eq!(updated.title, "Renamed");
         assert_eq!(updated.description.as_deref(), Some("first desc"));
+    }
+
+    // ---- feat-053: list_unbound_in_workspace ----
+
+    /// Inserts a task with an optional `session_id` directly via SQL
+    /// (the `create_test_task` helper always sets `session_id = NULL`
+    /// which is the wrong fixture for the unbound test). Returns the
+    /// id so the test can assert on it. The caller is responsible for
+    /// ensuring `session_id` (if `Some`) points to an existing row in
+    /// `sessions` — `tasks.session_id` has `REFERENCES sessions(id)`,
+    /// so a foreign-key violation otherwise aborts the insert.
+    fn insert_task_with_session(
+        db: &Db,
+        board_id: &str,
+        column_id: &str,
+        title: &str,
+        status: &str,
+        session_id: Option<&str>,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO tasks (id, board_id, column_id, title, position, status, session_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?7)",
+                rusqlite::params![id, board_id, column_id, title, status, session_id, now],
+            )
+            .unwrap();
+        id
+    }
+
+    /// Inserts a minimal `sessions` row scoped to `workspace_id` so
+    /// that a task can legally reference it. The session's other
+    /// fields don't matter for the unbound-task query — we only need
+    /// the FKs to `workspaces` and `providers` to exist. We reuse
+    /// `kanban_test_helpers::seed_provider` to satisfy `provider_id`.
+    fn insert_minimal_session(db: &Db, workspace_id: &str, session_id: &str) {
+        let provider_id = crate::store::kanban_test_helpers::seed_provider(db);
+        let now = Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (id, workspace_id, provider_id, status, runtime_kind, mode, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'connecting', 'claude-code', 'wrapped', ?4, ?4)",
+                rusqlite::params![session_id, workspace_id, provider_id, now],
+            )
+            .unwrap();
+    }
+
+    /// Only the (active, unbound) task is returned. The other two
+    /// fixtures cover the reject paths: (active, bound) is "in
+    /// flight" — a session has it; (done, unbound) is "finished" —
+    /// a future pick-up would be wrong (the wizard should not offer
+    /// closed work).
+    #[test]
+    fn test_list_unbound_tasks_returns_active_with_no_session() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+
+        let unbound =
+            insert_task_with_session(&db, &board_id, &col_id, "Pick me up", "active", None);
+        // The bound fixture needs a real `sessions` row (FK). Seed
+        // one with a fresh UUID and reference it.
+        let bound_session = Uuid::new_v4().to_string();
+        insert_minimal_session(&db, &ws, &bound_session);
+        let _bound = insert_task_with_session(
+            &db,
+            &board_id,
+            &col_id,
+            "Already working on this",
+            "active",
+            Some(&bound_session),
+        );
+        let _done = insert_task_with_session(&db, &board_id, &col_id, "Finished", "done", None);
+
+        let tasks = TaskStore::list_unbound_in_workspace(&db, &ws).unwrap();
+        assert_eq!(tasks.len(), 1, "only active+unbound should be returned");
+        assert_eq!(tasks[0].id, unbound);
+        assert_eq!(tasks[0].status, "active");
+        assert!(tasks[0].session_id.is_none());
+    }
+
+    /// Hard Constraint #5: every query includes `workspace_id`. A
+    /// second workspace's tasks must never leak into the first
+    /// workspace's response.
+    #[test]
+    fn test_list_unbound_tasks_excludes_other_workspace() {
+        let db = test_db();
+        let (ws_a, board_a, col_a) = seed_workspace_with_board(&db);
+        // Seed a second workspace + board + column directly (the
+        // helper only seeds the default workspace).
+        let ws_b = Uuid::new_v4().to_string();
+        let board_b = Uuid::new_v4().to_string();
+        let col_b = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO workspaces (id, name, status, created_at, updated_at)
+                 VALUES (?1, 'ws-b', 'active', ?2, ?2)",
+                rusqlite::params![ws_b, now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO boards (id, workspace_id, name, created_at)
+                 VALUES (?1, ?2, 'b-board', ?3)",
+                rusqlite::params![board_b, ws_b, now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO columns (id, board_id, name, position, created_at)
+                 VALUES (?1, ?2, 'b-col', 0, ?3)",
+                rusqlite::params![col_b, board_b, now],
+            )
+            .unwrap();
+
+        insert_task_with_session(&db, &board_a, &col_a, "A task", "active", None);
+        insert_task_with_session(&db, &board_b, &col_b, "B task", "active", None);
+
+        let from_a = TaskStore::list_unbound_in_workspace(&db, &ws_a).unwrap();
+        let from_b = TaskStore::list_unbound_in_workspace(&db, &ws_b).unwrap();
+        assert_eq!(from_a.len(), 1);
+        assert_eq!(from_b.len(), 1);
+        assert_ne!(from_a[0].id, from_b[0].id);
     }
 }

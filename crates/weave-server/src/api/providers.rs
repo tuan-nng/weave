@@ -41,10 +41,20 @@ pub struct CreateProviderRequest {
 }
 
 /// GET /api/providers
+///
+/// feat-053: enriches each row with `healthy: bool` from the registry's
+/// 10s `HealthCache` so the new-session wizard's Step 1 can gate on
+/// per-provider health without an extra round-trip. The `cached_health_for`
+/// accessor is sync and lock-only (no I/O), so the handler stays `async`
+/// without a real await — the signature is fixed by Axum and the cost is
+/// negligible.
 pub async fn list_providers(
     axum::Extension(state): axum::Extension<AppState>,
 ) -> Result<Json<DataResponse<Vec<Provider>>>, AppError> {
-    let providers = ProviderStore::list(&state.db)?;
+    let mut providers = ProviderStore::list(&state.db)?;
+    for p in providers.iter_mut() {
+        p.healthy = state.registry.cached_health_for(&p.id);
+    }
     Ok(Json(DataResponse { data: providers }))
 }
 
@@ -542,6 +552,14 @@ mod tests {
 
     /// Build a test app with provider routes.
     fn test_app() -> Router {
+        test_app_with_state().0
+    }
+
+    /// Same as `test_app`, but returns the `(Router, AppState)` pair so
+    /// tests that need to seed agents (and therefore warm the health
+    /// cache) can keep a handle to the registry. The default `test_app`
+    /// keeps the simpler 1-return shape for the existing CRUD tests.
+    fn test_app_with_state() -> (Router, AppState) {
         let db = std::sync::Arc::new(Db::open(Path::new(":memory:")).unwrap());
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
@@ -564,7 +582,7 @@ mod tests {
         };
         let start_time = crate::api::health::ServerStartTime(std::time::Instant::now());
 
-        Router::new()
+        let router = Router::new()
             .route(
                 "/api/providers",
                 axum::routing::get(list_providers).post(create_provider),
@@ -577,8 +595,9 @@ mod tests {
                 "/api/providers/{id}/models",
                 axum::routing::get(list_provider_models).post(refresh_provider_models),
             )
-            .layer(axum::Extension(state))
-            .layer(axum::Extension(start_time))
+            .layer(axum::Extension(state.clone()))
+            .layer(axum::Extension(start_time));
+        (router, state)
     }
 
     fn extract_json(body: &[u8]) -> Value {
@@ -1981,6 +2000,171 @@ mod tests {
                 .unwrap_or("")
                 .contains("sh"),
             "error must name the basename, got: {resp_json}"
+        );
+    }
+
+    // ---- feat-053: healthy field on GET /api/providers ----
+
+    /// A freshly booted server with no prior `cached_health_summary`
+    /// call must mark every provider `healthy: false`. The wizard's
+    /// Step 1 uses this to hide unproven providers rather than
+    /// offering broken ones (cold-start safety).
+    #[tokio::test]
+    async fn test_provider_healthy_field_default_false_when_cache_cold() {
+        let (app, _state) = test_app_with_state();
+
+        // Create one HTTP provider so the list isn't empty.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // GET /api/providers — cache is cold (no probe has run).
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        let items = json["data"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0]["healthy"], false,
+            "cold cache must surface healthy: false"
+        );
+    }
+
+    /// After a `cached_health_summary` call warms the cache with a
+    /// healthy agent, GET /api/providers must reflect that. This is
+    /// the hot path: a periodic health-probe (or a call from the
+    /// aggregate `/api/health`) populates the snapshot, and the
+    /// wizard sees live status within the 10s TTL.
+    #[tokio::test]
+    async fn test_provider_healthy_field_reflects_cache_after_probe() {
+        use crate::agent::registry::ProviderRegistry;
+        use crate::agent::CodingAgent;
+        use crate::agent::ProviderHealth;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (app, state) = test_app_with_state();
+
+        // Create a provider row in the DB so the list isn't empty.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let provider_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Register a stub agent that reports healthy=true; warm the
+        // cache via the aggregate accessor. The 10s TTL window is
+        // plenty for the immediate GET.
+        struct StubHealthy;
+        #[async_trait::async_trait]
+        impl CodingAgent for StubHealthy {
+            fn provider_type(&self) -> &str {
+                "stub"
+            }
+            fn display_name(&self) -> &str {
+                "stub"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _req: crate::agent::MessageRequest,
+                _turn: &crate::agent::turn_context::TurnContext,
+            ) -> Result<
+                std::pin::Pin<
+                    Box<
+                        dyn futures_util::Stream<
+                                Item = Result<
+                                    crate::agent::StreamEvent,
+                                    crate::error::ProviderError,
+                                >,
+                            > + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                Err(crate::error::ProviderError::Unreachable("stub".into()))
+            }
+            async fn health_check(&self) -> Result<ProviderHealth, crate::error::ProviderError> {
+                Ok(ProviderHealth {
+                    healthy: true,
+                    latency_ms: 1,
+                    error: None,
+                })
+            }
+        }
+        state
+            .registry
+            .add_agent(&provider_id, std::sync::Arc::new(StubHealthy));
+        let _ = state.registry.cached_health_summary().await;
+
+        // GET /api/providers — cache is now warm with healthy=true
+        // for our stub.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        let items = json["data"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0]["healthy"], true,
+            "warmed cache with healthy=true must surface healthy: true"
+        );
+
+        // Suppress the unused-imports lint for the types named
+        // above for documentation symmetry with the other registry
+        // test (`test_cached_health_summary_cache_hit_within_ttl`).
+        let _ = (
+            AtomicUsize::new(0).load(Ordering::SeqCst),
+            ProviderRegistry::new,
         );
     }
 }

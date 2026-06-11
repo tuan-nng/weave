@@ -255,4 +255,13 @@ export const api = {
         method: "DELETE",
       }),
   },
+
+  // Tasks (feat-053). The unbound endpoint serves the wizard's Step 4
+  // task picker; we only expose the one query we need, with the
+  // server-side `?unbound=true` filter baked in. Returns
+  // `Task[]` (active + `session_id IS NULL` in the workspace).
+  tasks: {
+    unbound: (workspaceId: string) =>
+      apiFetch<Task[]>(`/api/workspaces/${workspaceId}/tasks?unbound=true`),
+  },
 };

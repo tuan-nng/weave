@@ -56,4 +56,12 @@ export const queryKeys = {
     detail: (workspaceId: string, codebaseId: string) =>
       [...queryKeys.codebases.all(), "detail", workspaceId, codebaseId] as const,
   },
+
+  // Tasks (feat-053). The wizard's Step 4 task picker queries the
+  // unbound endpoint (`?unbound=true`); the key is workspace-scoped
+  // to keep the cache isolated per workspace.
+  tasks: {
+    all: () => [...queryKeys.all, "tasks"] as const,
+    unbound: (workspaceId: string) => [...queryKeys.tasks.all(), "unbound", workspaceId] as const,
+  },
 } as const;

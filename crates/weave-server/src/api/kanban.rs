@@ -34,6 +34,7 @@ use crate::store::boards::{BoardStore, NewColumnSpec};
 use crate::store::columns::{Column, ColumnStore};
 use crate::store::providers::ProviderStore;
 use crate::store::tasks::{Task, TaskStore, UpdateTask};
+use crate::store::workspaces::WorkspaceStore;
 use crate::AppState;
 
 const MAX_BOARD_NAME_LEN: usize = 100;
@@ -182,6 +183,61 @@ pub async fn list_boards(
 ) -> Result<Json<DataResponse<Vec<crate::store::boards::Board>>>, AppError> {
     let boards = BoardStore::list_by_workspace(&state.db, &workspace_id)?;
     Ok(Json(DataResponse { data: boards }))
+}
+
+// ---------------------------------------------------------------------------
+// Unbound-tasks handler (feat-053) — surfaces "active tasks not currently
+// being worked on" for the new-session wizard's Step 4.
+// ---------------------------------------------------------------------------
+
+/// Query string for `GET /api/workspaces/{wid}/tasks`.
+///
+/// The `unbound` parameter is REQUIRED. `?unbound=true` returns active
+/// tasks without a `session_id`; `?unbound=false` (or absent) is
+/// rejected with 400 — the endpoint exists for one specific query and
+/// the wizard always wants unbound. Future filter needs (e.g. by
+/// `column_id`, by `tag`) can grow this DTO without a path change.
+#[derive(Deserialize)]
+pub struct ListUnboundTasksQuery {
+    pub unbound: Option<bool>,
+}
+
+/// GET /api/workspaces/{wid}/tasks?unbound=true
+///
+/// Returns the workspace's active tasks that have no session bound
+/// (`status = 'active' AND session_id IS NULL`). Used by the
+/// new-session wizard's Step 4 (feat-053) to let the user attach a
+/// session to an existing backlog card.
+///
+/// The endpoint exists for one purpose; the strict `?unbound=true`
+/// filter keeps the URL grammar deterministic — a `?unbound=false`
+/// query is meaningless (it would be `list` with a different name) so
+/// we reject it explicitly rather than silently returning all tasks.
+pub async fn list_unbound_tasks(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(workspace_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<ListUnboundTasksQuery>,
+) -> Result<Json<DataResponse<Vec<Task>>>, AppError> {
+    if params.unbound != Some(true) {
+        return Err(AppError::validation_with_code(
+            "missing_unbound_filter",
+            "this endpoint requires ?unbound=true",
+        ));
+    }
+    // Explicit 404 on unknown workspace, matching the parity of
+    // `GET /api/workspaces/{wid}` (which 404s on unknown id) and
+    // `get_board`'s cross-workspace guard. The store's JOIN would
+    // also return an empty Vec for an unknown wid, but a silent
+    // empty array is worse for the wizard UX (it would render "0
+    // tasks" for a typo'd workspace id).
+    if WorkspaceStore::get_by_id(&state.db, &workspace_id).is_err() {
+        return Err(AppError::NotFound {
+            resource: "workspace".into(),
+            id: workspace_id,
+        });
+    }
+    let tasks = TaskStore::list_unbound_in_workspace(&state.db, &workspace_id)?;
+    Ok(Json(DataResponse { data: tasks }))
 }
 
 /// GET /api/workspaces/{wid}/boards/{id}
@@ -900,6 +956,10 @@ mod tests {
                 axum::routing::patch(update_task).delete(delete_task),
             )
             .route("/api/boards/{bid}/stream", axum::routing::get(board_stream))
+            .route(
+                "/api/workspaces/{wid}/tasks",
+                axum::routing::get(list_unbound_tasks),
+            )
             .layer(axum::Extension(state))
     }
 
@@ -2156,5 +2216,88 @@ mod tests {
         let _event = build_heartbeat_event();
         let data = serde_json::to_string(&SseWireEvent::Heartbeat {}).unwrap();
         assert_eq!(data, "{\"type\":\"heartbeat\"}");
+    }
+
+    /// feat-053: the `?unbound=true` filter is mandatory. A request
+    /// with no query (or `?unbound=false`) is rejected with 400 + the
+    /// `missing_unbound_filter` code, because the endpoint exists for
+    /// one purpose and the strict grammar keeps the URL deterministic.
+    /// The happy path returns the workspace's active+unbound tasks
+    /// (empty Vec in the default test workspace).
+    #[tokio::test]
+    async fn test_unbound_tasks_endpoint_rejects_missing_or_false_param() {
+        let state = make_test_state();
+        let ws_id: String = state
+            .db
+            .conn()
+            .query_row("SELECT id FROM workspaces WHERE name='default'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let app = test_app(state);
+
+        // No query → 400.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces/{}/tasks", ws_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(
+            json.pointer("/error/code").and_then(|v| v.as_str()),
+            Some("missing_unbound_filter")
+        );
+
+        // Explicit `?unbound=false` → 400 (same code).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces/{}/tasks?unbound=false", ws_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(
+            json.pointer("/error/code").and_then(|v| v.as_str()),
+            Some("missing_unbound_filter")
+        );
+
+        // Happy path: `?unbound=true` → 200 with empty `data` array.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces/{}/tasks?unbound=true", ws_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert!(json.get("data").map(|d| d.is_array()).unwrap_or(false));
+        assert_eq!(
+            json.get("data").and_then(|d| d.as_array()).map(|a| a.len()),
+            Some(0)
+        );
     }
 }

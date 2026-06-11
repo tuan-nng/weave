@@ -777,14 +777,14 @@
       "phase": "phase-9",
       "behavior": "Replace the current 3-field 'New Session' modal with a 4-step wizard. Step 1: Runtime Tool picker. List comes from `GET /api/providers` (kind + display_name); only providers with healthy `health_check` results from the last cache window are selectable. Step 2: Role (specialist) picker. List comes from the existing specialists endpoint; the picker is filtered to specialists whose `tool_profile` is compatible with the chosen Runtime Tool (the matrix from feat-040 is enforced client-side for UX and server-side for safety). Step 3: Model picker. List comes from `GET /api/providers/:id/models` (the cache from feat-042); first entry is pre-selected. Step 4: workspace target (default: current workspace), optional codebase (filtered to the workspace's codebases), optional kanban task (filtered to active tasks not currently being worked on). Each step has a Back button; the final Submit button creates the session. The backend `POST /api/workspaces/:wid/sessions` is extended to accept `runtime_kind` and `mode` (defaulting to `claude-code`/`wrapped` if the chosen provider is CLI, `anthropic-api`/`native` if HTTP). Validation errors surface inline with the failing step highlighted.",
       "verification": "cd web && bun run test -- --run new-session-wizard && cd web && bun run test && cd web && bun run lint",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-021",
         "feat-040",
         "feat-041",
         "feat-042"
       ],
-      "evidence": ""
+      "evidence": "Implemented in commit feat-053 (2026-06-11). Backend: 5 new tests (test_provider_healthy_field_default_false_when_cache_cold, test_provider_healthy_field_reflects_cache_after_probe, test_list_unbound_tasks_returns_active_with_no_session, test_list_unbound_tasks_excludes_other_workspace, test_unbound_tasks_endpoint_rejects_missing_or_false_param) — total 791 Rust + 124 frontend tests pass. Frontend: NewSessionWizard (4-step useReducer FSM, Runtime/Role/Model/Workspace steps) replaces the 3-field NewSessionModal in-place. New useProviderModels and useUnboundTasks hooks. New runtime-matrix.ts owns the client-side compat policy. Mount sites in pages/workspace.tsx and pages/sessions.tsx swap in-place. Spec verification: `cd web && bun run test` passes (124/124, 11 sessions tests including 8 wizard tests: 4-step chrome, healthy filter, compat matrix regression, model pre-select, error-jump, E2E submit, nested NewCodebaseModal, plus the empty-state test). `cd web && bun run lint` clean. Full 3-layer init.sh gate green (clippy + fmt + prettier + ESLint + 791 Rust tests + 124 frontend tests + cargo build + smoke test)."
     },
     {
       "id": "feat-054",

@@ -323,6 +323,41 @@ impl ProviderRegistry {
         summarize(&probed)
     }
 
+    /// Return the most recently probed health for `provider_id` from
+    /// the 10s `HealthCache` (feat-053). Returns `false` when the id
+    /// was never probed in this process lifetime (cold start) or when
+    /// the cache has been invalidated. Does **not** trigger a probe —
+    /// the wizard's Step 1 keeps a provider greyed until the first
+    /// `cached_health_summary` call (typically from the
+    /// `/api/health` aggregate endpoint) warms the cache, rather
+    /// than blocking the list response on per-id I/O.
+    ///
+    /// Locking: takes the `health_cache` mutex once, clones the
+    /// snapshot out, and iterates the clone — the lock window is the
+    /// clone only, not the lookup. `list_providers` (the only caller)
+    /// holds the snapshot across an N-row loop without re-locking.
+    pub fn cached_health_for(&self, provider_id: &str) -> bool {
+        let snapshot = {
+            let cache = self
+                .health_cache
+                .lock()
+                .expect("health cache lock poisoned");
+            // If the cache has never been warmed, every provider is
+            // "unseen" — return false for all of them. This mirrors
+            // the existing `cached_health_summary` aggregate behavior
+            // (uncached ids simply do not appear in the snapshot).
+            if cache.fetched_at.is_none() {
+                return false;
+            }
+            cache.snapshot.clone()
+        };
+        snapshot
+            .iter()
+            .find(|(id, _)| id == provider_id)
+            .map(|(_, healthy)| *healthy)
+            .unwrap_or(false)
+    }
+
     /// Return the cached snapshot if it exists AND is younger than
     /// [`HEALTH_CACHE_TTL`]. Otherwise `None`.
     fn fresh_snapshot(&self) -> Option<Vec<(String, bool)>> {

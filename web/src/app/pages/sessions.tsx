@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { useWorkspaces, useWorkspaceSessions } from "../../hooks/use-workspaces";
-import { NewSessionModal } from "../../components/new-session-modal";
+import { NewSessionWizard } from "../../components/new-session-wizard";
 import { ROUTES } from "../../lib/routes";
 import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
@@ -108,7 +108,7 @@ export default function SessionsPage() {
         ))
       )}
 
-      <NewSessionModal
+      <NewSessionWizard
         workspaceId={createWorkspaceId}
         onClose={() => setCreateWorkspaceId(null)}
         onCreated={(session) => navigate(ROUTES.session(session.id))}
