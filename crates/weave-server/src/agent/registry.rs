@@ -112,6 +112,12 @@ struct HealthCache {
 /// How long a cached health snapshot is considered fresh.
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(10);
 
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProviderRegistry {
     /// Create an empty registry with a fresh `ActiveChildProcesses`
     /// table. Use this in tests; use [`ProviderRegistry::with_shared_process_registry`]

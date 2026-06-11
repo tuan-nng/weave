@@ -21,6 +21,12 @@ pub struct SseManager {
     counters: RwLock<HashMap<String, AtomicU64>>,
 }
 
+impl Default for SseManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SseManager {
     pub fn new() -> Self {
         Self {

@@ -55,6 +55,12 @@ struct CachedModels {
     fetched_at: Instant,
 }
 
+impl Default for ModelCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelCache {
     /// Create a new cache with the default 5-minute TTL.
     pub fn new() -> Self {

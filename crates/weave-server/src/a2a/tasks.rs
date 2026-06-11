@@ -93,7 +93,7 @@ pub async fn get_task(
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetTaskParams {
+pub struct GetTaskParams {
     #[serde(default)]
     include_history: Option<bool>,
     #[serde(default)]

@@ -18,6 +18,12 @@ pub struct ActiveSessions {
     inner: Mutex<HashMap<String, CancellationToken>>,
 }
 
+impl Default for ActiveSessions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActiveSessions {
     pub fn new() -> Self {
         Self {
@@ -70,6 +76,11 @@ impl ActiveSessions {
             .len()
     }
 
+    /// Whether there are no currently-active sessions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Cancel every active session's token.
     ///
     /// Iterates the map, calls `.cancel()` on each `CancellationToken`, and
@@ -116,6 +127,12 @@ pub struct ActiveChildProcesses {
     inner: Mutex<HashMap<String, u32>>,
 }
 
+impl Default for ActiveChildProcesses {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ActiveChildProcesses {
     pub fn new() -> Self {
         Self {
@@ -152,6 +169,11 @@ impl ActiveChildProcesses {
             .expect("active_child_processes lock poisoned")
             .get(session_id)
             .copied()
+    }
+
+    /// Whether there are no currently-tracked children.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Number of currently-tracked children.

@@ -48,7 +48,7 @@ const REAP_REASON: &str = "orphan: server restarted with active session";
 ///
 /// Safe to call from the synchronous startup path: it holds the DB mutex
 /// only for the duration of one transaction.
-pub(crate) fn reap_orphans(db: &Db) -> Result<u64, AppError> {
+pub fn reap_orphans(db: &Db) -> Result<u64, AppError> {
     db.with_transaction(|conn| {
         // 1. Collect the survivor IDs in this transaction. We can't bind
         //    a subquery directly to the UPDATE in SQLite without a CTE,
@@ -104,7 +104,7 @@ pub(crate) fn reap_orphans(db: &Db) -> Result<u64, AppError> {
 
 /// Counts returned by [`reap_cli_processes`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ReapSummary {
+pub struct ReapSummary {
     /// Number of `/proc` entries inspected (excludes non-numeric dirs).
     pub scanned: u32,
     /// Number of entries that matched the `parent_pid == getpid() &&
@@ -142,7 +142,7 @@ pub(crate) struct ReapSummary {
 /// Unix-only — see `process_group(0)` at
 /// `agent/cli_runner.rs:242-245`).
 #[cfg(unix)]
-pub(crate) fn reap_cli_processes(db: &Db) -> Result<ReapSummary, AppError> {
+pub fn reap_cli_processes(db: &Db) -> Result<ReapSummary, AppError> {
     let mut summary = ReapSummary::default();
 
     let allowlist = cli_provider_allowlist(db)?;
@@ -218,7 +218,7 @@ pub(crate) fn reap_cli_processes(db: &Db) -> Result<ReapSummary, AppError> {
 /// Non-Unix is a no-op. The runner is Unix-only, so there are no
 /// CLI children to reap on Windows.
 #[cfg(not(unix))]
-pub(crate) fn reap_cli_processes(_db: &Db) -> Result<ReapSummary, AppError> {
+pub fn reap_cli_processes(_db: &Db) -> Result<ReapSummary, AppError> {
     Ok(ReapSummary::default())
 }
 

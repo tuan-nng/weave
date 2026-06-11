@@ -17,6 +17,7 @@ use crate::error::{AppError, ProviderError};
 pub mod anthropic;
 pub mod claude_code;
 pub mod cli_runner;
+pub mod conformance;
 pub mod model_cache;
 pub mod permissions;
 pub mod registry;

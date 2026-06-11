@@ -109,10 +109,9 @@ pub struct TurnContext {
     pub cancellation_token: CancellationToken,
 }
 
-// ---- Test support (shared across test modules) ----
+// ---- Test support (shared across test modules and integration tests) ----
 
-#[cfg(test)]
-pub(crate) mod test_support {
+pub mod test_support {
     use super::*;
 
     /// Build a `TurnContext` for tests with sensible defaults: a fresh
@@ -120,7 +119,7 @@ pub(crate) mod test_support {
     /// empty `PermissionSnapshot` (the HTTP default), and the
     /// pre-feat-038 `AnthropicApi` runtime kind. Tests that need
     /// different values build the struct directly.
-    pub(crate) fn make_test_turn_context() -> TurnContext {
+    pub fn make_test_turn_context() -> TurnContext {
         TurnContext {
             session_id: "test-session".to_string(),
             workspace_id: "test-workspace".to_string(),

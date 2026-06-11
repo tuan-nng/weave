@@ -829,7 +829,7 @@
       "phase": "phase-10",
       "behavior": "A shared CLI adapter conformance test suite that every `CliCodingAgent` impl must pass before shipping. The suite lives in `crates/weave-server/tests/cli_conformance.rs` and exercises the adapter contract independent of which CLI is being wrapped. Conformance cases: (a) argv construction from a `CliInvocation` matches the recorded expected argv; (b) the stream parser maps a canonical event sequence to the expected `StreamEvent` sequence; (c) the resume id is captured and persisted; (d) the `PermissionMapper` produces a `PermissionSnapshot` whose serialized form matches the expected JSON for each `ToolProfile`; (e) the journey translator records the canonical tool_call and file_change events; (f) the runner handles `permission_denied` and `crash` scenarios from the fake CLI harness (feat-044) by mapping them to `StreamEvent::Error` and terminating the stream; (g) the adapter rejects sessions whose `cwd` is outside a registered codebase (the validation is enforced upstream in feat-050; the conformance test confirms the adapter's `TurnContext` plumbing is correct). Codex (feat-058) and OpenCode (feat-059) must pass the full suite. Real CLIs are not required for the suite \u2014 the fake harness is the conformance target.",
       "verification": "cargo test -p weave-server --test cli_conformance && cargo test -p weave-server -- test_conformance_argv_construction && cargo test -p weave-server -- test_conformance_stream_parser && cargo test -p weave-server -- test_conformance_resume_metadata && cargo test -p weave-server -- test_conformance_permission_mapper && cargo test -p weave-server -- test_conformance_journey_translator && cargo test -p weave-server -- test_conformance_error_scenarios && cargo test -p weave-server -- test_conformance_workspace_scoped_cwd",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-043",
         "feat-044",
@@ -839,7 +839,7 @@
         "feat-048",
         "feat-050"
       ],
-      "evidence": ""
+      "evidence": "All 18 conformance tests pass (test_conformance_{argv_construction,argv_includes_resume_flag,stream_parser_claude_code,stream_parser_tool_use_deferred,stream_parser_malformed_line_skipped,resume_metadata_claude_code,resume_metadata_not_set,permission_mapper_claude_code,permission_mapper_non_claude_code,permission_mapper_profile_specific,journey_translator_claude_code,journey_translator_thinking_to_decision,journey_translator_orphaned_tool_use,error_permission_denied,error_crash,error_resume_unknown,workspace_scoped_cwd_claude_code,cwd_validator_wired}). Full ./init.sh 3-layer gate green: clippy clean, cargo fmt --check clean, prettier clean, ESLint clean, 819 Rust tests + 142 frontend tests pass, server starts, smoke test green. Implementation: new `src/lib.rs` (module re-exports + AppState + shutdown helpers + 2 tests moved from main.rs), new `src/agent/conformance.rs` (ConformanceAdapter + CliStreamParser traits + ClaudeCodeConformanceAdapter impl + ClaudeCodeParserAdapter wrapper), new `tests/cli_conformance.rs` (18 tests across 7 conformance cases), visibility widening of `turn_context::test_support` and `cli_runner::test_support` from pub(crate) to pub, 8 pre-existing clippy warnings fixed (Default impls for ModelCache/ProviderRegistry/ActiveSessions/ActiveChildProcesses/SseManager, is_empty for ActiveSessions/ActiveChildProcesses, GetTaskParams pub)."
     },
     {
       "id": "feat-058",

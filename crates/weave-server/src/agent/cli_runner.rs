@@ -596,10 +596,9 @@ fn cli_spawn_post(message: &'static str) -> AppError {
 
 /// Shared helpers for in-crate test modules that drive the runner
 /// (the existing `cli_runner::tests` mod and `fake_cli_test`). Kept
-/// `pub(crate)` so the in-crate tests can share them without exposing
-/// test internals to integration tests in `tests/`.
-#[cfg(test)]
-pub(crate) mod test_support {
+/// `pub` so the in-crate tests and integration tests in `tests/` can
+/// share them.
+pub mod test_support {
     use std::time::Duration;
 
     use tokio::time::timeout;
@@ -611,7 +610,7 @@ pub(crate) mod test_support {
     /// Drive the runner to completion, return the result or panic
     /// on a wall-clock timeout (60s) — anything slower means a test
     /// regression in the runner.
-    pub(crate) async fn run_with_timeout(
+    pub async fn run_with_timeout(
         runner: &CliRunner,
         inv: CliInvocation,
         turn: TurnContext,
