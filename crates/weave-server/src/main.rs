@@ -64,6 +64,16 @@ pub struct AppState {
     pub specialists: Arc<specialist::SpecialistRegistry>,
     pub tools: Arc<tools::ToolRegistry>,
     pub a2a_token: Option<String>,
+    /// Default `RuntimeKind` used by A2A `POST /api/a2a/messages` when
+    /// the request body omits `runtimeKind` AND there is no resuming
+    /// session to inherit one from (feat-056). Read once at startup
+    /// from `WEAVE_A2A_DEFAULT_RUNTIME_KIND`; defaults to
+    /// `RuntimeKind::default()` (`anthropic-api`) when the env var is
+    /// unset, empty, or unparseable. Stored on `AppState` rather than
+    /// re-read per request so a long-running server keeps a stable
+    /// default (re-reads would let an operator mid-flight swap
+    /// runtimes, which is not the contract).
+    pub a2a_default_runtime_kind: agent::RuntimeKind,
     /// Parent cancellation token fired by the shutdown sequence (feat-034).
     /// Held by `AppState` so any handler can subscribe to "server is going
     /// down" if it ever needs to abort a long-running operation. Currently
@@ -169,6 +179,38 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         info!("A2A token authentication disabled (WEAVE_A2A_TOKEN not set)");
     }
 
+    // Read the A2A default runtime kind from environment (feat-056).
+    // Unset / empty / unparseable falls back to `RuntimeKind::default()`
+    // (anthropic-api) so the existing pre-feat-056 behavior is
+    // preserved when the operator does not opt in.
+    let a2a_default_runtime_kind = match std::env::var("WEAVE_A2A_DEFAULT_RUNTIME_KIND") {
+        Ok(raw) if !raw.is_empty() => match raw.parse::<agent::RuntimeKind>() {
+            Ok(kind) => {
+                info!(
+                    runtime_kind = %kind,
+                    "A2A default runtime kind set from WEAVE_A2A_DEFAULT_RUNTIME_KIND"
+                );
+                kind
+            }
+            Err(e) => {
+                warn!(
+                    value = %raw,
+                    error = %e,
+                    "WEAVE_A2A_DEFAULT_RUNTIME_KIND is not a valid runtime kind; \
+                     falling back to anthropic-api"
+                );
+                agent::RuntimeKind::default()
+            }
+        },
+        _ => {
+            info!(
+                runtime_kind = %agent::RuntimeKind::default(),
+                "A2A default runtime kind is anthropic-api (WEAVE_A2A_DEFAULT_RUNTIME_KIND not set)"
+            );
+            agent::RuntimeKind::default()
+        }
+    };
+
     // Build the API router.
     let active_sessions = Arc::new(service::ActiveSessions::new());
     let active_child_processes = Arc::new(service::ActiveChildProcesses::new());
@@ -183,6 +225,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         specialists,
         tools,
         a2a_token,
+        a2a_default_runtime_kind,
         shutdown_token: shutdown_token.clone(),
     };
     let start_time = api::health::ServerStartTime(Instant::now());

@@ -193,6 +193,57 @@ impl ProviderStore {
         Ok(rows)
     }
 
+    /// List providers that match a given `RuntimeKind` (feat-056).
+    ///
+    /// The `providers.kind` column from feat-039 is a coarse
+    /// discriminator with two values: `'http'` and `'cli'`. It does
+    /// NOT carry the per-runtime breakdown — AnthropicApi,
+    /// OpenaiApi, and OpenaiCompatible all share `kind='http'`,
+    /// while ClaudeCode, Codex, and Opencode share `kind='cli'`.
+    /// The mapping from `RuntimeKind` to the stored `kind` column
+    /// lives here so the A2A resolution chokepoint has one
+    /// canonical source. A future migration can add a
+    /// `runtime_kind` column and tighten this filter; the API
+    /// surface stays the same.
+    ///
+    /// `list_for_runtime` callers (A2A `messages.rs`) compose the
+    /// result with `ProviderRegistry::cached_health_for` to drop
+    /// cold-cache entries; that health filter is deliberately NOT
+    /// applied here because the store layer has no access to the
+    /// registry.
+    ///
+    /// Returns an empty `Vec` (not an error) when no providers exist
+    /// for the given runtime — the caller decides whether that is a
+    /// `no_provider_for_runtime` validation error or a soft miss.
+    pub fn list_for_runtime(
+        db: &Db,
+        runtime: crate::agent::RuntimeKind,
+    ) -> Result<Vec<Provider>, AppError> {
+        let kind = match runtime {
+            crate::agent::RuntimeKind::AnthropicApi
+            | crate::agent::RuntimeKind::OpenaiApi
+            | crate::agent::RuntimeKind::OpenaiCompatible => "http",
+            crate::agent::RuntimeKind::ClaudeCode
+            | crate::agent::RuntimeKind::Codex
+            | crate::agent::RuntimeKind::Opencode => "cli",
+        };
+        let conn = db.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, type, kind, name, default_model,
+                    binary_path, args_json, env_json, permission_mode,
+                    config_json, created_at
+             FROM providers
+             WHERE kind = ?1
+             ORDER BY created_at ASC",
+        )?;
+
+        let rows: Vec<Provider> = stmt
+            .query_map([kind], Self::map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
     /// Hard delete a provider.
     pub fn delete(db: &Db, id: &str) -> Result<(), AppError> {
         let rows_affected = db
@@ -457,5 +508,74 @@ mod tests {
 
         let has = ProviderStore::has_sessions(&db, &provider.id).unwrap();
         assert!(has);
+    }
+
+    /// feat-056: `list_for_runtime` is the resolution chokepoint for
+    /// A2A `POST /api/a2a/messages`. Filters by the coarse
+    /// `kind` column (`'http'` for HTTP runtimes, `'cli'` for CLI
+    /// runtimes) — the per-runtime breakdown within HTTP/CLI is not
+    /// carried by the schema today. Returns an empty `Vec` when no
+    /// providers exist for the runtime — the caller raises
+    /// `no_provider_for_runtime`. Creation order is preserved so the
+    /// first created healthy provider wins, matching the
+    /// "first provider in the list" semantics that the chokepoint
+    /// replaces (but now scoped to the runtime, not the whole table).
+    #[test]
+    fn test_list_for_runtime_filters_by_kind() {
+        let db = test_db();
+        let config = sample_config();
+
+        let http_first = ProviderStore::create(&db, "anthropic", "First HTTP", &config).unwrap();
+        let _http_second = ProviderStore::create(&db, "anthropic", "Second HTTP", &config).unwrap();
+        let http_third = ProviderStore::create(&db, "openai", "OpenAI HTTP", &config).unwrap();
+        let cli_first = ProviderStore::create_cli(
+            &db,
+            "anthropic",
+            "First CLI",
+            "claude-sonnet-4-5",
+            "/usr/local/bin/claude",
+            "[]",
+            "{}",
+            "accept-edits",
+        )
+        .unwrap();
+        let cli_second = ProviderStore::create_cli(
+            &db,
+            "anthropic",
+            "Second CLI",
+            "claude-sonnet-4-5",
+            "/usr/local/bin/claude",
+            "[]",
+            "{}",
+            "accept-edits",
+        )
+        .unwrap();
+
+        // All HTTP runtimes → the three HTTP rows, in creation order.
+        // Per-runtime distinction (AnthropicApi vs OpenaiApi) is
+        // not carried by `kind='http'`; that's the table's
+        // deliberate coarseness (see method docstring).
+        let anthropic_rows =
+            ProviderStore::list_for_runtime(&db, crate::agent::RuntimeKind::AnthropicApi).unwrap();
+        assert_eq!(anthropic_rows.len(), 3);
+        assert_eq!(anthropic_rows[0].id, http_first.id);
+        assert_eq!(anthropic_rows[2].id, http_third.id);
+
+        let openai_rows =
+            ProviderStore::list_for_runtime(&db, crate::agent::RuntimeKind::OpenaiApi).unwrap();
+        assert_eq!(openai_rows.len(), 3);
+        assert_eq!(openai_rows[0].id, http_first.id);
+
+        // All CLI runtimes → the two CLI rows, in creation order.
+        let claude_rows =
+            ProviderStore::list_for_runtime(&db, crate::agent::RuntimeKind::ClaudeCode).unwrap();
+        assert_eq!(claude_rows.len(), 2);
+        assert_eq!(claude_rows[0].id, cli_first.id);
+        assert_eq!(claude_rows[1].id, cli_second.id);
+
+        let codex_rows =
+            ProviderStore::list_for_runtime(&db, crate::agent::RuntimeKind::Codex).unwrap();
+        assert_eq!(codex_rows.len(), 2);
+        assert_eq!(codex_rows[0].id, cli_first.id);
     }
 }

@@ -104,6 +104,7 @@ mod tests {
             specialists: std::sync::Arc::new(crate::specialist::SpecialistRegistry::new()),
             tools: std::sync::Arc::new(crate::tools::ToolRegistry::new()),
             a2a_token: None,
+            a2a_default_runtime_kind: crate::agent::RuntimeKind::default(),
             shutdown_token: tokio_util::sync::CancellationToken::new(),
         };
 
