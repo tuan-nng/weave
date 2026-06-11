@@ -817,12 +817,12 @@
       "phase": "phase-9",
       "behavior": "A2A accepts an explicit `runtime_kind` and removes the silent first-provider fallback. `POST /api/a2a/messages` accepts an optional `runtime_kind` field on the request body. Resolution order: (1) request body's `runtime_kind` if present and the user is permitted to use it; (2) the session's existing `runtime_kind` if resuming; (3) an explicit configured default (new env var `WEAVE_A2A_DEFAULT_RUNTIME_KIND`, default `anthropic-api`). The current behavior of falling back to 'the first provider in the list' is removed. Sessions created via A2A get a `provider_id` resolved from the chosen `runtime_kind` via the provider registry; if no healthy provider matches, the call fails with `code: 'no_provider_for_runtime'`. The Agent Card at `GET /.well-known/agent.json` lists the configured default. Document the breaking change in CHANGELOG and the A2A section of `docs/api-contracts.md`.",
       "verification": "cargo test -p weave-server -- test_a2a_explicit_runtime_kind && cargo test -p weave-server -- test_a2a_uses_session_runtime_when_resuming && cargo test -p weave-server -- test_a2a_uses_configured_default && cargo test -p weave-server -- test_a2a_no_first_provider_fallback && cargo test -p weave-server -- test_a2a_errors_when_no_provider_for_runtime && cargo test -p weave-server -- test_a2a_agent_card_lists_default",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-029",
         "feat-040"
       ],
-      "evidence": ""
+      "evidence": "Verified 2026-06-11: `cargo test -p weave-server -- test_a2a_explicit_runtime_kind test_a2a_uses_session_runtime_when_resuming test_a2a_uses_configured_default test_a2a_no_first_provider_fallback test_a2a_errors_when_no_provider_for_runtime test_a2a_agent_card_lists_default` → 7 passed (the named 6 + `test_a2a_uses_configured_default_picks_first_healthy` matched as a substring). Full suite: 803 Rust + 142 frontend = 945 tests pass. Two commits: 8153bbc (core: AppState field + env read + ProviderStore::list_for_runtime + send_message rewrite + 5 tests, removes first_provider_id) and efcd170 (card: AgentCard.defaultRuntimeKind + agent_card.rs wiring + 1 test + docs/api-contracts.md A2A section + PROGRESS-archive.md entry). `just check` (lint + test) passes."
     },
     {
       "id": "feat-057",

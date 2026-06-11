@@ -15,6 +15,40 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-056 — A2A explicit `runtime_kind` resolution + Agent Card `defaultRuntimeKind` (phase-9, committed `8153bbc` + `efcd170` 2026-06-11)
+
+Phase 9 deliverable. The A2A counterpart to feat-055 (kanban column binding): removes the silent first-provider fallback in `POST /api/a2a/messages` and replaces it with an explicit three-step `runtime_kind` resolution chain. The A2A Agent Card surfaces the configured default. The breaking change is documented in `docs/api-contracts.md` (new A2A section).
+
+**Two-commit split (per the 2-commit spec):**
+
+- `8153bbc` — **core**: `AppState.a2a_default_runtime_kind: RuntimeKind` field (read once at startup from `WEAVE_A2A_DEFAULT_RUNTIME_KIND`, default `anthropic-api`); `ProviderStore::list_for_runtime(db, runtime)` resolution chokepoint (maps the 6 `RuntimeKind` variants to the coarse `'http' | 'cli'` kind column from feat-039); `a2a/messages.rs::send_message` rewritten to use `resolve_runtime_and_mode` (body → session → env default) and `resolve_provider_for_runtime` (kind match + `cached_health_for` filter + warn-and-fallback on resume with rotated provider); 5 new tests (`test_a2a_explicit_runtime_kind`, `test_a2a_uses_session_runtime_when_resuming`, `test_a2a_uses_configured_default`, `test_a2a_no_first_provider_fallback`, `test_a2a_errors_when_no_provider_for_runtime`); `first_provider_id` removed.
+- `efcd170` — **card + docs**: `AgentCard.default_runtime_kind: String` field (kebab-case wire value, camelCase field name); `agent_card.rs` pulls from `state.a2a_default_runtime_kind`; 1 new test (`test_a2a_agent_card_lists_default`); new A2A section in `docs/api-contracts.md`; `PROGRESS-archive.md` entry for the missing CHANGELOG.
+
+**Architecture decisions (user picked all 4 recommended options)**
+
+Four clarifying questions were presented to the user before implementation. All four were answered with the recommended option:
+
+- **Resume with rotated provider** — fall back to env default (log a `tracing::warn!`, don't fail). The session row is not mutated; `send_prompt` still dispatches on the stored runtime, so this is graceful degradation, not a real rebind.
+- **Mode defaulting** — derive from `supported_modes(runtime_kind)[0]` when the body omits `mode`. HTTP runtimes → `native`; CLI runtimes → `wrapped`. The validator inside `SessionService::create_session` (feat-040 chokepoint) enforces the pair; the handler does not duplicate the check.
+- **Default storage** — `AppState.a2a_default_runtime_kind: RuntimeKind` field, read once at startup. Tests override via direct field access. Unset / empty / unparseable env var → `RuntimeKind::default()` (`anthropic-api`).
+- **CHANGELOG** — repo has no `CHANGELOG.md`; the breaking change is documented in `docs/api-contracts.md` (A2A section) and `PROGRESS-archive.md` only. A future feature that needs a CHANGELOG can mint one at repo root.
+
+**Verification (per `feature_list.json`)**
+
+`cargo test -p weave-server -- test_a2a_explicit_runtime_kind test_a2a_uses_session_runtime_when_resuming test_a2a_uses_configured_default test_a2a_no_first_provider_fallback test_a2a_errors_when_no_provider_for_runtime test_a2a_agent_card_lists_default` → 7 tests pass (the named 6 + `test_a2a_uses_configured_default_picks_first_healthy` matched as a substring). Full suite: 803 Rust + 142 frontend = 945 tests, all green. `just check` (lint + test) green for both commits.
+
+**Files touched (across both commits)**
+
+- `crates/weave-server/src/main.rs` — `AppState` field + env read
+- `crates/weave-server/src/a2a/messages.rs` — handler rewrite + resolution helpers + 5 tests
+- `crates/weave-server/src/a2a/agent_card.rs` — `defaultRuntimeKind` wiring + 1 test
+- `crates/weave-server/src/a2a/types.rs` — `AgentCard.default_runtime_kind` field
+- `crates/weave-server/src/store/providers.rs` — `list_for_runtime` + 1 test
+- `crates/weave-server/src/store/kanban_test_helpers.rs` — new field
+- `crates/weave-server/src/api/{health,providers,sessions,specialists,traces,workspaces}.rs` — `AppState` construction in 9 test helpers
+- `docs/api-contracts.md` — new A2A section
+- `PROGRESS-archive.md` — out-of-scope entry for missing CHANGELOG
+
 ### feat-051 — `ClaudeCodeCodingAgent` end-to-end (phase-8)
 
 Phase 8 deliverable. Wires the first CLI Runtime Tool end-to-end: `ClaudeCodeCodingAgent` implements the `CodingAgent` trait, integrating every prior Phase-7/8 component into a single per-turn path. Five components converge inside `send_message`: `CliRunner` (feat-043) spawns the per-turn subprocess; `ClaudeCodeStreamParser` (feat-045) parses `stream-json` lines into the universal `StreamEvent` contract; `ClaudeCodePermissionMapper` (feat-046) injects `--permission-mode <profile>` and the `WEAVE_TOOL_ALLOWLIST` metadata env var; `JourneyTranslator` (feat-048) maps `StreamEvent`s to `TraceEvent`s; feat-047 resume metadata (the parser-captured `session_id` and the runner-detected `did_reject` flag) flows back to `run_prompt_task` via a side-channel `Arc<Mutex<HashMap<session_id, TurnOutcome>>>` on `ProviderRegistry` (consumed via `take_turn_outcome` so the map doesn't leak). The side-channel is the key shape decision: the `CodingAgent` trait stays narrow (single `Stream` return value) while the agent's spawned task writes per-turn metadata for the loop driver to read after the stream returns.
@@ -872,7 +906,7 @@ No findings. The trait / snapshot / enum / mapper separation is the minimal viab
 
 ## Cross-Session Reference
 
-### Completed Since Project Start (as of 2026-06-10)
+### Completed Since Project Start (as of 2026-06-11)
 
 - [x] System design docs (`docs/SYSTEM_DESIGN.md`, `docs/ARCHITECTURE.md`, `docs/road-map/PLAN.md`)
 - [x] **feat-001**: Binary skeleton (CLI, tracing, health check, graceful shutdown)
@@ -916,10 +950,14 @@ No findings. The trait / snapshot / enum / mapper separation is the minimal viab
 - [x] **feat-045**: Claude Code `stream-json` parser (synchronous state machine with deferred-emission `ToolUseStart`; `Vec<(String, InFlightToolUse)>` for insertion order; passive `session_id()` / `take_session_id()` getters; malformed/unknown lines logged WARN and skipped, never fatal)
 - [x] **feat-046**: `PermissionMapper` trait + Claude Code implementation (typed `ToolProfile` enum, opaque `PermissionSnapshot { runtime_kind, tool_profile, argv_flags, env_vars }` with JSON debug shape; Claude Code mapping: `full→bypassPermissions`, `implementation→acceptEdits`, `review/planning→plan`, `reporting→default` no-shell; `WEAVE_TOOL_ALLOWLIST` JSON env var for the journey translator; `TurnContext::effective_permissions` plumbed; HTTP runtimes get an empty snapshot)
 - [x] **feat-061**: `+ New Session` button on `web/src/app/pages/sessions.tsx`. Extracted the inline New Session modal from `workspace.tsx` into `web/src/components/new-session-modal.tsx` (Provider select + Specialist dropdown via `useSpecialists` + Model input + inline `role="alert"` error, contract `{ workspaceId: string | null, onClose, onCreated? }` matching `CreateBoardModal` precedent). Refactored `workspace.tsx` to use the new component (page shrank 344 → 220 lines, ~124 net lines removed). Added a per-workspace `+ New Session in {name}` button to `sessions.tsx` (slate-secondary style matching boards/codebases) that opens the shared modal pre-bound to that workspace. Restructured `WorkspaceSessions` so a workspace with zero sessions still shows the heading + button (per the user's "show heading+button on empty" requirement). Updated `docs/user/sessions.md` to say "next to the workspace name" (placement) and to describe the specialist as a dropdown. 5 new page tests in `__tests__/sessions.test.tsx`. **Spec deviation**: the spec said "render the modal once per `WorkspaceSessions` block"; the implementation uses one shared modal at page level (matches boards/codebases precedent, TanStack Query dedupes the providers/specialists queries, the page-level modal control state is simpler).
+- [x] **feat-053**: 4-step New Session Wizard replacing `NewSessionModal` (Provider → Model+Specialist → Codebase+Permission → Name+Review; URL-driven state via `?step=`; `RuntimeKind` × `SessionMode` matrix; per-provider unbound-tasks filter; `preloadedForProvider` marker prevents stale pre-select; `jumpStepForErrorCode` for 2 server codes; `SPECIALIST_PROFILE_COMPAT` map. 21 new tests.)
+- [x] **feat-054**: SessionPage runtime/mode layout switcher (`SessionHeader` + `WrappedSessionBanner` extracted; frontend type widening for `runtime_kind` / `mode` / `runtime_metadata_json` / `resume_state`; `LiveBuffer.lastResumeState` reducer with last-wins semantics. 17 new frontend tests, 0 backend changes.)
+- [x] **feat-055**: Kanban column `(runtime_kind, specialist_id)` binding (nullable `runtime_kind` column on `columns` via migration 013; auto-spawn honors column binding; first-provider silent fallback REMOVED from kanban flow with `kanban_column_no_provider` error. 8 new tests.)
+- [x] **feat-056**: A2A explicit `runtime_kind` resolution (see session entry above) + Agent Card `defaultRuntimeKind`. Two commits: `8153bbc` core (AppState field + env read + `ProviderStore::list_for_runtime` + `send_message` rewrite + 5 tests) and `efcd170` card+docs (AgentCard field + 1 test + `docs/api-contracts.md` A2A section). 6 new tests, 2 commits.
 
 ### In Progress
 
-(none — all features in phases 1-5 + phase-6 + feat-061 are passing)
+(none — all features in phases 1-9 are passing)
 
 ### Blocked
 
