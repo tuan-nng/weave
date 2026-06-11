@@ -46,6 +46,12 @@ pub async fn agent_card(
         description: "Multi-agent coordination platform with AI coding agent sessions, kanban-driven workflows, and A2A protocol support.".into(),
         url,
         version: env!("CARGO_PKG_VERSION").into(),
+        // feat-056: the default runtime kind is the chokepoint
+        // A2A clients use to know which runtime a request with no
+        // explicit `runtimeKind` will land on. Sourced from
+        // `state.a2a_default_runtime_kind` so the env var
+        // `WEAVE_A2A_DEFAULT_RUNTIME_KIND` is reflected here.
+        default_runtime_kind: state.a2a_default_runtime_kind.as_str().to_string(),
         capabilities: AgentCapabilities {
             streaming: true,
             push_notifications: false,
@@ -54,4 +60,90 @@ pub async fn agent_card(
         default_input_modes: vec!["text/plain".into()],
         default_output_modes: vec!["text/plain".into()],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::RuntimeKind;
+    use crate::store::kanban_test_helpers::make_test_state;
+
+    /// feat-056: the Agent Card exposes `defaultRuntimeKind` so an
+    /// A2A client can discover which runtime a request with no
+    /// `runtimeKind` will land on. The field reflects
+    /// `state.a2a_default_runtime_kind` verbatim — `anthropic-api`
+    /// by default, whatever the env var is set to otherwise. The
+    /// wire form is kebab-case (matching the `RuntimeKind` enum's
+    /// `as_str()`).
+    #[test]
+    fn test_a2a_agent_card_lists_default() {
+        // Default state: `a2a_default_runtime_kind` is
+        // `RuntimeKind::default()` = AnthropicApi.
+        let state = make_test_state();
+
+        // Re-implementing the call by hand since we can't easily
+        // construct an Extension stack in a unit test. The handler
+        // is a 1:1 map from state to Json<AgentCard>; the same
+        // construction logic is what the runtime test would
+        // exercise, so the body is duplicated here to keep the
+        // test self-contained.
+        let skills: Vec<AgentSkill> = state
+            .specialists
+            .all()
+            .iter()
+            .map(|s| AgentSkill {
+                id: s.name.to_lowercase().replace(' ', "-"),
+                name: s.name.clone(),
+                description: s.description.clone(),
+                tags: s.tags.clone(),
+            })
+            .collect();
+        let card = AgentCard {
+            name: "Weave".into(),
+            description: "x".into(),
+            url: "http://test".into(),
+            version: "0.0.0".into(),
+            default_runtime_kind: state.a2a_default_runtime_kind.as_str().to_string(),
+            capabilities: AgentCapabilities {
+                streaming: true,
+                push_notifications: false,
+            },
+            skills,
+            default_input_modes: vec!["text/plain".into()],
+            default_output_modes: vec!["text/plain".into()],
+        };
+
+        // Default → anthropic-api
+        assert_eq!(card.default_runtime_kind, "anthropic-api");
+
+        // Override → flows through to the wire.
+        let mut state = make_test_state();
+        // Direct field access (per the "Default storage → AppState field"
+        // decision in the feat-056 plan) — tests reach in and overwrite.
+        state.a2a_default_runtime_kind = RuntimeKind::ClaudeCode;
+        let card = AgentCard {
+            name: "Weave".into(),
+            description: "x".into(),
+            url: "http://test".into(),
+            version: "0.0.0".into(),
+            default_runtime_kind: state.a2a_default_runtime_kind.as_str().to_string(),
+            capabilities: AgentCapabilities {
+                streaming: true,
+                push_notifications: false,
+            },
+            skills: vec![],
+            default_input_modes: vec!["text/plain".into()],
+            default_output_modes: vec!["text/plain".into()],
+        };
+        assert_eq!(card.default_runtime_kind, "claude-code");
+
+        // Serialized form uses camelCase, matching the rest of
+        // the Agent Card.
+        let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(
+            json.get("defaultRuntimeKind"),
+            Some(&serde_json::Value::String("claude-code".into())),
+            "wire field must be camelCase"
+        );
+    }
 }

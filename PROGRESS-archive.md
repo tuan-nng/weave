@@ -976,6 +976,7 @@ Items deferred from past sessions. Address when a feature touches the relevant a
 - **`agent_loop` clones `history` and `tool_defs` per iteration** (O(n²)). Switch `MessageRequest` to borrow `&[Message]` + `&[ToolDefinition]`.
 - **`SHUTDOWN_DRAIN_CAP = 30s` always fires in dev** — **FIXED in 2026-06-05 UI-validation session** (`crates/weave-server/src/main.rs`). Replaced the hard-coded 30s const with a `WEAVE_SHUTDOWN_DRAIN_CAP_SECS` env var (unset / `0` / unparseable → `None` = no cap, the new dev default). `shutdown_signal_with_cap` now takes `Option<Duration>` and skips the cap branch entirely when `None`. 611 tests still pass; live cargo watch run kept the server up past 30s with no env var set. CI / orchestrators that want a bound set the env var explicitly. Doc-comments on the cap and on the helper were rewritten to match the new semantics.
 - **`+ New Session` button missing on Sessions list page** (`web/src/app/pages/sessions.tsx:69-86`). **Resolved in feat-061** — per-workspace button added.
+- **No `CHANGELOG.md` exists** (feat-056 noted). The repo does not keep a user-facing changelog; release notes live in commit messages and `PROGRESS-archive.md`. The breaking change in feat-056 (silent first-provider fallback removed) is therefore documented in `docs/api-contracts.md` (A2A section) and in this archive, not in a separate file. If a future feature needs a `CHANGELOG.md`, mint it at repo root with the same headings as the `feature_list.json` phases.
 
 ### Session Notes (dated journal)
 

@@ -203,7 +203,148 @@ is the source of truth as of feat-039.
 // Request: {"column_id": "uuid", "title": "Implement login page", "description": "Build a login form with email/password validation"}
 
 // PATCH /api/tasks/:tid
-// Request (move task): {"column_id": "new-column-uuid", "position": 0}
+// Request (move task): {"column_id": "new-column-id", "position": 0}
 // When moving to a column with auto_trigger=true and specialist_id set,
 // the server automatically creates a session with that specialist.
 ```
+
+## A2A Protocol (feat-029, feat-056)
+
+Weave implements the A2A protocol v1.0 REST binding. A2A clients
+discover capabilities via the Agent Card and exchange messages via
+`POST /api/a2a/messages`.
+
+### Agent Card — `GET /.well-known/agent.json`
+
+Public (no auth required per the A2A spec). Returns the server's
+capabilities and skills.
+
+```json
+{
+  "name": "Weave",
+  "description": "Multi-agent coordination platform ...",
+  "url": "http://<host>",
+  "version": "0.1.0",
+  "defaultRuntimeKind": "anthropic-api",
+  "capabilities": { "streaming": true, "pushNotifications": false },
+  "skills": [
+    { "id": "code-review", "name": "code-review", "description": "...", "tags": ["review"] }
+  ],
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"]
+}
+```
+
+**`defaultRuntimeKind` (feat-056):** The runtime kind A2A
+`SendMessage` will use when the request omits `runtimeKind` AND
+there is no resuming session (`taskId`) to inherit one from. Wire
+form is kebab-case, e.g. `"anthropic-api"`, `"claude-code"`. Sourced
+from `state.a2a_default_runtime_kind` (set once at startup from
+`WEAVE_A2A_DEFAULT_RUNTIME_KIND`; defaults to `anthropic-api`).
+Clients SHOULD use this field as the basis for any "list available
+runtimes" UI; the server does not expose a separate endpoint for
+that today.
+
+### SendMessage — `POST /api/a2a/messages`
+
+Authenticated (Bearer token via `WEAVE_A2A_TOKEN` env var, when
+configured). Creates a new session or continues an existing one
+(via `taskId`).
+
+```json
+// Request
+{
+  "message": {
+    "role": "user",
+    "parts": [{ "type": "text", "text": "Hello, world." }]
+  },
+  "contextId": "ctx-123",          // optional
+  "taskId": "session-abc",         // optional — set to resume an existing session
+  "runtimeKind": "claude-code",    // optional — see Resolution order
+  "mode": "wrapped"                // optional — see Resolution order
+}
+
+// Response 201 Created
+{
+  "data": {
+    "id": "session-abc",
+    "contextId": "ctx-123",
+    "status": "submitted"
+  }
+}
+```
+
+### Runtime-kind resolution order (feat-056)
+
+The server picks which `RuntimeKind` (and matching provider) an
+A2A session lands on using this chain. **This is a breaking
+change vs pre-feat-056: the silent "first provider in the table"
+fallback is removed.**
+
+1. **Body `runtimeKind`** (if present) — the explicit client
+   override. Wire form: kebab-case
+   (`"anthropic-api"`, `"openai-api"`, `"openai-compatible"`,
+   `"claude-code"`, `"codex"`, `"opencode"`).
+2. **Resuming session's stored `runtime_kind`** (when `taskId` is
+   set and the request omits `runtimeKind`).
+3. **`state.a2a_default_runtime_kind`** — the Agent Card's
+   `defaultRuntimeKind`. Read once at startup from
+   `WEAVE_A2A_DEFAULT_RUNTIME_KIND`; falls back to
+   `RuntimeKind::default()` (`anthropic-api`) when unset, empty,
+   or unparseable.
+
+`mode` is resolved in the same way:
+
+1. **Body `mode`** (if present) — explicit override.
+2. **`supported_modes(runtime_kind)[0]`** — derived from the
+   resolved runtime. HTTP runtimes → `"native"`; CLI runtimes →
+   `"wrapped"`. The runtime × mode compatibility check is
+   enforced inside `SessionService::create_session` (the
+   feat-040 chokepoint); an incompatible pair is rejected with
+   `code: "runtime_mode_incompatible"` BEFORE any session row
+   is created.
+
+### Provider selection
+
+After the runtime is resolved, the server picks a provider from
+`providers` whose `kind` matches (creation order), filtered by
+`ProviderRegistry::cached_health_for` (the 10-second health cache
+the provider wizard uses). Cold cache (no probe has run this
+process lifetime) means every provider is treated as unhealthy —
+a known limitation that pre-feat-056 also had, just hidden by the
+silent first-row fallback.
+
+When no healthy provider exists for the resolved runtime:
+
+- **New session**: returns `400 Bad Request` with
+  `code: "no_provider_for_runtime"` and a message naming the
+  missing runtime.
+- **Resume (`taskId`)**: the server logs a `tracing::warn!` and
+  falls back to `a2a_default_runtime_kind`'s providers. Only if
+  BOTH the prior runtime AND the env default have no healthy
+  provider does the resume error with
+  `code: "no_provider_for_runtime"`. The session row is not
+  mutated; the next `send_prompt` attempt will dispatch on the
+  session's stored runtime (which may still fail at the dispatch
+  layer — that is graceful degradation, not a fix for missing
+  providers).
+
+### Error envelope (existing convention)
+
+```json
+{
+  "error": {
+    "code": "no_provider_for_runtime",
+    "message": "no healthy AI provider configured for runtime 'claude-code'; add a provider via POST /api/providers, or set WEAVE_A2A_DEFAULT_RUNTIME_KIND to a runtime that has a provider"
+  }
+}
+```
+
+`code` values specific to A2A resolution:
+
+| Code | When |
+|------|------|
+| `no_provider_for_runtime` | No healthy provider for the resolved runtime (and the resume fallback, if applicable) |
+| `runtime_mode_incompatible` | `runtime_kind` × `mode` pair not in the compatibility matrix (see `agent::supported_modes`) |
+| `cwd_outside_codebase` | `mode: "wrapped"` requires a cwd inside a registered codebase; the A2A handler does not supply one, so this is a hard reject (feat-050) |
+

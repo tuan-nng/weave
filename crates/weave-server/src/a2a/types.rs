@@ -18,6 +18,13 @@ pub struct AgentCard {
     pub description: String,
     pub url: String,
     pub version: String,
+    /// Default `RuntimeKind` used by A2A `POST /api/a2a/messages` when
+    /// the request omits `runtimeKind` AND there is no resuming
+    /// session to inherit one from (feat-056). Wire form is
+    /// kebab-case, e.g. `"anthropic-api"`, `"claude-code"`. Sourced
+    /// from `state.a2a_default_runtime_kind` (which is set once at
+    /// startup from `WEAVE_A2A_DEFAULT_RUNTIME_KIND`).
+    pub default_runtime_kind: String,
     pub capabilities: AgentCapabilities,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<AgentSkill>,
