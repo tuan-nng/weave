@@ -1474,6 +1474,7 @@ async fn agent_loop(
                     input_json: input.to_string(),
                     output_json: content.clone(),
                     duration_ms,
+                    status: None,
                 },
                 timestamp: trace_ts.clone(),
             });

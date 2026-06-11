@@ -700,14 +700,14 @@
       "phase": "phase-8",
       "behavior": "`JourneyTranslator` that maps parsed CLI stream events into Weave trace events and `StreamEvent`s WITHOUT re-executing CLI tools. Text deltas pass through as `TextDelta`. Tool calls from the CLI (text + input from `ToolUseStart` + `ToolUseDelta`) become a `tool_call` trace event with the CLI's reported input and a placeholder duration captured from the time between `ToolUseStart` and the matching `ToolResult`; the trace is recorded in the `traces` table; `StreamEvent` is `ToolUseStart` / `ToolUseDelta` for UI display. The CLI is the source of truth for the tool result \u2014 the translator does NOT re-run the tool. File changes announced by the CLI (via a CLI-specific event type emitted by Claude Code) are recorded in the `file_changes` table. Thinking blocks become `decision` trace events. Errors become `error` trace events. The journey sidebar endpoint (feat-022) is unchanged. If a tool_use does not get a matching tool_result within the turn (CLI dropped it), the translator records a `tool_call` event with `status='orphaned'` so the journey still shows the attempt.",
       "verification": "cargo test -p weave-server -- test_journey_translator_text_passthrough && cargo test -p weave-server -- test_journey_translator_tool_call_recorded && cargo test -p weave-server -- test_journey_translator_tool_not_re_executed && cargo test -p weave-server -- test_journey_translator_file_change_recorded && cargo test -p weave-server -- test_journey_translator_thinking_to_decision && cargo test -p weave-server -- test_journey_translator_error_to_error && cargo test -p weave-server -- test_journey_translator_orphaned_tool_use && cargo test -p weave-server -- test_journey_translator_dedupes_file_changes",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-005",
         "feat-017",
         "feat-043",
         "feat-045"
       ],
-      "evidence": ""
+      "evidence": "All 8 spec-named tests pass (test_journey_translator_{text_passthrough, tool_call_recorded, tool_not_re_executed, file_change_recorded, thinking_to_decision, error_to_error, orphaned_tool_use, dedupes_file_changes}). Plus 3 inline unit tests in translator.rs::tests (cli_tool_to_file_change_{maps_known_tools, returns_none_for_read_only_tools, returns_none_for_missing_path}). Full ./init.sh 3-layer gate green: clippy + cargo fmt clean, 749 Rust tests + 113 frontend tests pass (was 741 + 113 before feat-048), server starts, /api/health and / respond. The translator is wired in `agent::claude_code::mod.rs` as `mod translator; #[cfg(test)] mod translator_test; #[cfg_attr(not(test), allow(unused_imports))] pub use translator::JourneyTranslator;` \u2014 same pattern as the parser (feat-045) so feat-051's `ClaudeCodeCodingAgent` can pick it up."
     },
     {
       "id": "feat-049",

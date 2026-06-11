@@ -14,7 +14,10 @@
 //!   original plan reserved `resume.rs` for feat-047; the Pragmatic
 //!   approach keeps the helper here (one function, one caller) and
 //!   hoists to a sibling module if a second consumer lands.
-//! - feat-048: the journey translator — `journey.rs`.
+//! - **feat-048** (this feature): the journey translator —
+//!   `translator.rs`. The original plan reserved `journey.rs` for
+//!   feat-048; the spec's preferred name is `translator.rs` and that
+//!   is what the file is named.
 //! - feat-051: the `ClaudeCodeCodingAgent` `CodingAgent` impl — `agent.rs`.
 //!
 //! Each feature adds a sibling module under `claude_code/`. This file
@@ -25,12 +28,21 @@ mod parser;
 #[cfg(test)]
 mod parser_test;
 
+mod translator;
+
+#[cfg(test)]
+mod translator_test;
+
 // Public surface for feat-051's `ClaudeCodeCodingAgent` impl and any
-// future caller. `parser_test` imports via this re-export (so the
-// re-export IS used in test builds); the production build has no
-// caller yet, so silence the warning there only.
+// future caller. `parser_test` and `translator_test` import via
+// these re-exports (so the re-export IS used in test builds); the
+// production build has no caller yet, so silence the warning there
+// only.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub use parser::ClaudeCodeStreamParser;
+
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use translator::JourneyTranslator;
 
 use serde_json::Value;
 

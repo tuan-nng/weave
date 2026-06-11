@@ -260,6 +260,7 @@ mod tests {
                 input_json: "{}".to_string(),
                 output_json: "{}".to_string(),
                 duration_ms: 10,
+                status: None,
             },
             timestamp: "2026-01-01T00:00:01Z".to_string(),
         });

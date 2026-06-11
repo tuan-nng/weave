@@ -11,6 +11,7 @@ use uuid::Uuid;
 ///
 /// Flows from the session streaming loop through an mpsc channel
 /// to the background flush task, which batch-inserts into SQLite.
+#[derive(Debug, Clone)]
 pub struct TraceEvent {
     pub session_id: String,
     pub kind: TraceEventKind,
@@ -18,12 +19,19 @@ pub struct TraceEvent {
 }
 
 /// Discriminated trace event payloads.
+#[derive(Debug, Clone)]
 pub enum TraceEventKind {
     ToolCall {
         tool_name: String,
         input_json: String,
         output_json: String,
         duration_ms: u64,
+        /// `None` for normal completed tool calls. `Some("orphaned")` for
+        /// CLI tool_use blocks that the CLI never paired with a
+        /// `tool_result` before the turn ended (feat-048). Additive — older
+        /// readers tolerate the field being absent in stored `data_json`
+        /// payloads.
+        status: Option<String>,
     },
     FileChange {
         path: String,
@@ -38,7 +46,7 @@ pub enum TraceEventKind {
 }
 
 /// File change action types.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {
     Read,
     Write,
@@ -122,6 +130,7 @@ impl TraceStore {
                     input_json,
                     output_json,
                     duration_ms,
+                    status,
                 } => {
                     let data = serde_json::json!({
                         "tool_name": tool_name,
@@ -130,6 +139,7 @@ impl TraceStore {
                         "output": serde_json::from_str::<serde_json::Value>(output_json)
                             .unwrap_or(serde_json::Value::String(output_json.clone())),
                         "duration_ms": duration_ms,
+                        "status": status.clone(),
                     });
                     (
                         "tool_call",
@@ -377,6 +387,7 @@ mod tests {
                     input_json: r#"{"path":"/tmp/test.rs"}"#.to_string(),
                     output_json: r#"{"success":true}"#.to_string(),
                     duration_ms: 42,
+                    status: None,
                 },
                 timestamp: "2026-01-01T00:00:01Z".to_string(),
             },
@@ -446,6 +457,7 @@ mod tests {
                     input_json: "{}".to_string(),
                     output_json: "{}".to_string(),
                     duration_ms: 5,
+                    status: None,
                 },
                 timestamp: "2026-01-01T00:00:01Z".to_string(),
             },
