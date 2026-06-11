@@ -5494,6 +5494,116 @@ You are broken."#,
         }
     }
 
+    /// A wrapped session whose cwd EQUALS a registered codebase's
+    /// canonical path is accepted. This exercises the exact-equality
+    /// branch of the prefix-match algorithm in
+    /// `validate_wrapped_session_cwd` (the alternative is the
+    /// strict-descendant branch tested by every other happy-path
+    /// caller). The `CodebaseStore::find_by_cwd_prefix` SQL helper
+    /// has a dedicated test for this; the in-Rust reimplementation
+    /// needs its own.
+    #[test]
+    fn test_wrapped_session_cwd_equals_codebase_path_succeeds() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            Some("exact-match"),
+        )
+        .unwrap();
+
+        // cwd = the registered codebase's path, verbatim. The
+        // `cwd_canon == cb_canon` branch fires here.
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,                               // specialist_id
+            None,                               // model
+            Some(tmp.path().to_str().unwrap()), // cwd = codebase path
+            None,                               // parent_session_id
+            None,                               // context_id
+            None,                               // codebase_id
+            Some("claude-code"),                // runtime_kind — CLI
+            Some("wrapped"),                    // mode — CLI-required
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "wrapped session with cwd == codebase path should succeed: {:?}",
+            result
+        );
+    }
+
+    /// When the workspace has two NESTED registered codebases
+    /// (e.g. `/repo` and `/repo/sub`), the cwd `/repo/sub/file`
+    /// matches the deeper codebase, not the shallower one. The
+    /// longest-prefix algorithm in `validate_wrapped_session_cwd`
+    /// is the load-bearing piece; this test pins the contract.
+    #[test]
+    fn test_wrapped_session_cwd_picks_longest_prefix_match() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Two nested tempdirs: outer (`/tmp/.../outer`) and a deeper
+        // one inside it (`/tmp/.../outer/inner`). Both registered
+        // as codebases. The cwd lives inside the inner one.
+        let outer = tempfile::TempDir::new().unwrap();
+        let outer_path = outer.path().to_path_buf();
+
+        let inner = tempfile::TempDir::new_in(&outer_path).unwrap();
+        let inner_path = inner.path().to_path_buf();
+
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            outer_path.to_str().unwrap(),
+            None,
+            Some("outer"),
+        )
+        .unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            inner_path.to_str().unwrap(),
+            None,
+            Some("inner"),
+        )
+        .unwrap();
+
+        // cwd = inner/sub (a descendant of both). The validator
+        // should match the longer (inner) codebase.
+        let cwd_inside_inner = inner_path.join("sub");
+        std::fs::create_dir(&cwd_inside_inner).unwrap();
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,                                     // specialist_id
+            None,                                     // model
+            Some(cwd_inside_inner.to_str().unwrap()), // cwd inside inner
+            None,                                     // parent_session_id
+            None,                                     // context_id
+            None,                                     // codebase_id
+            Some("claude-code"),
+            Some("wrapped"),
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "cwd inside nested codebase should match the deeper one: {:?}",
+            result
+        );
+    }
+
     // -----------------------------------------------------------------------
     // feat-041: TurnContext verification
     // -----------------------------------------------------------------------
