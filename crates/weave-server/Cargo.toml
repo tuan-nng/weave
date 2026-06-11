@@ -3,6 +3,7 @@ name = "weave-server"
 version = "0.1.0"
 edition = "2021"
 description = "Weave — web-based multi-agent coordination platform"
+default-run = "weave-server"
 
 [dependencies]
 # HTTP server
