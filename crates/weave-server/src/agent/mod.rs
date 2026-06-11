@@ -251,6 +251,106 @@ impl FromStr for SessionMode {
 }
 
 // ---------------------------------------------------------------------------
+// CLI resume state (feat-047)
+// ---------------------------------------------------------------------------
+
+/// Whether a turn used the CLI's native resume mechanism (feat-047).
+///
+/// Three-value enum serialized as snake_case on the SSE wire so the
+/// frontend (feat-054 header pill) and the conformance suite (feat-057)
+/// can branch on it without parsing free-form strings.
+///
+/// State machine over consecutive turns (per session):
+/// - 1st turn: `None` — no stored id, no native resume possible.
+/// - 2nd turn: `Native` — the parser captured an id; the runner
+///   passed it via `--resume <id>` and the CLI accepted.
+/// - 3rd turn: `Replayed` — the stored id was used and the CLI
+///   rejected it (`resume_unknown_session` or non-zero exit); the
+///   runner cleared the stored id and replayed from history. (The
+///   replay CLI invocation itself is feat-051; feat-047 only persists
+///   the state transition and clears the stored id.)
+/// - 4th turn: `None` — after `Replayed` cleared the stored id, the
+///   next turn has nothing to resume, so the state flips back to
+///   `None`.
+///
+/// HTTP / native runtimes always emit `None` — the `cli_resume_id`
+/// JSON key only exists for CLI runtimes and the reader at
+/// `build_turn_context` is `Option<String>` already.
+#[allow(dead_code)] // Wired through sse + service::sessions in this feature.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeState {
+    /// The runner did not use a stored resume id. First turn, post-replay
+    /// turn, or HTTP runtime.
+    None,
+    /// The runner passed `--resume <stored-id>` and the CLI accepted.
+    Native,
+    /// The runner tried `--resume <stored-id>`, the CLI rejected, the
+    /// stored id was cleared, and the runner is falling back to
+    /// message-history replay. (feat-047 broadcasts this state; the
+    /// replay CLI invocation is feat-051.)
+    Replayed,
+}
+
+impl Default for ResumeState {
+    /// Pre-feat-047 default — every existing backfill is `None`.
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl ResumeState {
+    /// Stable snake-case wire form (matches the `#[serde(rename_all)]`
+    /// JSON shape).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Native => "native",
+            Self::Replayed => "replayed",
+        }
+    }
+
+    /// Compute the per-turn `ResumeState` from the three facts a turn
+    /// exposes (feat-047).
+    ///
+    /// Inputs:
+    /// - `had_resume_attempt`: the runner passed a stored
+    ///   `cli_resume_id` to the CLI this turn (the session row had
+    ///   one AND the runtime is a CLI kind).
+    /// - `did_reject`: the runner detected that the CLI rejected the
+    ///   stored id (non-zero exit, or `error{code:"resume_unknown_session"}`).
+    ///   Set by `agent::claude_code::detect_resume_rejection`. Stays
+    ///   `false` until feat-051's runner populates it.
+    /// - `should_persist_capture`: a fresh `session_id` was captured
+    ///   by the parser this turn AND the turn is not a `Cancelled` /
+    ///   `LoopLimit` failure (those don't produce a reliable id).
+    ///   Name is "should persist" not "did capture" because the
+    ///   `Cancelled` / `LoopLimit` gate is folded in.
+    ///
+    /// State machine (4 arms, see `agent::mod` doc on `ResumeState`):
+    /// `(false, *, *)` → `None`; `(true, true, *)` → `Replayed`;
+    /// `(true, false, true)` → `Native`; `(true, false, false)` → `None`.
+    pub(crate) fn decide(
+        had_resume_attempt: bool,
+        did_reject: bool,
+        should_persist_capture: bool,
+    ) -> Self {
+        match (had_resume_attempt, did_reject, should_persist_capture) {
+            (false, _, _) => Self::None,
+            (true, true, _) => Self::Replayed,
+            (true, false, true) => Self::Native,
+            (true, false, false) => Self::None,
+        }
+    }
+}
+
+impl std::fmt::Display for ResumeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Runtime × mode compatibility (feat-040)
 // ---------------------------------------------------------------------------
 
@@ -564,6 +664,47 @@ mod tests {
         assert_eq!(health.healthy, deserialized.healthy);
         assert_eq!(health.latency_ms, deserialized.latency_ms);
         assert_eq!(health.error, deserialized.error);
+    }
+
+    #[test]
+    fn test_resume_state_variants() {
+        // All three variants exist with the expected wire forms.
+        assert_eq!(ResumeState::None.as_str(), "none");
+        assert_eq!(ResumeState::Native.as_str(), "native");
+        assert_eq!(ResumeState::Replayed.as_str(), "replayed");
+    }
+
+    #[test]
+    fn test_resume_state_default_is_none() {
+        // Pre-feat-047 default — every backfill is `None`.
+        assert_eq!(ResumeState::default(), ResumeState::None);
+    }
+
+    #[test]
+    fn test_resume_state_decide_truth_table() {
+        // Full truth table for the 4-arm state machine. The inputs are:
+        //   (had_resume_attempt, did_reject, should_persist_capture).
+        // Three of the eight combinations are reachable today (only the
+        // HTTP-runtime path runs); the others will be reachable once
+        // feat-051's runner populates `did_reject` and the captured id.
+        let cases: [(bool, bool, bool, ResumeState); 8] = [
+            // (had_resume, rejected, persisted, expected)
+            (false, false, false, ResumeState::None), // HTTP runtime, no stored id
+            (false, false, true, ResumeState::None), // HTTP runtime (no attempt) + capture (irrelevant)
+            (false, true, false, ResumeState::None), // HTTP runtime (no attempt) + reject (irrelevant)
+            (false, true, true, ResumeState::None),  // HTTP runtime (no attempt) + both
+            (true, false, false, ResumeState::None), // CLI accepted, no fresh id
+            (true, false, true, ResumeState::Native), // CLI accepted, fresh id captured
+            (true, true, false, ResumeState::Replayed), // CLI rejected, no fresh id
+            (true, true, true, ResumeState::Replayed), // CLI rejected (overrides capture)
+        ];
+        for (had, rej, cap, expected) in cases {
+            assert_eq!(
+                ResumeState::decide(had, rej, cap),
+                expected,
+                "decide(had_resume_attempt={had}, did_reject={rej}, should_persist_capture={cap})",
+            );
+        }
     }
 
     #[test]

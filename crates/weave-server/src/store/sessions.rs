@@ -307,6 +307,53 @@ impl SessionStore {
         }
     }
 
+    /// Overwrite a session's `runtime_metadata_json` column (feat-047).
+    ///
+    /// Same shape as `update_status` — a thin wrapper around a parameterized
+    /// `UPDATE` that returns the updated row via the 15-column `RETURNING`
+    /// list and `Self::map_row`. Pass `None` to clear the column (the
+    /// replay-fallback path clears a stale `cli_resume_id` after the CLI
+    /// rejected a `--resume` attempt).
+    ///
+    /// No terminal-state guard: the writer is called mid-turn to capture
+    /// new metadata, and a `completed` / `cancelled` / `error` row that
+    /// is *about* to be reactivated by the next `send_message` is the
+    /// normal flow. The `LoopResult`-level guard in `run_prompt_task`
+    /// filters out the writes that should not happen (Cancelled /
+    /// `LoopLimit`) before this method is called.
+    ///
+    /// Parameterized (`?1` / `?2` / `?3`) — no string interpolation.
+    /// Drift on the 15-column RETURNING list is a silent bug (see
+    /// `map_row`); kept in lockstep with `create` / `get_by_id` /
+    /// `list_by_workspace` / `update_status`.
+    pub fn update_runtime_metadata(
+        db: &Db,
+        id: &str,
+        runtime_metadata_json: Option<&str>,
+    ) -> Result<Session, AppError> {
+        let now = Utc::now().to_rfc3339();
+
+        db.conn()
+            .query_row(
+                "UPDATE sessions
+                 SET runtime_metadata_json = ?1, updated_at = ?2
+                 WHERE id = ?3
+                 RETURNING id, workspace_id, provider_id, specialist_id,
+                           parent_session_id, context_id, status, model, cwd, codebase_id,
+                           runtime_kind, mode, runtime_metadata_json,
+                           created_at, updated_at",
+                rusqlite::params![runtime_metadata_json, now, id],
+                Self::map_row,
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => AppError::NotFound {
+                    resource: "session".into(),
+                    id: id.into(),
+                },
+                other => other.into(),
+            })
+    }
+
     /// Hard delete a session. Messages cascade via FK constraints.
     pub fn delete(db: &Db, id: &str) -> Result<(), AppError> {
         let rows_affected = db

@@ -1071,3 +1071,75 @@ Resumed the work interrupted in the prior session entry ("feat-040 — partial P
 - feat-050 (cwd_outside_codebase) — `try_automate_lane` routes through `create_session`, so feat-040's validator fires *before* the codebase check. Order is correct as-is, but feat-050 must still call the validator (it already does by routing through the chokepoint).
 - feat-053 (UI) — when the wizard surfaces the `runtime_mode_incompatible` error, it'll need to regex the `message` string (no structured payload). If the wizard needs structured data, add `AppError::ValidationWithDetails` project-wide (feat-050's `cwd_outside_codebase` also anticipates this shape).
 - feat-055 (kanban column binding) — column-level `runtime_kind` will be validated by the same chokepoint call. The full column-binding e2e test is feat-055's verification gate.
+
+### feat-047 — CLI-native resume metadata persistence (impl 2026-06-10/11)
+
+Phase 8, fourth feature. The `feat-045` parser already captures a `session_id` from the CLI's first stdout line; feat-047 is the persistence glue that promotes that captured id into `runtime_metadata_json['cli_resume_id']` and threads it back into the next turn's `TurnContext::cli_resume_id`. The replay-fallback path is established (clear-on-rejection) but the actual replay CLI invocation is deferred to feat-051.
+
+The session was opened via `/feature-dev:feature-dev start next task` and ran the full 7-phase workflow.
+
+**Phase 1-3** (Discovery, Exploration, Clarifying Questions): confirmed scope with the user, mapped the existing parser→runner→service data path with 3 parallel `code-explorer` agents (CLI session_id capture, runtime_metadata_json persistence, SSE done event + turn driver), and resolved 4 spec ambiguities:
+- **Reject signal**: exit code != 0 OR structured `error{code:"resume_unknown_session"}` (defensive carve).
+- **First turn state**: literal spec — `none` on the first turn, `native` on the second, `replayed` on the third, `none` again on the fourth (after the replay-clear).
+- **Replay scope**: feat-047 establishes the data path only (clear stored id, broadcast `Replayed`); feat-051 builds the second-shot CLI invocation.
+- **JSON key standardization**: rename 8 occurrences of `cli_session_id` → `cli_resume_id` to match the canonical name in migration 011 + parser doc + `build_turn_context` reader.
+
+**Phase 4** (Architecture Design): 3 parallel `code-architect` agents (Minimal / Clean / Pragmatic). User selected **Pragmatic** (0 new files, ~150 lines changed, free function `agent::claude_code::detect_resume_rejection` in `mod.rs`, inline `match` in `run_prompt_task` computes `ResumeState` from `(had_resume_attempt, did_reject, did_persist_capture)`, `LoopResult` gains 2 fields).
+
+**Phase 5** (Implementation): build sequence followed the Pragmatic blueprint:
+1. Rename `cli_session_id` → `cli_resume_id` at 8 sites in `service/sessions.rs` (test fixtures).
+2. Add `ResumeState` enum + `Default` + `as_str` + `Display` in `agent/mod.rs` (snake_case wire form via `#[serde(rename_all)]`).
+3. Add `SessionStore::update_runtime_metadata(db, id, Option<&str>) -> Result<Session, AppError>` shim in `store/sessions.rs` (same shape as `update_status`: parameterized `UPDATE...RETURNING`, 15-column lockstep, `Self::map_row`).
+4. Add `resume_state: agent::ResumeState` field to both `SseWireEvent::Done` and `SseWireEvent::MessagePersisted` in `sse/mod.rs` (mirrors the existing `runtime_kind` + `mode` fields).
+5. Add `LoopResult::captured_cli_resume_id: Option<String>` field (always `None` today; feat-051 populates).
+6. Add `agent::claude_code::detect_resume_rejection(parsed_error_event: Option<&Value>, stderr: &str) -> bool` free function with 4 unit tests.
+7. Wire capture-write + state machine into `run_prompt_task` (between `update_status` and the SSE broadcasts): reads pre-turn stored id from `turn_ctx.cli_resume_id` (not re-parsed), computes `ResumeState`, applies the side effect (`update_runtime_metadata(None)` on `Replayed`, `update_runtime_metadata(Some(merged_blob))` on `Native`).
+8. Add 5 spec-named tests in `service/sessions.rs::tests` and 3 `ResumeState` table tests in `agent/mod.rs::tests`.
+9. `simplify` pass: extracted `parse_cli_resume_id(metadata: Option<&str>) -> Option<String>` helper (used by `build_turn_context` and the state machine), moved the inline state-machine `match` into `ResumeState::decide(...)` as a method (with table tests), replaced the custom `DoneAgent` test double with the existing `CapturingAgent`.
+10. `code-review` pass: deleted a verbatim duplicate test (`test_cli_resume_fallback_replay_on_unknown` — the 4 unit tests in `claude_code::resume_rejection_tests` cover the same ground); deleted an alias of a pre-existing test (renamed `test_session_resume_clears_metadata_on_runtime_switch` to `test_cli_resume_not_inherited_across_runtime_switch` to match the spec name); renamed `captured_cli_session_id` → `captured_cli_resume_id`; renamed `did_persist_capture` → `should_persist_capture`; flattened a 16-line nested `match` for the JSON-merge into a 7-line `Map::from_iter`-style expression.
+
+**Phase 6** (Quality Review): 3 parallel `code-reviewer` agents in parallel:
+- **Correctness**: PASS, 0 issues ≥80. Confirmed state-machine logic, capture-write ordering, SSE wire format, reader-writer agreement, single-flight serialization via `ActiveSessions`. The 5 latent/defensive findings (terminal-state guard, `updated_at` race, `had_resume_attempt` runtime check, `FromStr` on `ResumeState`, `did_reject = false` placeholder) are logged to `PROGRESS.md` OOS.
+- **Conventions**: PASS, 0 issues ≥80. The `FromStr` missing on `ResumeState` is a minor nit (defer to feat-057).
+- **Simplicity & DRY**: 3 fixes applied (1 duplicate test deleted, 1 alias test folded into the pre-existing test by rename, 1 16-line nested `match` flattened). The "extend `DoneAgent` instead of `CapturingAgent`" suggestion was already addressed in the simplify pass. The "rename `captured_cli_session_id`" was applied.
+
+**Phase 7** (Summary): this entry. Updated `feature_list.json:683` to `state: "passing"` with the detailed evidence paragraph. Updated `PROGRESS.md` (current state, next steps, OOS items). The 5 `not_started` → `passing` state transition flows through `feature_list.json` per CLAUDE.md rule 10.
+
+**Files modified this session (final list, ordered by build dependency):**
+
+1. `crates/weave-server/src/agent/mod.rs` — `ResumeState` enum + `decide` method + 3 table tests (+131 lines).
+2. `crates/weave-server/src/agent/claude_code/mod.rs` — `detect_resume_rejection` free function + 4 unit tests (+78 lines, -2).
+3. `crates/weave-server/src/store/sessions.rs` — `update_runtime_metadata` writer (+47 lines).
+4. `crates/weave-server/src/sse/mod.rs` — `resume_state` field on `Done` and `MessagePersisted` (+19 lines).
+5. `crates/weave-server/src/service/sessions.rs` — `parse_cli_resume_id` helper, `LoopResult::captured_cli_resume_id` field, `run_prompt_task` state machine, 5 spec-named tests (~+500 lines, -10).
+6. `feature_list.json` — `feat-047` flipped to `passing` with full evidence paragraph (+1 long string).
+7. `PROGRESS.md` — current state, next steps, OOS items.
+
+**Verification baseline (commit before this session was `24aa475`; the commit after will be the feat-047 commit):**
+
+- `./init.sh` exit 0, all 3 layers pass.
+- 741 Rust tests + 113 frontend tests, 11 new in feat-047 (5 spec-named + 4 `detect_resume_rejection` + 3 `ResumeState` table tests; the pre-existing `test_session_resume_clears_metadata_on_runtime_switch` was renamed to match the spec name).
+- clippy clean, fmt clean, prettier clean, ESLint clean.
+- Server starts, `/api/health` 200, `GET /` serves index.html with `id="root"`, graceful shutdown.
+
+**Key decisions made this session:**
+
+- **Pragmatic architecture (Phase 4)**: `ResumeState` enum in `agent::mod` next to `RuntimeKind`/`SessionMode`; `detect_resume_rejection` as a free function in `claude_code/mod.rs` (no new file); `LoopResult` extension is the right shape for the runner→outer-task data path; `RuntimeMetadata` typed wrapper deferred to the second consumer (Codex/OpenCode in Phase 10). ~150 lines of new code, 0 new files.
+- **Spec convention: 4-arm state machine exposed as a method**: `ResumeState::decide(had_resume_attempt, did_reject, should_persist_capture) -> Self` is the natural home for the truth-table tests + future extensions. The 8-case `test_resume_state_decide_truth_table` covers all combinations; the HTTP runtime only exercises 2 arms today.
+- **JSON merge via `Map::from_iter`-style**: the 16-line nested `match` for "merge one key into an existing JSON object with fallbacks" was simplified to a 7-line `serde_json::Map` expression. Same defensive semantics (malformed / non-object / missing all collapse to "start with an empty map").
+- **`parse_cli_resume_id` as a private fn in `service/sessions.rs`**: the `build_turn_context` reader and the `run_prompt_task` state machine used the same 8-line `serde_json::from_str → v.get("cli_resume_id")` walk. Extracted as a private fn with a doc-comment matching the opportunistic-metadata contract. Prevents future key-name drift.
+- **Delete the duplicate `test_cli_resume_fallback_replay_on_unknown`**: the test was a verbatim re-run of the 4 unit tests in `claude_code/mod.rs::resume_rejection_tests` from the service layer. The function is `pub(crate)`, which is a visibility check the compiler enforces — not a test invariant to re-assert. The 4 unit tests are the spec equivalent.
+- **Rename `did_persist_capture` → `should_persist_capture`**: the bool is a "should we write" gate (folding in the `Cancelled`/`LoopLimit` exclusion), not a "did we capture" fact. Renamed for accuracy; the docstring on `decide` updated to match.
+- **Rename `captured_cli_session_id` → `captured_cli_resume_id`**: aligns the Rust field name with the JSON key (`cli_resume_id`). The captured value IS the resume id, not a generic session id.
+- **Pre-existing test rename**: `test_session_resume_clears_metadata_on_runtime_switch` → `test_cli_resume_not_inherited_across_runtime_switch`. Same body (the runtime-switch clearing logic in `resume_inherit` was already there from feat-038); the new name matches the spec verification command.
+- **`ActiveSessions` is the only serialiser** (Correctness reviewer C5): no defensive `WHERE status NOT IN (...)` guard on `update_runtime_metadata`; the single-flight lock at `send_prompt` line 229 covers all writes to a session's row. The terminal-state guard would break the "reactivate by next `send_message`" flow that the writer is designed for. Logged to OOS for awareness.
+- **`did_reject = false` placeholder** (Altitude reviewer #1): the state machine's `did_reject` input is hard-wired to `false` until feat-051's `ClaudeCodeCodingAgent` runner populates it from `CliRunResult`. The `decide` method's signature is already shaped for this — when feat-051 adds `cli_rejection: Option<bool>` to `LoopResult`, the call site changes from `let did_reject = false;` to `loop_result.cli_rejection.unwrap_or(false)`, no `decide` API change.
+
+**Cross-feature follow-ups (now in PROGRESS.md OOS):**
+
+- feat-051 (ClaudeCodeCodingAgent) — populates `LoopResult::captured_cli_resume_id` from `parser.take_session_id()` and `LoopResult::cli_rejection` from `detect_resume_rejection(CliRunResult)`. The `run_prompt_task` call site then becomes `ResumeState::decide(had_resume_attempt, cli_rejection_from_loop_result, should_persist_capture)`. The replay CLI invocation lands here too (the data path is feat-047's; the actual `--resume <id>` argv construction and the replay-fallback invocation are feat-051's).
+- feat-049 (CLI reaping) — the per-turn `LoopResult` extension in feat-047 is forward-compatible with feat-049's `ActiveChildProcesses` table. The runner can now report `cli_rejection` via the same channel that reports `captured_cli_resume_id`.
+- feat-054 (SessionHeader pill) — the frontend reads `done.resume_state` (and `message_persisted.resume_state` for parity from the first event) to render the resume-state pill. Frontend changes are feat-054's job; feat-047's `SseWireEvent` widening is the wire contract.
+- feat-057 (conformance suite) — should add `FromStr` to `ResumeState` (mirroring `SessionMode::from_str`) when it needs to parse the persisted string form.
+- feat-058/059 (Codex/OpenCode) — when the second CLI runtime lands, `had_resume_attempt` widens from `RuntimeKind::ClaudeCode` to `matches!(runtime_kind, ClaudeCode | Codex | Opencode)`, and `detect_resume_rejection` gets a per-CLI sibling.
+- feat-050 (workspace-scoped CLI session validation) — independent of feat-047's data path, but the runtimes it gates on (ClaudeCode/Codex/Opencode) are the same ones whose `cli_resume_id` lifecycle feat-047 established. Cross-coordination: feat-050's `cwd_outside_codebase` rejection is orthogonal to feat-047's `resume_unknown_session` rejection; the runner reports both via different signals.

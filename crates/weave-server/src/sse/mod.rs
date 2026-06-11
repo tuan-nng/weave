@@ -231,6 +231,13 @@ pub enum SseWireEvent {
         /// carry additional metadata that the frontend surfaces as a
         /// "subprocess" badge.
         mode: agent::SessionMode,
+        /// Which resume mechanism the runner used this turn (feat-047).
+        /// `none` for first turns, HTTP runtimes, and post-replay turns.
+        /// `native` when `--resume <stored-id>` was passed and accepted.
+        /// `replayed` when the stored id was rejected and the runner
+        /// cleared it and will fall back to message-history replay
+        /// (feat-051 wires the replay CLI invocation).
+        resume_state: agent::ResumeState,
     },
     Error {
         message: String,
@@ -255,6 +262,11 @@ pub enum SseWireEvent {
         /// How the agent drove the turn that produced this message
         /// (feat-038). Mirrors `done.mode`.
         mode: agent::SessionMode,
+        /// Which resume mechanism the runner used this turn (feat-047).
+        /// Mirrors `done.resume_state` so the frontend can render a
+        /// consistent resume badge from the FIRST event of the turn
+        /// (the message arrives before the terminal `done`).
+        resume_state: agent::ResumeState,
     },
     // SSE-protocol events
     Connected {
@@ -356,6 +368,7 @@ pub fn stream_event_to_wire(
             stop_reason,
             runtime_kind,
             mode,
+            resume_state: agent::ResumeState::None,
         },
         agent::StreamEvent::Error { message } => SseWireEvent::Error { message },
     }
@@ -492,6 +505,7 @@ mod tests {
                 stop_reason: agent::StopReason::EndTurn,
                 runtime_kind: agent::RuntimeKind::default(),
                 mode: agent::SessionMode::default(),
+                resume_state: agent::ResumeState::None,
             }
             .event_type(),
             "done"
@@ -517,6 +531,7 @@ mod tests {
                 created_at: "2026-06-01T00:00:00Z".into(),
                 runtime_kind: agent::RuntimeKind::default(),
                 mode: agent::SessionMode::default(),
+                resume_state: agent::ResumeState::None,
             }
             .event_type(),
             "message_persisted"
@@ -580,6 +595,7 @@ mod tests {
             created_at: "2026-06-01T20:14:33.512Z".into(),
             runtime_kind: agent::RuntimeKind::AnthropicApi,
             mode: agent::SessionMode::Native,
+            resume_state: agent::ResumeState::None,
         };
         let json = sse_data(&event);
         // JSON shape: {"type":"message_persisted","id":...,"role":...,
@@ -609,6 +625,7 @@ mod tests {
             created_at: "2026-06-01T20:14:33.512Z".into(),
             runtime_kind: agent::RuntimeKind::default(),
             mode: agent::SessionMode::default(),
+            resume_state: agent::ResumeState::None,
         };
         assert_eq!(event.event_type(), "message_persisted");
         let json = sse_data(&event);
@@ -635,6 +652,7 @@ mod tests {
                 created_at: "2026-06-01T20:14:33.512Z".into(),
                 runtime_kind: agent::RuntimeKind::AnthropicApi,
                 mode: agent::SessionMode::Native,
+                resume_state: agent::ResumeState::None,
             },
         );
         assert!(assigned_id > 0);
@@ -685,6 +703,7 @@ mod tests {
                 stop_reason,
                 runtime_kind,
                 mode,
+                resume_state: _,
             } => {
                 assert_eq!(stop_reason, agent::StopReason::EndTurn);
                 assert_eq!(runtime_kind, agent::RuntimeKind::ClaudeCode);

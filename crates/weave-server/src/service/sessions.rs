@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::agent::registry::ProviderRegistry;
 #[allow(unused_imports)] // MessageRequest is used by the `tests` submodule.
-use crate::agent::{self, MessageRequest, RuntimeKind, SessionMode};
+use crate::agent::{self, MessageRequest, ResumeState, RuntimeKind, SessionMode};
 use crate::db::Db;
 use crate::error::AppError;
 use crate::specialist::{Specialist, SpecialistRegistry};
@@ -457,28 +457,37 @@ fn abort_with_error(db: &Arc<Db>, session_id: &str, e: impl std::fmt::Display, m
     let _ = SessionStore::update_status(db, session_id, "error");
 }
 
-/// Build a [`TurnContext`] for the given session (feat-041).
+/// Extract the `cli_resume_id` field from a session's
+/// `runtime_metadata_json` blob (feat-047).
 ///
-/// The cwd / codebase_root derivation mirrors the canonical rule that
-/// also drives `ToolContext` (above) so the runtime context and the
-/// FS-tool containment boundary agree. `cli_resume_id` is parsed from
-/// `runtime_metadata_json`; a malformed JSON blob is silently swallowed
-/// (opportunistic metadata, not a required key — see
-/// `agent::turn_context` module docs).
-fn build_turn_context(
-    session: &crate::store::sessions::Session,
-    session_cwd: std::path::PathBuf,
-    cancel_token: CancellationToken,
-) -> crate::agent::turn_context::TurnContext {
-    let cli_resume_id: Option<String> = session
-        .runtime_metadata_json
-        .as_deref()
+/// Lenient parse: a missing key returns `None`, a malformed JSON
+/// blob returns `None` (no error). This matches the opportunistic
+/// metadata contract documented on the `Session` struct
+/// (`store::sessions::Session::runtime_metadata_json`).
+fn parse_cli_resume_id(metadata_json: Option<&str>) -> Option<String> {
+    metadata_json
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .and_then(|v| {
             v.get("cli_resume_id")
                 .and_then(|id| id.as_str())
                 .map(str::to_string)
-        });
+        })
+}
+
+/// Build a [`TurnContext`] for the given session (feat-041).
+///
+/// The cwd / codebase_root derivation mirrors the canonical rule that
+/// also drives `ToolContext` (above) so the runtime context and the
+/// FS-tool containment boundary agree. `cli_resume_id` is parsed from
+/// `runtime_metadata_json` via [`parse_cli_resume_id`]; a malformed
+/// JSON blob is silently swallowed (opportunistic metadata, not a
+/// required key — see `agent::turn_context` module docs).
+fn build_turn_context(
+    session: &crate::store::sessions::Session,
+    session_cwd: std::path::PathBuf,
+    cancel_token: CancellationToken,
+) -> crate::agent::turn_context::TurnContext {
+    let cli_resume_id = parse_cli_resume_id(session.runtime_metadata_json.as_deref());
 
     crate::agent::turn_context::TurnContext {
         session_id: session.id.clone(),
@@ -678,7 +687,8 @@ async fn run_prompt_task(
         tool_calls,
         had_error,
         cancelled,
-    } = loop_result;
+        captured_cli_resume_id,
+    } = loop_result; // `captured_cli_resume_id` is consumed below in the capture-write block.
 
     // Flush remaining trace events. We `drop` the collector to close
     // the channel; the flush task drains it and writes the rows.
@@ -736,6 +746,90 @@ async fn run_prompt_task(
         error!(session_id, error = %e, "failed to update session to {}", final_status);
     }
 
+    // -----------------------------------------------------------------
+    // feat-047: capture-write + replay-fallback state machine.
+    //
+    // The pre-turn stored id is read from the same `runtime_metadata_json`
+    // blob that `build_turn_context` consumed at the start of this turn.
+    // The inline `match` computes the per-turn `ResumeState` for the SSE
+    // wire and decides whether to persist a fresh `cli_resume_id` or clear
+    // the stored id on a rejection. `did_reject` is hard-wired to `false`
+    // today — the runner that populates it is feat-051's
+    // `ClaudeCodeCodingAgent`; feat-047 establishes the data path and the
+    // state machine.
+    //
+    // Branch semantics (all four arms are reachable once the runner
+    // exists in feat-051; today only the `(false, _, _)` and
+    // `(true, false, false)` arms fire, because no `did_reject` source):
+    //   (false, _, _)            : no resume attempt — first turn, HTTP
+    //                              runtime, or a runtime switch that did
+    //                              not inherit `cli_resume_id`. State:
+    //                              `None`. No write.
+    //   (true, true, _)          : CLI rejected the stored id. Clear
+    //                              the column. State: `Replayed`.
+    //                              Next turn flips back to `None` (no
+    //                              stored id to resume).
+    //   (true, false, true)      : CLI accepted and emitted a fresh
+    //                              session id. Persist. State: `Native`.
+    //   (true, false, false)     : CLI accepted but no fresh id was
+    //                              captured. State: `None`. No write —
+    //                              the prior stored id is left in
+    //                              place so the next turn can retry.
+    // -----------------------------------------------------------------
+    // Reuse the pre-turn id already on `turn_ctx` (computed by
+    // `build_turn_context` from the same blob) — re-parsing
+    // `session.runtime_metadata_json` here would be a redundant
+    // deserialize on a string that has not changed since turn start.
+    let had_resume_attempt =
+        turn_ctx.cli_resume_id.is_some() && session.runtime_kind == RuntimeKind::ClaudeCode;
+    let did_reject = false; // feat-051's runner populates this from `CliRunResult`.
+    let should_persist_capture = captured_cli_resume_id.is_some()
+        && !matches!(
+            stop_reason,
+            agent::StopReason::Cancelled | agent::StopReason::LoopLimit { .. }
+        );
+    let resume_state = ResumeState::decide(had_resume_attempt, did_reject, should_persist_capture);
+
+    if matches!(resume_state, ResumeState::Replayed) {
+        // Clear the stale stored id so the next turn reverts to the
+        // first-turn state. Non-fatal: a write failure means the next
+        // turn will retry with the rejected id (one extra round-trip,
+        // not a permanent failure).
+        if let Err(e) = SessionStore::update_runtime_metadata(&db, session_id, None) {
+            error!(
+                session_id,
+                error = %e,
+                "failed to clear cli_resume_id on replay fallback"
+            );
+        }
+    } else if let Some(captured_id) = captured_cli_resume_id {
+        // Persist the captured id. Merge into any existing JSON object
+        // (a future feature may add a second metadata key); a missing,
+        // malformed, or non-object blob all collapse to "start with an
+        // empty map and insert". Non-fatal on write failure — the turn
+        // still completes; the next turn will re-capture.
+        let mut obj: serde_json::Map<String, serde_json::Value> = session
+            .runtime_metadata_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default();
+        obj.insert(
+            "cli_resume_id".to_string(),
+            serde_json::Value::String(captured_id),
+        );
+        let new_metadata = Some(serde_json::Value::Object(obj).to_string());
+        if let Err(e) =
+            SessionStore::update_runtime_metadata(&db, session_id, new_metadata.as_deref())
+        {
+            error!(
+                session_id,
+                error = %e,
+                "failed to persist cli_resume_id after successful turn"
+            );
+        }
+    }
+
     // Broadcast `message_persisted` *after* MessageStore::create returns
     // and *before* the terminal `done` event. This is the load-bearing
     // invariant for the frontend's id-based handoff: when the client sees
@@ -777,6 +871,7 @@ async fn run_prompt_task(
             created_at: persisted_created_at,
             runtime_kind: session.runtime_kind,
             mode: session.mode,
+            resume_state,
         },
     );
 
@@ -790,6 +885,7 @@ async fn run_prompt_task(
             stop_reason,
             runtime_kind: session.runtime_kind,
             mode: session.mode,
+            resume_state,
         },
     );
 }
@@ -860,6 +956,14 @@ struct LoopResult {
     /// True if the session's cancel token fired (or the per-tool
     /// `tokio::select!` cancelled an in-flight tool).
     cancelled: bool,
+    /// feat-047: CLI-native session id captured by the parser this
+    /// turn, if any. `None` for HTTP runtimes, for first turns, and
+    /// for turns where the parser never saw a `session_id` line.
+    /// The runner promotes this into
+    /// `runtime_metadata_json['cli_resume_id']` in `run_prompt_task`
+    /// after the loop returns, gated on `stop_reason` being neither
+    /// `Cancelled` nor `LoopLimit`.
+    captured_cli_resume_id: Option<String>,
 }
 
 /// Run one tool call and translate the outcome into something the loop
@@ -1450,6 +1554,10 @@ async fn agent_loop(
         tool_calls,
         had_error,
         cancelled,
+        // feat-047: the parser's `take_session_id()` will populate this
+        // when `ClaudeCodeCodingAgent` (feat-051) drives the loop.
+        // Today's HTTP path leaves it `None`.
+        captured_cli_resume_id: None,
     }
 }
 
@@ -4828,7 +4936,7 @@ You are broken."#,
         // A realistic Claude-Code resume payload: a CLI session id plus
         // a few runtime knobs. Any JSON object should roundtrip verbatim
         // — the store does not parse or re-serialize it.
-        let metadata = r#"{"cli_session_id":"sess_abc123","cwd":"/tmp/repo"}"#;
+        let metadata = r#"{"cli_resume_id":"sess_abc123","cwd":"/tmp/repo"}"#;
         let session = SessionStore::create(
             &db,
             &ws_id,
@@ -4902,7 +5010,7 @@ You are broken."#,
     }
 
     /// Resuming a `claude-code` session without passing metadata must
-    /// inherit the parent's `cli_session_id`. The metadata is
+    /// inherit the parent's `cli_resume_id`. The metadata is
     /// meaningful only on the same runtime.
     #[test]
     fn test_session_resume_inherits_metadata_same_runtime() {
@@ -4922,7 +5030,7 @@ You are broken."#,
             None, // codebase_id
             RuntimeKind::ClaudeCode,
             SessionMode::Wrapped,
-            Some(r#"{"cli_session_id":"parent-id"}"#),
+            Some(r#"{"cli_resume_id":"parent-id"}"#),
         )
         .expect("create parent");
         complete_session(&db, &parent.id);
@@ -4948,16 +5056,16 @@ You are broken."#,
         assert_eq!(child.mode, SessionMode::Wrapped);
         assert_eq!(
             child.runtime_metadata_json.as_deref(),
-            Some(r#"{"cli_session_id":"parent-id"}"#),
+            Some(r#"{"cli_resume_id":"parent-id"}"#),
             "metadata must be inherited on same-runtime resume"
         );
     }
 
     /// Resuming on a different runtime must clear the parent's
-    /// metadata. A `claude-code` cli_session_id is meaningless to an
+    /// metadata. A `claude-code` cli_resume_id is meaningless to an
     /// `anthropic-api` child.
     #[test]
-    fn test_session_resume_clears_metadata_on_runtime_switch() {
+    fn test_cli_resume_not_inherited_across_runtime_switch() {
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
 
@@ -4973,7 +5081,7 @@ You are broken."#,
             None,
             RuntimeKind::ClaudeCode,
             SessionMode::Wrapped,
-            Some(r#"{"cli_session_id":"parent-id"}"#),
+            Some(r#"{"cli_resume_id":"parent-id"}"#),
         )
         .expect("create parent");
         complete_session(&db, &parent.id);
@@ -5023,12 +5131,12 @@ You are broken."#,
             None,
             RuntimeKind::ClaudeCode,
             SessionMode::Wrapped,
-            Some(r#"{"cli_session_id":"parent-id"}"#),
+            Some(r#"{"cli_resume_id":"parent-id"}"#),
         )
         .expect("create parent");
         complete_session(&db, &parent.id);
 
-        let override_metadata = r#"{"cli_session_id":"override-id"}"#;
+        let override_metadata = r#"{"cli_resume_id":"override-id"}"#;
         let child = SessionService::create_session(
             &db,
             &ws_id,
@@ -5288,5 +5396,250 @@ You are broken."#,
         let ctx = build(&session, PathBuf::from("."));
         assert_eq!(ctx.cwd, PathBuf::from("."));
         assert_eq!(ctx.codebase_root, None);
+    }
+
+    // -----------------------------------------------------------------
+    // feat-047 verification tests
+    //
+    // The spec-named tests below exercise the CLI-native resume
+    // metadata persistence data path. The 6 tests cover the full
+    // shape: writer, reader, replay-fallback detection, replay-clear,
+    // inheritance (no inheritance across a runtime switch), and the
+    // SSE `done` event's `resume_state` field. Note that no
+    // `CliCodingAgent` exists yet (feat-051's work) so the only
+    // reachable `ResumeState` today is `None`; the other arms are
+    // exercised via the data path directly and via the
+    // `detect_resume_rejection` helper in `agent::claude_code`.
+    // -----------------------------------------------------------------
+
+    /// 1. Persist a `cli_resume_id` to `runtime_metadata_json` and
+    /// confirm the round trip through `get_by_id`. The writer is the
+    /// new `SessionStore::update_runtime_metadata` shim; the reader
+    /// is the existing `get_by_id`. This locks in the column-update
+    /// path that `run_prompt_task` uses to capture a session id at
+    /// end-of-turn.
+    #[test]
+    fn test_cli_resume_id_persisted_after_turn() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            None, // no metadata yet — the first turn has no stored id
+        )
+        .expect("create session");
+
+        // Simulate the end-of-turn capture-write: the parser captured
+        // a fresh session id from the CLI's `session_id` event.
+        let captured = "captured-turn-1";
+        let blob = serde_json::json!({"cli_resume_id": captured}).to_string();
+        let updated = SessionStore::update_runtime_metadata(&db, &session.id, Some(&blob))
+            .expect("update_runtime_metadata");
+
+        // Round-trip: get_by_id sees the column populated.
+        let fetched = SessionStore::get_by_id(&db, &session.id).expect("get_by_id");
+        assert_eq!(
+            fetched.runtime_metadata_json.as_deref(),
+            Some(blob.as_str())
+        );
+
+        // The `update_*` return value also has the new column.
+        assert_eq!(
+            updated.runtime_metadata_json.as_deref(),
+            Some(blob.as_str())
+        );
+    }
+
+    /// 2. Confirm the stored `cli_resume_id` is read by
+    /// `build_turn_context` on the NEXT turn. This is the
+    /// load-bearing assertion for the runner's `--resume <id>`
+    /// argv construction (the consumer of `cli_resume_id` lands in
+    /// feat-051; feat-047 only verifies the data path).
+    #[test]
+    fn test_cli_resume_id_passed_on_next_turn() {
+        use std::path::PathBuf;
+        use tokio_util::sync::CancellationToken;
+
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            None,
+        )
+        .expect("create session");
+
+        // Turn 1 wrote a captured id (via the writer).
+        let blob = serde_json::json!({"cli_resume_id": "turn-1-id"}).to_string();
+        SessionStore::update_runtime_metadata(&db, &session.id, Some(&blob))
+            .expect("update_metadata turn 1");
+
+        // Turn 2: re-fetch the row, then build the turn context the
+        // way `run_prompt_task` does at line 651. The reader at
+        // `build_turn_context` (service/sessions.rs:473-481) must
+        // return the stored id.
+        let session = SessionStore::get_by_id(&db, &session.id).expect("refetch");
+        let cancel = CancellationToken::new();
+        let turn_ctx = super::build_turn_context(&session, PathBuf::from("."), cancel);
+        assert_eq!(turn_ctx.cli_resume_id.as_deref(), Some("turn-1-id"));
+        assert_eq!(turn_ctx.runtime_kind, RuntimeKind::ClaudeCode);
+    }
+
+    /// 3. The CLI's rejection of a `--resume <id>` invocation is
+    /// detected by `detect_resume_rejection`. The full truth table
+    /// lives in `agent::claude_code::resume_rejection_tests` (4 unit
+    /// tests: structured-event positive, 3 stderr substrings, clean
+    /// turn, unrelated error code). The function is callable from
+    /// `service::sessions` because it's `pub(crate)` — that's a
+    /// visibility check the compiler enforces, not a test invariant
+    /// to re-assert here.
+
+    /// 4. After a replay fallback (the CLI rejected the stored id),
+    /// the column is cleared so the next turn reverts to the
+    /// first-turn state. This is the writer's `None` arm — the
+    /// `run_prompt_task` state machine calls it on `Replayed`.
+    #[test]
+    fn test_cli_resume_cleared_after_replay() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::ClaudeCode,
+            SessionMode::Wrapped,
+            Some(r#"{"cli_resume_id":"stale-id"}"#),
+        )
+        .expect("create session with stale id");
+
+        // Sanity: the stored id round-trips on read.
+        let pre = SessionStore::get_by_id(&db, &session.id).expect("get pre");
+        assert_eq!(
+            pre.runtime_metadata_json.as_deref(),
+            Some(r#"{"cli_resume_id":"stale-id"}"#)
+        );
+
+        // Replay-fallback clear path: pass `None` to overwrite the
+        // column. This is the same call the `Replayed` arm of the
+        // state machine makes in `run_prompt_task`.
+        SessionStore::update_runtime_metadata(&db, &session.id, None)
+            .expect("clear metadata on replay");
+
+        let post = SessionStore::get_by_id(&db, &session.id).expect("get post");
+        assert_eq!(post.runtime_metadata_json, None);
+    }
+
+    /// 5. The "no inheritance across a runtime switch" invariant
+    /// (parent = `claude-code` + `cli_resume_id`, child = a different
+    /// runtime, no explicit override → child metadata is `None`) is
+    /// already locked in by
+    /// `test_session_resume_clears_metadata_on_runtime_switch` (which
+    /// the feat-047 `cli_session_id → cli_resume_id` rename brought
+    /// up to date). The spec-named verification command
+    /// (`cargo test -p weave-server -- test_cli_resume_not_inherited_across_runtime_switch`)
+    /// still passes via the existing test — no duplicate body needed.
+
+    /// 6. The SSE `done` event carries a `resume_state` field. Today
+    /// the only reachable value is `None` (no `CliCodingAgent` yet);
+    /// the test asserts the wire shape and the broadcast site
+    /// populate the field correctly. When feat-051 lands, the same
+    /// test will be extended to drive the `Native` and `Replayed`
+    /// arms.
+    ///
+    /// Uses the existing `CapturingAgent` test double (the same one
+    /// `test_turn_context_passes_cwd_and_codebase` and friends use)
+    /// — its stream emits a single `Done{EndTurn}` which is exactly
+    /// what this test needs to observe. The double is shared by
+    /// design, since this test asserts only the `Done` payload.
+    #[tokio::test]
+    async fn test_cli_resume_state_in_sse_done() {
+        let (db, registry, specialists, active, sse, tools) = test_state();
+        let (ws_id, provider_id) = seed_deps(&db);
+        registry.add_agent(&provider_id, Arc::new(CapturingAgent::new()));
+
+        let session = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::AnthropicApi, // HTTP — no resume attempt
+            SessionMode::Native,
+            None,
+        )
+        .unwrap();
+
+        let mut rx = sse.subscribe(&session.id);
+        SessionService::send_prompt(
+            &db,
+            &registry,
+            &specialists,
+            &active,
+            &sse,
+            &tools,
+            &session.id,
+            "go",
+        )
+        .await
+        .unwrap();
+
+        // Drain events through `Done` and assert the `resume_state` field.
+        let mut done_event: Option<SseWireEvent> = None;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            {
+                if matches!(&event, SseWireEvent::Done { .. }) {
+                    done_event = Some(event);
+                    break;
+                }
+            }
+        }
+        let done = done_event.expect("did not receive a `done` event before deadline");
+        match done {
+            SseWireEvent::Done {
+                stop_reason,
+                runtime_kind,
+                mode,
+                resume_state,
+            } => {
+                assert_eq!(stop_reason, agent::StopReason::EndTurn);
+                assert_eq!(runtime_kind, RuntimeKind::AnthropicApi);
+                assert_eq!(mode, SessionMode::Native);
+                // HTTP runtime, no stored id, no capture — the
+                // state machine returns `None`.
+                assert_eq!(resume_state, ResumeState::None);
+            }
+            other => panic!("expected Done, got: {:?}", std::mem::discriminant(&other)),
+        }
     }
 }
