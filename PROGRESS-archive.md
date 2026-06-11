@@ -15,6 +15,52 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-048 — `JourneyTranslator` — map parsed CLI streams into Weave traces (committed `0fad5ed2...` 2026-06-11)
+
+Phase 8 deliverable. Translates parsed `StreamEvent`s from `ClaudeCodeStreamParser` into Weave `TraceEvent`s with the CLI as the source of truth for tool results — the translator NEVER re-executes CLI tools, it only records what the CLI did. New `agent::claude_code::JourneyTranslator` (in `translator.rs`, ~440 LOC) with `on_event` / `finish` API. Schema: added `status: Option<String>` to `TraceEventKind::ToolCall` (additive, defaults to `None`; `"orphaned"` for CLI tool_use blocks that never received a matching `tool_result` before the turn ended). 8 spec-named tests in `translator_test.rs` cover the spec's 8 acceptance criteria; 3 inline unit tests in `translator.rs::tests` cover `cli_tool_to_file_change` (Claude-Code-specific name → `FileAction` map: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` → `FileAction::Write`; reads do NOT synthesize a `FileChange`).
+
+**Architecture decision (Lens 2 — Module-ized)**
+
+Three trade-off lenses were presented; the user picked the "BTreeMap (recommended)" option, which corresponds to Lens 2 (module-ized) on the data-structure dimension. The translator lives at `agent::claude_code::translator` (NOT in `trace::mod.rs`) to keep CLI-specific knowledge — `cli_tool_to_file_change`, the orphan-detection hook point, the in-flight tracker shape — in the adapter that owns the parser. The native precedent at `service::sessions.rs:1181` (`BTreeMap<String, (String, serde_json::Value)>` `pending_tool_requests`) is the load-bearing rationale: deterministic iteration, stable test assertions, and a `Vec` (parser) vs `BTreeMap` (translator) split is justified by the different ordering requirements (parser must preserve CLI insertion order; translator does not).
+
+**Files touched (actual)**
+
+- **NEW** `crates/weave-server/src/agent/claude_code/translator.rs` (~440 LOC) — `JourneyTranslator` struct, `ToolTracker` private struct, `cli_tool_to_file_change` pub(crate) free fn, 3 inline unit tests. Module-level docs cover: the StreamEvent → TraceEvent mapping table, orphan detection, file-change synthesis rationale, thinking coalescing, and the BTreeMap-vs-Vec design choice.
+- **NEW** `crates/weave-server/src/agent/claude_code/translator_test.rs` (~290 LOC) — 8 spec-named tests + `drain` helper using real `TraceCollector` over an mpsc channel.
+- **MODIFIED** `crates/weave-server/src/agent/claude_code/mod.rs` — added `mod translator; #[cfg(test)] mod translator_test; #[cfg_attr(not(test), allow(unused_imports))] pub use translator::JourneyTranslator;` per the parser's pattern.
+- **MODIFIED** `crates/weave-server/src/store/traces.rs` — added `status: Option<String>` to `TraceEventKind::ToolCall` (additive; doc-commented for the "orphaned" semantics); updated data_json writer to include `status` (null for normal, "orphaned" for orphans); added `PartialEq, Eq` to `FileAction` (needed for test asserts); added `#[derive(Debug, Clone)]` to `TraceEvent` and `TraceEventKind` (needed for `ev.clone()` in the translator's emit-then-return pattern).
+- **MODIFIED** `crates/weave-server/src/trace/mod.rs`, `api/traces.rs`, `service/sessions.rs` — patched 8 `TraceEventKind::ToolCall` constructor sites with `status: None,` (2 test fixtures in `store/traces.rs:375,444`, 1 in `trace/mod.rs:258`, 4 in `api/traces.rs:143,189,245,262`, 1 production call site in `service/sessions.rs:1472`).
+- **MODIFIED** `feature_list.json` — feat-048 state `not_started` → `passing` with evidence pointing at the 11 new tests.
+
+**Verification gate (all 8 spec tests + 3 inline unit tests)**
+
+```
+cargo test -p weave-server -- test_journey_translator_text_passthrough ... test_journey_translator_dedupes_file_changes
+→ 8 passed
+cargo test -p weave-server agent::claude_code::translator
+→ 11 passed
+./init.sh  # 3-layer gate
+→ 749 Rust tests + 113 frontend tests pass (was 741 + 113)
+→ clippy + cargo fmt clean
+→ server starts; /api/health and / respond
+```
+
+**Phase 6 (Quality Review) outcomes**
+
+code-reviewer found no issues above 80% confidence. The implementation faithfully matches the spec: no tool re-execution (test 3 pins this with a clearly-fake path `/nonexistent/__translator_must_not_read__`), orphan detection works on `Done`, dedup of file_changes works on duplicate `tool_result` deltas, thinking coalescing works on the next non-thinking event, error mapping is lossless. The architectural boundary with the parser is preserved (translator consumes `StreamEvent`s, never reads files, never spawns subprocesses).
+
+**Out-of-scope items noticed (logged, not fixed)**
+
+- **`captured_cli_resume_id` still `None` everywhere** (feat-047 carry-over): the new translator does not touch `LoopResult` — that wiring lands at feat-051 when `ClaudeCodeCodingAgent::send_message` is built. The `parser.take_session_id()` consumer stays where it is.
+- **`status: Option<String>` is `String`-typed, not a dedicated enum** (feat-048 simplify pass): the only value the spec defines is `"orphaned"`. A `ToolCallStatus` enum with a single `Orphaned` variant would be more type-safe but adds 1 struct + 1 FromStr impl + 1 Serialize round-trip for one variant. The `Option<String>` shape is a deliberate "spec future-proof" point — the field can carry more values (e.g. `"timed_out"`, `"cancelled"`) without a schema change. Defer to the second consumer.
+- **`<unknown>` synthetic name for orphan `tool_result`** (feat-048): the wire-protocol anomaly path (a `tool_result` whose `tool_use_id` was never announced) records an anonymous `ToolCall` with `tool_name = "<unknown>"` and empty input. The path is warn-logged but not exposed as a separate trace kind. A future wire-anomaly tally could surface this, but the spec does not require it today.
+- **`HashMap`-vs-`BTreeMap` for `in_flight` is settled, not reopened** (feat-048): the user picked BTreeMap. The parser (feat-045) uses Vec. The two are justified by different ordering needs. If a future feature needs O(1) lookup of a specific tool_use_id (e.g. a `--retry-tool` endpoint), the lookup pattern in `ToolResult` is `get_mut` (O(log n) on BTreeMap) which is fine for the typical n ≤ 2 in-flight tools per turn.
+- **`cli_tool_to_file_change` does not handle `MultiEdit`'s per-edit paths** (feat-048): the map uses the top-level `file_path` for `MultiEdit` (Claude Code's single-file-per-call contract). If a future Claude Code version supports per-edit `edits[].file_path` with a multi-file surface, the map will need a wider extractor. Logged for awareness.
+
+**Next steps for the next session (post-feat-048)**
+
+feat-049 (child-process reaping on crash + per-session process tracking) is the natural successor — depends on feat-009, all `passing`. Spec calls for a parallel `ActiveChildProcesses` table extending the existing `ActiveSessions` (feat-034), a `service::startup::reap_cli_processes` separate from `reap_orphans`, and SIGTERM-then-SIGKILL on tracked processes whose session is no longer active. The `CliRunner::active_pids()` test surface added in feat-043 is the seed for the new table.
+
 ### feat-042 — Per-Runtime-Tool model cache (phase-7)
 
 New `ModelCache` on `ProviderRegistry` (5-min TTL) mirrors the existing 10s `HealthCache` discipline: lives on the registry, invalidated on add/remove, owned by one struct, not by `AppState`. Free function `list_cli_models_via_shell` invokes the registered CLI binary with `--list-models`, parses the JSON output, and the cache write happens on the return path. New `POST /api/providers/:id/models` refresh endpoint for CLI providers; HTTP providers are rejected with 400 `invalid_kind` to keep the API symmetric. The pre-feat-042 `test_provider_cli_row_not_yet_dispatchable` (which asserted 501 + literal "feat-042" string) was deleted and replaced by `test_model_cache_miss_shells_out` which exercises the same HTTP path now that CLI rows ARE dispatchable.

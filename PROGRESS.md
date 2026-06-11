@@ -28,17 +28,17 @@ For session-start tips and conventions, see CLAUDE.md.
 ## Current State
 
 - **Last updated:** 2026-06-11
-- **Latest commit:** feat-047 (CLI-native resume metadata persistence). **feat-048** (CLI journey translator) is the next one to implement.
-- **Active feature:** none. Next: pick the next `not_started` phase-8 feature — **feat-047** (depends on feat-005/008/038/041/043/045, all `passing`).
+- **Latest commit:** feat-048 (JourneyTranslator — maps parsed CLI streams into Weave trace events). Next: **feat-049** (child-process reaping on crash + per-session process tracking).
+- **Active feature:** none. Next: pick the next `not_started` phase-8 feature — **feat-049** (depends on feat-009, all `passing`).
 - **In-flight (uncommitted):** none.
-- **Build status:** green — `./init.sh` 3-layer gate passes (741 Rust + 113 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, smoke test green)
-- **Test status:** green — 741 Rust tests + 113 frontend tests (11 new in feat-047: 5 spec-named + 4 `detect_resume_rejection` + 3 `ResumeState` table tests; pre-existing `test_session_resume_clears_metadata_on_runtime_switch` renamed to match the spec name — no new test bodies)
+- **Build status:** green — `./init.sh` 3-layer gate passes (749 Rust + 113 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, smoke test green)
+- **Test status:** green — 749 Rust tests + 113 frontend tests (11 new in feat-048: 8 spec-named `test_journey_translator_*` + 3 inline `cli_tool_to_file_change_*` unit tests)
 - **Lint status:** green — clippy clean (default targets), fmt clean, prettier clean, ESLint clean
-- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth. Confirmed green for the feat-047 commit (no flake triggered).
+- **Precommit hook:** active on this clone (`core.hooksPath = .githooks`). Every `git commit` runs `just check` and aborts on failure. CLAUDE.md hard constraint #9 is enforced mechanically. Bypass with `git commit --no-verify` when needed. The hook itself has a pre-existing test-parallelism flake (see out-of-scope); the canonical `./init.sh` is the source of truth. Confirmed green for the feat-048 commit (no flake triggered).
 
 ## Next Steps (in order)
 
-1. **Pick the next phase-8 feature.** feat-048 (`JourneyTranslator` — maps parsed CLI stream events into Weave trace events + `StreamEvent`s without re-executing CLI tools) is the natural successor — depends on feat-005/017/043/045, all `passing`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
+1. **Pick the next phase-8 feature.** feat-049 (child-process reaping on crash + per-session process tracking — extends `ActiveSessions` with a parallel `ActiveChildProcesses` table) is the natural successor — depends on feat-009, all `passing`. Per WIP=1, exactly one feature in `active` state; pick from `not_started` features in `feature_list.json`.
 2. **(Low priority, ask first) Clean up untracked backup files at the repo root** — `weave.db.bak.20260609-110204` and `weave.db.bak.20260609-160418` (carry-over from the 2026-06-09 data cleanup and fix-068 recovery). Confirm with the user, then `rm` them. Do not delete the `weave.db` itself.
 
 ## Key Architectural Decisions (quick reference)
