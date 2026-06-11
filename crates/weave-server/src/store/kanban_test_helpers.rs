@@ -32,6 +32,7 @@ pub fn make_test_state() -> AppState {
         db,
         registry: Arc::new(crate::agent::registry::ProviderRegistry::new()),
         active_sessions: Arc::new(crate::service::ActiveSessions::new()),
+        active_child_processes: Arc::new(crate::service::ActiveChildProcesses::new()),
         sse_manager: Arc::new(crate::sse::SseManager::new()),
         specialists: Arc::new(crate::specialist::SpecialistRegistry::new()),
         tools: Arc::new(crate::tools::ToolRegistry::new()),

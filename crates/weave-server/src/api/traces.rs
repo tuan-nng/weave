@@ -99,6 +99,7 @@ mod tests {
             db,
             registry: std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new()),
             active_sessions: std::sync::Arc::new(crate::service::ActiveSessions::new()),
+            active_child_processes: std::sync::Arc::new(crate::service::ActiveChildProcesses::new()),
             sse_manager: std::sync::Arc::new(crate::sse::SseManager::new()),
             specialists: std::sync::Arc::new(crate::specialist::SpecialistRegistry::new()),
             tools: std::sync::Arc::new(crate::tools::ToolRegistry::new()),

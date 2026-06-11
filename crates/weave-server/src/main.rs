@@ -52,6 +52,14 @@ pub struct AppState {
     pub db: Arc<db::Db>,
     pub registry: Arc<agent::registry::ProviderRegistry>,
     pub active_sessions: Arc<service::ActiveSessions>,
+    /// Per-session CLI child pid registry (feat-049). The
+    /// `CliRunner` registers/unregisters on every spawn/exit; the
+    /// HTTP `cancel` handler reads it for the `terminate`
+    /// defense-in-depth path; the cold-start reaper
+    /// (`service::startup::reap_cli_processes`) reads /proc
+    /// independently (this in-memory table is empty on cold start
+    /// by construction).
+    pub active_child_processes: Arc<service::ActiveChildProcesses>,
     pub sse_manager: Arc<sse::SseManager>,
     pub specialists: Arc<specialist::SpecialistRegistry>,
     pub tools: Arc<tools::ToolRegistry>,
@@ -135,6 +143,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         warn!(count = reaped, "Recovered sessions from previous run");
     }
 
+    // Reap orphan CLI processes from any previous crashed process
+    // (feat-049). Same slot as `reap_orphans`: synchronous, before
+    // the listener binds, after the DB and providers are loaded
+    // (the reaper needs `providers.binary_path` to build the
+    // allowlist). Best-effort: when the parent has died, surviving
+    // children are reparented to PID 1 and the `PPid == getpid()`
+    // filter will not match them — see `reap_cli_processes` doc.
+    let cli_reaped = service::startup::reap_cli_processes(&db)?;
+    if cli_reaped.terminated > 0 {
+        warn!(
+            terminated = cli_reaped.terminated,
+            failed = cli_reaped.failed,
+            "Reaped orphan CLI processes from previous run"
+        );
+    }
+
     // Read A2A token from environment.
     let a2a_token = std::env::var("WEAVE_A2A_TOKEN")
         .ok()
@@ -147,12 +171,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     // Build the API router.
     let active_sessions = Arc::new(service::ActiveSessions::new());
+    let active_child_processes = Arc::new(service::ActiveChildProcesses::new());
     let sse_manager = Arc::new(sse::SseManager::new());
     let shutdown_token = CancellationToken::new();
     let state = AppState {
         db: db.clone(),
         registry,
         active_sessions: active_sessions.clone(),
+        active_child_processes: active_child_processes.clone(),
         sse_manager: sse_manager.clone(),
         specialists,
         tools,

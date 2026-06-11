@@ -37,6 +37,7 @@ mod tests {
             db,
             registry: Arc::new(crate::agent::registry::ProviderRegistry::new()),
             active_sessions: Arc::new(crate::service::ActiveSessions::new()),
+            active_child_processes: Arc::new(crate::service::ActiveChildProcesses::new()),
             sse_manager: Arc::new(crate::sse::SseManager::new()),
             specialists: Arc::new(specialists),
             tools: Arc::new(crate::tools::ToolRegistry::new()),

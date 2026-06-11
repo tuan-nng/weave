@@ -437,11 +437,24 @@ fn make_sse_event(id: Option<u64>, event_type: &str, data: &str) -> Event {
 
 /// POST /api/sessions/{sid}/cancel
 ///
-/// Cancels an active streaming task for the session.
+/// Cancels an active streaming task for the session. The primary
+/// signal is the `CancellationToken` (which `wait_or_cancel` in
+/// `agent::cli_runner` observes). The `ActiveChildProcesses::terminate`
+/// call is a defense-in-depth path: if the session's child pid is
+/// still tracked (e.g. a long-running CLI that hasn't observed the
+/// token yet), we SIGTERM the process group directly. Either path is
+/// sufficient; running both is idempotent.
 pub async fn cancel_session(
     axum::Extension(state): axum::Extension<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<DataResponse<serde_json::Value>>, AppError> {
+    // Defense in depth: SIGTERM the tracked process group (Unix). On
+    // non-Unix this is a no-op that still clears the entry. Failure
+    // here is intentionally ignored — the token path remains the
+    // primary signal and the cancel endpoint must not surface a 5xx
+    // because the table didn't have an entry.
+    let _ = state.active_child_processes.terminate(&session_id);
+
     crate::service::sessions::SessionService::cancel_session(&state.active_sessions, &session_id)?;
 
     Ok(Json(DataResponse {
@@ -469,6 +482,8 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let active_child_processes =
+            std::sync::Arc::new(crate::service::ActiveChildProcesses::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
         let tools = std::sync::Arc::new(crate::tools::ToolRegistry::new());
@@ -476,6 +491,7 @@ mod tests {
             db: db.clone(),
             registry,
             active_sessions,
+            active_child_processes,
             sse_manager,
             specialists,
             tools,

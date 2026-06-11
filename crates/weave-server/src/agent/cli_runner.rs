@@ -16,13 +16,14 @@
 //!
 //! ## Per-session process table
 //!
-//! A `tokio::sync::Mutex<HashMap<SessionId, ChildHandle>>` lives on
-//! `CliRunner` so the cancel path can locate the running child by
-//! `session_id` and signal the process group. The table is "thin and
-//! local" today; feat-049 (`ActiveChildProcesses`) will extract it into
-//! a global struct in `service::` and the runner's method will take a
-//! reference instead. The runner's public surface (`CliInvocation`,
-//! `CliRunResult`, `run`) is stable across that refactor.
+//! The `ActiveChildProcesses` table (in `service::`, feat-049) holds
+//! `session_id -> pid` for every in-flight child. The runner
+//! registers on entry and unregisters on every exit path; the cancel
+//! handler can call `terminate(session_id)` to SIGTERM the group
+//! directly, and the cold-start reaper scans /proc independently.
+//! Production code shares the registry via
+//! [`CliRunner::with_registry`] so the HTTP cancel handler, the
+//! reaper, and the runner all reach the same table.
 //!
 //! ## Cancellation
 //!
@@ -57,9 +58,10 @@
 // sprinkling `#[allow(dead_code)]` on every item.
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -69,6 +71,7 @@ use tracing::{debug, info, warn};
 
 use super::turn_context::TurnContext;
 use crate::error::AppError;
+use crate::service::ActiveChildProcesses;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -154,21 +157,15 @@ pub enum CliRunResult {
 }
 
 /// The runner. Constructed once per `CliCodingAgent` (feat-051+) and
-/// reused across turns. The internal `active` table is the spine of
-/// the cancel/reap path: every running child registers its pid there
-/// on entry and removes itself on exit.
+/// reused across turns. The internal registry tracks every spawned
+/// child's pid (registered on entry, removed on exit) so the cancel
+/// path can reach a live child even if the per-task token is in
+/// flight. Production code shares the registry via
+/// [`CliRunner::with_registry`] so the HTTP `cancel` handler and the
+/// cold-start reaper can both reach the same table.
 #[allow(dead_code)] // Consumed by CliCodingAgent in feat-051+.
 pub struct CliRunner {
-    active: tokio::sync::Mutex<HashMap<String, ChildHandle>>,
-}
-
-/// Per-session child handle stored in `CliRunner::active`. Today this
-/// is just the pid (the `Child` itself is owned by the `run` future).
-/// Feat-049 may extend this to carry the `Child` so it can be waited
-/// on from a separate reaper task.
-#[derive(Debug, Clone, Copy)]
-struct ChildHandle {
-    pid: u32,
+    registry: Arc<ActiveChildProcesses>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,11 +200,27 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(5);
 // ---------------------------------------------------------------------------
 
 impl CliRunner {
-    /// Build a runner with an empty per-session process table.
+    /// Build a runner with a fresh, isolated process registry. Use
+    /// this in tests; use [`CliRunner::with_registry`] in production
+    /// to share the AppState-level registry.
     pub fn new() -> Self {
         Self {
-            active: tokio::sync::Mutex::new(HashMap::new()),
+            registry: Arc::new(ActiveChildProcesses::new()),
         }
+    }
+
+    /// Build a runner that registers its pids in a shared
+    /// `ActiveChildProcesses`. The HTTP cancel handler and the
+    /// cold-start reaper (`service::startup::reap_cli_processes`)
+    /// both need to reach the same table.
+    pub fn with_registry(registry: Arc<ActiveChildProcesses>) -> Self {
+        Self { registry }
+    }
+
+    /// The process registry. Cloned for tests that want to call
+    /// `terminate` against the same table the runner writes to.
+    pub fn registry(&self) -> Arc<ActiveChildProcesses> {
+        self.registry.clone()
     }
 
     /// Spawn `invocation` and wait for it to exit, cancel, or fail.
@@ -299,12 +312,10 @@ impl CliRunner {
             drop(stdin);
         }
 
-        // 6. Register the child in the active table. Held only for
-        //    the duration of the turn.
-        {
-            let mut active = self.active.lock().await;
-            active.insert(turn.session_id.clone(), ChildHandle { pid });
-        }
+        // 6. Register the child in the shared process registry. Held
+        //    only for the duration of the turn; the entry is removed
+        //    on every exit path (success, cancel, error).
+        self.registry.register(turn.session_id.clone(), pid);
 
         // 7. Spawn the stdout reader: line-by-line into a bounded
         //    mpsc channel. The receiver becomes the `LineStream`
@@ -333,14 +344,11 @@ impl CliRunner {
         // 10. Wait for the child, watching the cancel token.
         let outcome = wait_or_cancel(&mut child, &turn.cancellation_token, pid).await;
 
-        // 11. Unregister from the active table regardless of
-        //     outcome. The cancel path may have already done this
-        //     implicitly, but the entry is a per-turn record and
-        //     must not outlive the turn.
-        {
-            let mut active = self.active.lock().await;
-            active.remove(&turn.session_id);
-        }
+        // 11. Unregister from the process registry regardless of
+        //     outcome. The cancel path may have already removed the
+        //     entry via `terminate`, but the entry is a per-turn
+        //     record and must not outlive the turn.
+        self.registry.unregister(&turn.session_id);
 
         // 12. Collect reader output. Both tasks are bounded by the
         //     child's pipes closing, so they finish in finite time.
@@ -404,13 +412,13 @@ impl CliRunner {
     /// Number of sessions with a currently-running child. Test-only.
     #[cfg(test)]
     pub(crate) async fn active_count(&self) -> usize {
-        self.active.lock().await.len()
+        self.registry.len()
     }
 
     /// Pids of currently-running children, for assertions. Test-only.
     #[cfg(test)]
     pub(crate) async fn active_pids(&self) -> Vec<u32> {
-        self.active.lock().await.values().map(|h| h.pid).collect()
+        self.registry.pids()
     }
 }
 

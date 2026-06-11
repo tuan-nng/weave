@@ -367,6 +367,8 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let active_child_processes =
+            std::sync::Arc::new(crate::service::ActiveChildProcesses::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
         let tools = std::sync::Arc::new(crate::tools::ToolRegistry::new());
@@ -374,6 +376,7 @@ mod tests {
             db,
             registry,
             active_sessions,
+            active_child_processes,
             sse_manager,
             specialists,
             tools,
@@ -693,6 +696,8 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let active_child_processes =
+            std::sync::Arc::new(crate::service::ActiveChildProcesses::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
         let tools = std::sync::Arc::new(crate::tools::ToolRegistry::new());
@@ -700,6 +705,7 @@ mod tests {
             db: db.clone(),
             registry,
             active_sessions,
+            active_child_processes,
             sse_manager,
             specialists,
             tools,
@@ -1570,6 +1576,8 @@ mod tests {
         crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
         let registry = std::sync::Arc::new(crate::agent::registry::ProviderRegistry::new());
         let active_sessions = std::sync::Arc::new(crate::service::ActiveSessions::new());
+        let active_child_processes =
+            std::sync::Arc::new(crate::service::ActiveChildProcesses::new());
         let sse_manager = std::sync::Arc::new(crate::sse::SseManager::new());
         let specialists = std::sync::Arc::new(crate::specialist::SpecialistRegistry::new());
         let tools = std::sync::Arc::new(crate::tools::ToolRegistry::new());
@@ -1577,6 +1585,7 @@ mod tests {
             db: db.clone(),
             registry,
             active_sessions,
+            active_child_processes,
             sse_manager,
             specialists,
             tools,
