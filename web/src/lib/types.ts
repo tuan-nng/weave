@@ -11,6 +11,29 @@ export interface Workspace {
 
 export type SessionStatus = "connecting" | "ready" | "completed" | "error" | "cancelled";
 
+/// feat-054: runtime / mode / resume-state enums. The wire forms mirror
+/// the Rust `Serialize` derives 1:1 — `kebab-case` for `RuntimeKind`
+/// (e.g. `"claude-code"`) and `snake_case` for `SessionMode` and
+/// `ResumeState` (e.g. `"replayed"`). Kept as string-literal unions so
+/// a typo at a call site is a compile error and the wire shape is
+/// readable at the use site.
+export type RuntimeKind =
+  | "anthropic-api"
+  | "openai-api"
+  | "openai-compatible"
+  | "claude-code"
+  | "codex"
+  | "opencode";
+
+export type SessionMode = "native" | "wrapped" | "attended";
+
+/// Per-turn resume outcome, broadcast on every `done` /
+/// `message_persisted` SSE event (feat-047). The frontend renders it
+/// as a pill in the session header so the user can see whether the
+/// agent is continuing from a stored CLI session id, replaying from
+/// history, or starting fresh.
+export type ResumeState = "none" | "native" | "replayed";
+
 export interface Session {
   id: string;
   workspace_id: string;
@@ -25,6 +48,18 @@ export interface Session {
   /// create time, overriding any `cwd` arg). When the referenced
   /// codebase is deleted, this becomes `null` (`ON DELETE SET NULL`).
   codebase_id: string | null;
+  /// feat-038+: which Runtime Tool the session is bound to. The page
+  /// uses this (with `mode`) to pick the chat layout — see feat-054.
+  runtime_kind: RuntimeKind;
+  /// feat-038+: the session's interaction model. The page switches
+  /// header / banner variants on this value. `attended` is reserved
+  /// for Phase 11 and not yet accepted at create time.
+  mode: SessionMode;
+  /// feat-047: per-runtime JSON blob persisted on the row
+  /// (e.g. `{cli_resume_id: "..."}` for CLI runtimes). `null` for
+  /// HTTP runtimes and for CLI sessions that have not yet captured a
+  /// stored id.
+  runtime_metadata_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -258,13 +293,15 @@ export interface CreateSessionRequest {
   codebase_id?: string;
   parent_session_id?: string;
   /// One of the values the backend accepts in `RuntimeKind`:
-  /// `"anthropic-api"`, `"claude-code"`, `"codex"`, `"opencode"`.
-  /// The wizard picks this from the chosen provider's `kind`
-  /// (`http` → `"anthropic-api"`, `cli` → `"claude-code"`); the
-  /// type is the union of wire strings for clarity.
-  runtime_kind?: "anthropic-api" | "claude-code" | "codex" | "opencode";
+  /// `"anthropic-api"`, `"openai-api"`, `"openai-compatible"`,
+  /// `"claude-code"`, `"codex"`, `"opencode"`. The wizard picks
+  /// this from the chosen provider's `kind` (`http` →
+  /// `"anthropic-api"`, `cli` → `"claude-code"`); the type is the
+  /// union of wire strings for clarity.
+  runtime_kind?: RuntimeKind;
   /// One of the values the backend accepts in `SessionMode`:
-  /// `"native"` or `"wrapped"`. The wizard pairs this with
+  /// `"native"`, `"wrapped"`. (`"attended"` is reserved for Phase
+  /// 11 and rejected at create time.) The wizard pairs this with
   /// `runtime_kind` per the runtime×mode matrix (see
   /// `web/src/lib/runtime-matrix.ts`).
   mode?: "native" | "wrapped";
@@ -389,6 +426,14 @@ export interface SseThinkingEvent {
 export interface SseDoneEvent {
   type: "done";
   stop_reason: string;
+  /// feat-047 / feat-054: per-turn runtime metadata. The frontend
+  /// stores these on the live buffer (last value wins) so the header
+  /// pill row can render them on the next paint without an extra
+  /// round-trip. `runtime_metadata_json` is `null` for HTTP runtimes
+  /// and for CLI sessions that have not yet captured a stored id.
+  runtime_kind: RuntimeKind;
+  mode: SessionMode;
+  resume_state: ResumeState;
 }
 
 export interface SseErrorEvent {
@@ -409,6 +454,14 @@ export interface SseMessagePersistedEvent {
   stop_reason: string | null;
   content: string;
   created_at: string;
+  /// feat-047 / feat-054: per-turn runtime metadata mirrored on
+  /// `message_persisted` (emitted right before the terminal `done`
+  /// event). The frontend folds these into the live buffer so the
+  /// header pill row is consistent from the moment the persisted
+  /// message appears — see `use-session.ts:handleEvent`.
+  runtime_kind: RuntimeKind;
+  mode: SessionMode;
+  resume_state: ResumeState;
 }
 
 export interface SseConnectedEvent {

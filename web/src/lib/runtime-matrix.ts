@@ -19,14 +19,14 @@
 // `runtime_mode_incompatible`); the matrix is a UX optimization, not
 // the source of truth.
 
-import type { CreateSessionRequest, Provider } from "./types";
+import type { Provider, RuntimeKind, SessionMode } from "./types";
 
-/// The set of `Session.runtime_kind` values the backend currently
-/// accepts. Mirrors `agent::RuntimeKind` in
-/// `crates/weave-server/src/agent/mod.rs`. Kept as a const so the
-/// wizard can do `Set` lookups without re-importing from `types`.
-export type RuntimeKind = NonNullable<CreateSessionRequest["runtime_kind"]>;
-export type SessionMode = NonNullable<CreateSessionRequest["mode"]>;
+/// Re-export so the wizard and the page can keep importing both
+/// enums from this file (the runtime×mode matrix is the natural
+/// home for them). The actual definitions live in `types.ts` — see
+/// feat-054, which moved them there so SSE event types can carry
+/// the same string-literal unions.
+export type { RuntimeKind, SessionMode };
 
 /// Pick a sensible `runtime_kind` + `mode` default for a given
 /// provider kind. The matrix is currently:
@@ -60,6 +60,8 @@ export function defaultRuntimeForProviderKind(kind: Provider["kind"]): {
 /// `"implementation"`, `"review"`, etc. are emergent naming.
 export const SPECIALIST_PROFILE_COMPAT: Record<RuntimeKind, ReadonlySet<string>> = {
   "anthropic-api": new Set<string>(), // empty Set = "all" (current permissive state)
+  "openai-api": new Set<string>(),
+  "openai-compatible": new Set<string>(),
   "claude-code": new Set<string>(),
   codex: new Set<string>(),
   opencode: new Set<string>(),

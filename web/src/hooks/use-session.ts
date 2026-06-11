@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tansta
 import { api } from "../lib/api";
 import { queryKeys } from "../lib/query-keys";
 import type {
+  ResumeState,
   SseDoneEvent,
   SseEvent,
   SseMessagePersistedEvent,
@@ -54,6 +55,12 @@ export interface LiveBuffer {
   thinking: LiveThinkingBlock[];
   isStreaming: boolean;
   stopReason: string | null;
+  /// feat-054: per-turn resume outcome, last-wins. Set on every
+  /// `message_persisted` and `done` SSE event (the server emits the
+  /// same value on both). The session header reads this to render
+  /// the resume-state pill; `null` before the first event of a
+  /// turn (or for HTTP runtimes that never have a resume id).
+  lastResumeState: ResumeState | null;
 }
 
 /**
@@ -68,6 +75,7 @@ export const EMPTY_LIVE_BUFFER: LiveBuffer = {
   thinking: [],
   isStreaming: false,
   stopReason: null,
+  lastResumeState: null,
 };
 
 /// A user prompt that was just sent but is not yet present in the
@@ -91,8 +99,13 @@ export type Action =
   | { type: "TOOL_USE_DELTA"; id: string; delta: string }
   | { type: "TOOL_RESULT"; id: string; result: string }
   | { type: "THINKING"; text: string }
-  | { type: "MESSAGE_PERSISTED"; persistedId: string; stopReason: string | null }
-  | { type: "DONE"; stopReason: string | null }
+  | {
+      type: "MESSAGE_PERSISTED";
+      persistedId: string;
+      stopReason: string | null;
+      resumeState: ResumeState;
+    }
+  | { type: "DONE"; stopReason: string | null; resumeState: ResumeState }
   | { type: "ERROR"; stopReason: string }
   | { type: "CANCEL_OPTIMISTIC" }
   | { type: "SEND_FAILED" };
@@ -200,10 +213,17 @@ export function reducer(state: LiveBuffer, action: Action): LiveBuffer {
       // current streamId. The textChunks and toolCalls stay in state
       // briefly so a re-render that arrives before the history query
       // refetch lands doesn't blank the screen.
+      //
+      // feat-054: also fold the per-turn resume state into the live
+      // buffer so the header pill row can re-render with the new
+      // color the moment the persisted message lands. `lastResumeState`
+      // is last-wins, which matches the reducer's contract for other
+      // per-turn fields (e.g. `stopReason`).
       return {
         ...state,
         persistedTurnId: action.persistedId,
         stopReason: action.stopReason,
+        lastResumeState: action.resumeState,
         // The stream is no longer actively delivering events; the
         // terminal Done event will arrive next and finalize isStreaming.
         isStreaming: state.isStreaming,
@@ -212,10 +232,14 @@ export function reducer(state: LiveBuffer, action: Action): LiveBuffer {
     case "DONE":
       // Terminal event. Stop streaming, capture the server's stop_reason
       // for the history refetch to display on the persisted message.
+      // feat-054: also capture the resume state (the server emits the
+      // same value on `message_persisted` and `done` — last-wins is
+      // idempotent, so this is a no-op when both events arrived).
       return {
         ...state,
         isStreaming: false,
         stopReason: action.stopReason,
+        lastResumeState: action.resumeState,
       };
 
     case "ERROR":
@@ -410,6 +434,7 @@ export function useSession(sessionId: string): UseSessionResult {
             type: "MESSAGE_PERSISTED",
             persistedId: mp.id,
             stopReason: mp.stop_reason,
+            resumeState: mp.resume_state,
           });
           // The journey sidebar depends on the trace events that the
           // server has just emitted. Invalidate here — at the exact
@@ -440,8 +465,12 @@ export function useSession(sessionId: string): UseSessionResult {
           qcRef.current.invalidateQueries({
             queryKey: queryKeys.traces.list(sessionId),
           });
-          const dr = (event as SseDoneEvent).stop_reason ?? null;
-          dispatch({ type: "DONE", stopReason: dr });
+          const done = event as SseDoneEvent;
+          dispatch({
+            type: "DONE",
+            stopReason: done.stop_reason ?? null,
+            resumeState: done.resume_state,
+          });
           break;
         }
 

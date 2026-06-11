@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
+import { useNavigate, useParams } from "react-router";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useSession } from "../../hooks/use-session";
+import { useProviders } from "../../hooks/use-providers";
 import { ROUTES } from "../../lib/routes";
-import { StatusBadge } from "../../components/status-badge";
+import { SessionHeader } from "../../components/session-header";
+import { WrappedSessionBanner } from "../../components/wrapped-session-banner";
 import { JourneySidebar } from "./session/journey-sidebar";
 import type { LiveBuffer, LiveThinkingBlock } from "../../hooks/use-session";
-import type { Message, MessageMetadata, TraceRow } from "../../lib/types";
+import type { Message, MessageMetadata, Provider, TraceRow } from "../../lib/types";
 
 // ---------------------------------------------------------------------------
 // Trace-to-message correlation
@@ -672,6 +674,17 @@ export default function SessionPage() {
     isCancelling,
   } = useSession(sessionId);
 
+  // feat-054: resolve the session's provider so the wrapped-mode pill
+  // row can render the runtime display name and permission mode. The
+  // lookup is by id; the result is `null` while the providers query
+  // is loading (the page header degrades gracefully — the runtime
+  // pill falls back to the `runtime_kind` enum name).
+  const providersQuery = useProviders();
+  const provider: Provider | null = useMemo(() => {
+    if (!session || !providersQuery.data) return null;
+    return providersQuery.data.find((p) => p.id === session.provider_id) ?? null;
+  }, [session, providersQuery.data]);
+
   // Auto-scroll
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollTargetRef = useRef<HTMLDivElement>(null);
@@ -852,54 +865,38 @@ export default function SessionPage() {
           the journey sidebar without overflowing the flex parent.
           `flex flex-col` preserves the previous vertical stack. */}
       <div className="flex-1 min-w-0 flex flex-col">
-        {/* Chat Header */}
-        <header className="flex-shrink-0 h-14 flex items-center justify-between px-5 bg-white/80 backdrop-blur-sm border-b border-slate-200/80">
-          <div className="flex items-center gap-3">
-            <Link
-              to={session ? ROUTES.workspace(session.workspace_id) : ROUTES.home}
-              className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-all duration-150 group"
-            >
-              <svg
-                className="w-[18px] h-[18px] group-hover:-translate-x-0.5 transition-transform"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-            </Link>
-            <h1 className="text-sm font-semibold text-slate-900">Session</h1>
-            {session && <StatusBadge status={session.status} />}
-            {session?.model && (
-              <span className="text-xs font-mono text-slate-400 ml-1">{session.model}</span>
-            )}
-            {session?.cwd && (
-              <span
-                title={session.cwd}
-                className="text-[11px] font-mono text-slate-500 bg-slate-50 border border-slate-200/60 rounded-md px-1.5 py-0.5 max-w-[18rem] truncate"
-              >
-                {session.cwd.split("/").filter(Boolean).pop() || session.cwd}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {(session?.status === "connecting" || session?.status === "ready") && (
-              <button
-                type="button"
-                onClick={() => cancelSession()}
-                disabled={isCancelling}
-                className="h-8 px-3.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-all duration-150 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-            )}
-          </div>
-        </header>
+        {/* Chat Header — feat-054: extracted to `components/session-header.tsx`.
+            The component renders the same chrome in `native` mode; in
+            `wrapped` mode it appends a pill row (runtime name, permission
+            mode, resume state). Attended mode is reserved for Phase 11
+            and is treated as native defensively. */}
+        {session && (
+          <SessionHeader
+            session={session}
+            provider={provider}
+            resumeState={liveBuffer.lastResumeState}
+            isCancelling={isCancelling}
+            onCancel={() => cancelSession()}
+          />
+        )}
 
         {/* Messages Area */}
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-5 py-6 space-y-6">
+            {/* feat-054: first-turn callout for `wrapped` sessions. The
+                banner hides itself after the first assistant message
+                is persisted (its `firstTurn` prop flips to `false`)
+                and remembers the dismissal per session in
+                localStorage. */}
+            {session?.mode === "wrapped" && (
+              <WrappedSessionBanner
+                sessionId={sessionId}
+                firstTurn={
+                  messages.filter((m) => m.role === "assistant").length === 0 &&
+                  liveBuffer.persistedTurnId === null
+                }
+              />
+            )}
             {messages.length === 0 && !liveBuffer.isStreaming && (
               <div className="flex items-center justify-center py-20">
                 <p className="text-sm text-slate-400">Send a message to start the session</p>

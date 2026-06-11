@@ -791,13 +791,13 @@
       "phase": "phase-9",
       "behavior": "The session page renders one of three layouts from the same `/session/:id` URL, chosen by the session's `mode`. `native` layout: existing chat view (unchanged for HTTP-backed sessions; used for Anthropic API and OpenAI API). `wrapped` layout: same chat view body, but `SessionHeader` gains a pill row showing the Runtime Tool display name, the active permission mode (from the most recent `PermissionSnapshot`), and the resume state (none / native / replayed). A small `WrappedSessionBanner` is shown above the message list on the first turn to surface the new interaction model in plain language. `attended` layout: not yet implemented (rejected at session creation until Phase 11); the layout slot is reserved. The wrapped and native layouts share 95% of components; the differences are isolated to `SessionHeader` and `WrappedSessionBanner`. The 'jump to latest' pill and SSE streaming behavior from feat-036 are unchanged.",
       "verification": "cd web && bun run test -- --run session-layouts && cd web && bun run test && cd web && bun run lint",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-021",
         "feat-040",
         "feat-051"
       ],
-      "evidence": ""
+      "evidence": "Implemented in commit feat-054 (2026-06-11). Frontend type widening: `Session` gains `runtime_kind` / `mode` / `runtime_metadata_json`; `SseDoneEvent` and `SseMessagePersistedEvent` carry the per-turn `runtime_kind` / `mode` / `resume_state` (feat-047/054); `RuntimeKind` / `SessionMode` / `ResumeState` string-literal unions live in `lib/types.ts` and are re-exported from `lib/runtime-matrix.ts` (the wizard's compat policy). Live buffer: `lastResumeState: ResumeState | null` is folded into the reducer on every `MESSAGE_PERSISTED` and `DONE` action (last-wins; `SEND_STARTED` resets to `null`). New components: `components/session-header.tsx` (extracted header + wrapped-mode pill row) and `components/wrapped-session-banner.tsx` (first-turn callout, dismissable, localStorage-persisted per session under `weave.dismissed.wrappedSessionBanner.{sessionId}`). Page wiring: `pages/session.tsx` calls `useProviders()`, resolves the provider by id via `useMemo`, and gates the banner on `session.mode === \"wrapped\"` and `firstTurn` (no assistant message persisted yet). Spec verification: `cd web && bun run test -- --run session-layouts` passes (17/17: native mode has no pill row, wrapped mode renders runtime/permission/resume pills, provider-null fallback to `RUNTIME_KIND_LABEL`, attended defensive fallback to native, banner dismissal + localStorage scope + `firstTurn` prop, reducer MESSAGE_PERSISTED + DONE + SEND_STARTED + CANCEL_OPTIMISTIC transitions). `cd web && bun run test` passes (141/141, was 124 before feat-054). `cd web && bun run lint` clean. Full 3-layer `init.sh` gate green (clippy + fmt + prettier + ESLint + 791 Rust tests + 141 frontend tests + cargo build + smoke test)."
     },
     {
       "id": "feat-055",
