@@ -58,6 +58,12 @@ libc = "0.2"
 glob = "0.3"
 regex = "1"
 
+# Cross-platform path normalization (handles Windows UNC paths and
+# macOS /tmp -> /private/tmp symlinks even though Weave is Linux-first).
+# Used by `agent::validate_wrapped_session_cwd` (feat-050) to compare a
+# session's cwd against registered codebase paths.
+dunce = "1"
+
 # JSON Schema validation (for tool input sanity checks, feat-037)
 jsonschema = { version = "0.18", default-features = false }
 

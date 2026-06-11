@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::db::Db;
 use crate::error::{AppError, ProviderError};
 
 pub mod anthropic;
@@ -410,6 +411,154 @@ pub fn validate_runtime_mode_compat(
                 runtime.as_str(),
                 mode.as_str(),
                 listed,
+            ),
+        ))
+    }
+}
+
+/// Enforce the workspace-scoped cwd check for wrapped sessions
+/// (feat-050). A wrapped session (any `mode=wrapped` + any CLI
+/// `runtime_kind`) MUST have its `cwd` inside a registered `Codebase`
+/// row for the workspace. Native (HTTP) sessions are unaffected.
+///
+/// Canonicalization is required: a `cwd` of `/tmp/foo` and a
+/// registered codebase at `/private/tmp/foo` (macOS symlink) or
+/// `/tmp/foo/` (trailing slash) must be treated as equivalent.
+/// `dunce::canonicalize` resolves symlinks and normalizes path
+/// separators consistently across platforms (handles Windows UNC
+/// paths even though Weave is Linux-first, per spec).
+///
+/// The error envelope is `AppError::Validation { code: "cwd_outside_codebase", .. }`
+/// with a `message` that includes the supplied cwd, the workspace id,
+/// and the list of registered codebases (or a description of why the
+/// check couldn't run, e.g. cwd is None or the workspace has no
+/// registered codebases).
+///
+/// Returns `Ok(())` when the cwd canonicalizes to a path that is
+/// either equal to or a subpath of a registered codebase's
+/// canonicalized path. A registered codebase whose path cannot be
+/// canonicalized (e.g. the repo was moved or deleted) is skipped
+/// silently — the user's real failure mode is the original
+/// "cwd is outside every codebase" error.
+///
+/// Mirrors `validate_runtime_mode_compat`'s shape: a free function in
+/// `agent::mod` with a single chokepoint caller in
+/// `SessionService::create_session`. The store is for persistence;
+/// this module is for runtime cross-cutting validation.
+pub fn validate_wrapped_session_cwd(
+    db: &Db,
+    workspace_id: &str,
+    cwd: Option<&str>,
+) -> Result<(), AppError> {
+    // Step 1: cwd must be supplied. The spec's "provider's default
+    // working directory" fallback is deferred — the `Provider` struct
+    // has no such field, and the only opaque column is `config_json`.
+    // See feat-050 review note in PROGRESS.md: the fallback is
+    // forward-looking (a future column-binding feature like feat-055
+    // may introduce it). For now, wrapped sessions without a cwd are
+    // rejected.
+    let cwd = cwd.ok_or_else(|| {
+        AppError::validation_with_code(
+            "cwd_outside_codebase",
+            format!(
+                "wrapped sessions require a cwd inside a registered codebase; \
+                 workspace '{workspace_id}' has no cwd supplied",
+                workspace_id = workspace_id,
+            ),
+        )
+    })?;
+
+    // Step 2: canonicalize the supplied cwd. Failure here typically
+    // means the path doesn't exist on disk (which is itself a
+    // "not inside any codebase" condition from the user's
+    // perspective).
+    let cwd_canon = dunce::canonicalize(cwd).map_err(|e| {
+        AppError::validation_with_code(
+            "cwd_outside_codebase",
+            format!(
+                "cwd '{cwd}' is outside any registered codebase in workspace \
+                 '{workspace_id}' (canonicalize failed: {e}); \
+                 registered codebases: []",
+                cwd = cwd,
+                workspace_id = workspace_id,
+                e = e,
+            ),
+        )
+    })?;
+
+    // Step 3: enumerate the workspace's codebases. An empty list
+    // means no wrapped session can succeed — short-circuit with a
+    // clear error.
+    let codebases = crate::store::codebases::CodebaseStore::list_by_workspace(db, workspace_id)?;
+    if codebases.is_empty() {
+        return Err(AppError::validation_with_code(
+            "cwd_outside_codebase",
+            format!(
+                "wrapped sessions require a cwd inside a registered codebase; \
+                 workspace '{workspace_id}' has no registered codebases",
+                workspace_id = workspace_id,
+            ),
+        ));
+    }
+
+    // Step 4: find the longest-prefix match. Canonicalize each
+    // codebase's path; skip ones that don't resolve (stale rows
+    // from a moved/deleted repo). A codebase matches if the cwd is
+    // equal to or a descendant of the codebase's canonical path
+    // (the trailing-separator rule: `/repo` matches `/repo/sub` but
+    // not `/repo-other`).
+    let mut best_match: Option<&crate::store::codebases::Codebase> = None;
+    let mut best_len: usize = 0;
+    for cb in &codebases {
+        let cb_canon = match dunce::canonicalize(&cb.path) {
+            Ok(p) => p,
+            Err(_) => continue, // skip stale codebases silently
+        };
+        // Equivalence or strict descendant. We use a trailing-separator
+        // check: cwd must start with `cb_canon` and either equal it or
+        // have a path separator at the next byte. This mirrors the
+        // SQL fragment in `CodebaseStore::find_by_cwd_prefix` and
+        // prevents `/repo` from matching `/repo-other`.
+        let cb_str = cb_canon.as_os_str();
+        let cb_len = cb_str.len();
+        if cwd_canon.as_os_str().len() < cb_len {
+            continue;
+        }
+        let cwd_bytes = cwd_canon.as_os_str().as_encoded_bytes();
+        let cb_bytes = cb_str.as_encoded_bytes();
+        if &cwd_bytes[..cb_len] != cb_bytes {
+            continue;
+        }
+        if cwd_bytes.len() > cb_len {
+            // Must be followed by a path separator. On Unix this is
+            // always `/`; on Windows `dunce` has already normalized
+            // to forward slashes.
+            if cwd_bytes[cb_len] != b'/' {
+                continue;
+            }
+        }
+        if best_match.is_none() || cb_len > best_len {
+            best_match = Some(cb);
+            best_len = cb_len;
+        }
+    }
+
+    if best_match.is_some() {
+        Ok(())
+    } else {
+        let list = codebases
+            .iter()
+            .map(|c| c.path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(AppError::validation_with_code(
+            "cwd_outside_codebase",
+            format!(
+                "cwd '{cwd}' is outside any registered codebase in workspace \
+                 '{workspace_id}'; registered codebases: [{list}]",
+                cwd = cwd,
+                workspace_id = workspace_id,
+                list = list,
             ),
         ))
     }

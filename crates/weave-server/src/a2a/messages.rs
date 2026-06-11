@@ -134,7 +134,9 @@ fn first_provider_id(db: &crate::db::Db) -> Result<String, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{validate_runtime_mode_compat, RuntimeKind, SessionMode};
+    use crate::agent::{
+        validate_runtime_mode_compat, validate_wrapped_session_cwd, RuntimeKind, SessionMode,
+    };
     use serde_json::json;
 
     /// The A2A `SendMessageRequest` deserializes `runtimeKind` and `mode`
@@ -173,6 +175,62 @@ mod tests {
                 assert!(message.contains("wrapped"), "msg: {message}");
             }
             other => panic!("expected Validation error, got: {other:?}"),
+        }
+    }
+
+    /// feat-050: a `SendMessageRequest` with `mode: "wrapped"` reaches
+    /// the workspace-scoped cwd validator. The A2A handler hard-codes
+    /// `cwd: None` at `send_message:84`, so the validator sees a
+    /// missing cwd and rejects with `cwd_outside_codebase`.
+    ///
+    /// The full chokepoint (A2A handler → `create_session` → validator)
+    /// is covered by `test_kanban_wrapped_autospawn_validates_cwd`
+    /// in `service/sessions.rs`; this test confirms the A2A-specific
+    /// surface (deserialization + the new `wrapped` mode round-trips
+    /// to the validator) without constructing a full `AppState`.
+    #[test]
+    fn test_a2a_wrapped_session_validates_cwd() {
+        // Deserialize a `SendMessageRequest` with `mode: "wrapped"`.
+        // The handler maps the typed `mode` back to the wire form and
+        // passes `cwd: None` to `create_session`, which the new
+        // validator catches.
+        let body: SendMessageRequest = serde_json::from_value(json!({
+            "message": { "role": "user", "parts": [{ "type": "text", "text": "hello" }] },
+            "runtimeKind": "claude-code",
+            "mode": "wrapped",
+        }))
+        .expect("SendMessageRequest should deserialize with mode=wrapped");
+
+        let runtime = body.runtime_kind.expect("runtime_kind populated");
+        let mode = body.mode.expect("mode populated");
+        assert_eq!(runtime, RuntimeKind::ClaudeCode);
+        assert_eq!(mode, SessionMode::Wrapped);
+
+        // The A2A handler does NOT pass a cwd (it hard-codes `None` at
+        // `send_message:84` — cwd is a server-side / kanban concern,
+        // not an A2A surface). The validator must reject.
+        //
+        // We exercise the validator directly with a fresh in-memory
+        // DB + a registered codebase; the cwd=None path is the
+        // canonical "no cwd supplied" rejection regardless of how
+        // many codebases the workspace has.
+        let db = crate::db::Db::open(std::path::Path::new(":memory:")).unwrap();
+        crate::store::workspaces::WorkspaceStore::ensure_default(&db).unwrap();
+        let ws_id: String = db
+            .conn()
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = 'default'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        match validate_wrapped_session_cwd(&db, &ws_id, None) {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "cwd_outside_codebase");
+                assert!(message.contains("no cwd supplied"), "msg: {message}");
+            }
+            other => panic!("expected Validation cwd_outside_codebase, got: {other:?}"),
         }
     }
 

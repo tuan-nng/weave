@@ -103,6 +103,32 @@ impl SessionService {
         // Validate workspace exists
         crate::store::workspaces::WorkspaceStore::get_by_id(db, workspace_id)?;
 
+        // Validate parent chain and load direct parent's messages +
+        // runtime. Loaded BEFORE the codebase/cwd resolution so a
+        // resume can inherit the parent's cwd (feat-050 — the CLI
+        // resume id is only meaningful when the resumed session runs
+        // in the same working directory the parent used). The parent
+        // is also used by `resume_inherit` below for runtime/mode/
+        // metadata inheritance, so loading it once and threading it
+        // through both phases is the natural shape.
+        let (parent_messages, parent) = if let Some(pid) = parent_session_id {
+            // Ensure parent has finished — resuming an active session would
+            // copy an incomplete message history.
+            let parent = SessionStore::get_by_id(db, pid)?;
+            if !TERMINAL.contains(&parent.status.as_str()) {
+                return Err(AppError::validation(format!(
+                    "cannot resume from session in '{}' status — parent must be completed, \
+                     cancelled, or error",
+                    parent.status
+                )));
+            }
+            validate_parent_chain(db, pid, workspace_id)?;
+            let messages = MessageStore::load_all(db, pid, MAX_HISTORY_MESSAGES)?;
+            (messages, Some(parent))
+        } else {
+            (Vec::new(), None)
+        };
+
         // Resolve codebase_id → path. The FK has ON DELETE SET NULL but we
         // also want to reject cross-workspace references up front (the FK
         // would technically permit a different workspace's codebase, but the
@@ -115,7 +141,15 @@ impl SessionService {
             // registered repo root, regardless of any supplied `cwd`.
             Some(codebase.path.clone())
         } else {
-            cwd.map(|s| s.to_string())
+            // Resume inherits cwd from the parent when the caller
+            // doesn't supply one. The CLI resume id (feat-047) is
+            // only meaningful when the resumed session runs in the
+            // same working directory the parent used; without this
+            // fallback, every same-runtime resume would need an
+            // explicit cwd that duplicates the parent's. The
+            // caller's explicit `cwd` always wins.
+            cwd.map(String::from)
+                .or_else(|| parent.as_ref().and_then(|p| p.cwd.clone()))
         };
 
         // Validate the three runtime fields up front so a bad value is
@@ -134,24 +168,16 @@ impl SessionService {
         // validate here is the same one that gets persisted.
         crate::agent::validate_runtime_mode_compat(runtime_kind, mode)?;
 
-        // Validate parent chain and load direct parent's messages + runtime
-        let (parent_messages, parent) = if let Some(pid) = parent_session_id {
-            // Ensure parent has finished — resuming an active session would
-            // copy an incomplete message history.
-            let parent = SessionStore::get_by_id(db, pid)?;
-            if !TERMINAL.contains(&parent.status.as_str()) {
-                return Err(AppError::validation(format!(
-                    "cannot resume from session in '{}' status — parent must be completed, \
-                     cancelled, or error",
-                    parent.status
-                )));
-            }
-            validate_parent_chain(db, pid, workspace_id)?;
-            let messages = MessageStore::load_all(db, pid, MAX_HISTORY_MESSAGES)?;
-            (messages, Some(parent))
-        } else {
-            (Vec::new(), None)
-        };
+        // feat-050: wrapped sessions must have cwd inside a registered
+        // codebase in the workspace. Runs after the runtime × mode
+        // check so an HTTP runtime never hits this even when the caller
+        // asks for `wrapped`. Native (HTTP) sessions short-circuit
+        // inside the validator. A2A `POST /api/a2a/messages` and kanban
+        // `try_automate_lane` both route through this chokepoint, so
+        // both gain the workspace-scoped cwd check for free.
+        if mode == SessionMode::Wrapped {
+            crate::agent::validate_wrapped_session_cwd(db, workspace_id, resolved_cwd.as_deref())?;
+        }
 
         // Resume inheritance. The original `runtime_kind` / `mode` from
         // the caller are still in scope; we only fall back to the parent
@@ -5018,6 +5044,20 @@ You are broken."#,
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
 
+        // feat-050: wrapped sessions must have cwd inside a registered
+        // codebase. Register a real tempdir-backed codebase so the
+        // resume path (which routes through the new validator) accepts
+        // the parent's cwd.
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+
         // Parent: a finished claude-code session with metadata.
         let parent = SessionStore::create(
             &db,
@@ -5025,7 +5065,7 @@ You are broken."#,
             &provider_id,
             None,
             None,
-            None,
+            Some(tmp.path().to_str().unwrap()), // cwd — inside the codebase
             None,
             None,
             None, // codebase_id
@@ -5120,13 +5160,27 @@ You are broken."#,
         let db = test_db();
         let (ws_id, provider_id) = seed_deps(&db);
 
+        // feat-050: see the comment in
+        // `test_session_resume_inherits_metadata_same_runtime` — a
+        // wrapped session requires cwd inside a registered codebase,
+        // so the parent fixture has a real tempdir-backed cwd.
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+
         let parent = SessionStore::create(
             &db,
             &ws_id,
             &provider_id,
             None,
             None,
-            None,
+            Some(tmp.path().to_str().unwrap()),
             None,
             None,
             None,
@@ -5235,6 +5289,208 @@ You are broken."#,
                 assert!(message.contains("wrapped"), "msg: {message}");
             }
             other => panic!("expected Validation error, got: {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // feat-050: Workspace-scoped CLI session validation
+    // -----------------------------------------------------------------------
+
+    /// Wrapped sessions MUST have a cwd supplied. The spec's
+    /// "provider's default working directory" fallback is deferred —
+    /// the `Provider` struct has no such field, and the only opaque
+    /// column is `config_json`. A wrapped session without an explicit
+    /// cwd is rejected with `cwd_outside_codebase`, even when the
+    /// workspace has registered codebases.
+    #[test]
+    fn test_wrapped_session_requires_codebase() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Register a real codebase so the only failure mode is "no
+        // cwd" (not "workspace has no codebases").
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,                // specialist_id
+            None,                // model
+            None,                // cwd — wrapped requires this
+            None,                // parent_session_id
+            None,                // context_id
+            None,                // codebase_id
+            Some("claude-code"), // runtime_kind — CLI
+            Some("wrapped"),     // mode — CLI-required
+            None,                // runtime_metadata_json
+        );
+
+        match result {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "cwd_outside_codebase");
+                assert!(
+                    message.contains("no cwd supplied"),
+                    "message should explain the missing cwd: {message}"
+                );
+            }
+            other => panic!("expected Validation cwd_outside_codebase, got: {:?}", other),
+        }
+    }
+
+    /// A wrapped session whose cwd canonicalizes to a path OUTSIDE
+    /// every registered codebase is rejected. The error message lists
+    /// the registered codebases so the user knows what to point cwd at.
+    ///
+    /// The cwd is a real on-disk path so `dunce::canonicalize` succeeds;
+    /// the rejection is "outside", not "cannot be canonicalized".
+    #[test]
+    fn test_wrapped_session_cwd_outside_codebase_rejected() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Register a codebase at a real tempdir.
+        let cb_tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            cb_tmp.path().to_str().unwrap(),
+            None,
+            Some("the-codebase"),
+        )
+        .unwrap();
+
+        // cwd is a sibling tempdir — exists, but not inside the codebase.
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let outside_path = outside_tmp.path().to_str().unwrap().to_string();
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            Some(&outside_path),
+            None,
+            None,
+            None,
+            Some("claude-code"),
+            Some("wrapped"),
+            None,
+        );
+
+        match result {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "cwd_outside_codebase");
+                assert!(
+                    message.contains(&outside_path),
+                    "message should echo the offending cwd: {message}"
+                );
+                assert!(
+                    message.contains("registered codebases:"),
+                    "message should list registered codebases: {message}"
+                );
+            }
+            other => panic!("expected Validation cwd_outside_codebase, got: {:?}", other),
+        }
+    }
+
+    /// Native (HTTP) sessions skip the workspace-scoped cwd check.
+    /// A native session with no codebases and an arbitrary cwd (or no
+    /// cwd) succeeds — exactly the pre-feat-050 behavior.
+    #[test]
+    fn test_native_session_no_codebase_requirement() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // No codebases registered in the workspace. With the new
+        // validator, this would be a hard fail for a wrapped session
+        // — but for native, the validator is skipped entirely.
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None, // cwd
+            None,
+            None,
+            None,
+            None, // runtime_kind — default (AnthropicApi, native)
+            None, // mode — default (native)
+            None,
+        );
+
+        assert!(
+            result.is_ok(),
+            "native session should succeed with no codebases: {:?}",
+            result
+        );
+    }
+
+    /// Kanban `try_automate_lane` will eventually wire (claude-code,
+    /// wrapped) via the column-binding feature in feat-055. Today it
+    /// passes `None`/`None` and the defaults resolve to
+    /// (AnthropicApi, native), which the new validator skips. This
+    /// chokepoint-level test confirms the validator fires correctly
+    /// when a kanban caller (or, today, a future-featured caller)
+    /// resolves to (claude-code, wrapped): the cwd check runs and
+    /// rejects with `cwd_outside_codebase`.
+    ///
+    /// The chokepoint-test comment block above
+    /// (`test_kanban_autospawn_rejects_incompatible_pair`, lines
+    /// 5197-5209) explains the pattern: the kanban layer doesn't have
+    /// a way to pass `mode=wrapped` yet, so the rejection path is
+    /// exercised at the service layer.
+    #[test]
+    fn test_kanban_wrapped_autospawn_validates_cwd() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // Register a real codebase so the failure mode is specifically
+        // the missing-cwd check (not the empty-codebase check).
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::store::codebases::CodebaseStore::create(
+            &db,
+            &ws_id,
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let result = SessionService::create_session(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,                // specialist_id
+            None,                // model
+            None,                // cwd — wrapped requires this
+            None,                // parent_session_id
+            None,                // context_id
+            None,                // codebase_id
+            Some("claude-code"), // runtime_kind — CLI
+            Some("wrapped"),     // mode — CLI-required
+            None,                // runtime_metadata_json
+        );
+
+        match result {
+            Err(AppError::Validation { code, message }) => {
+                assert_eq!(code, "cwd_outside_codebase");
+                // The message is the same shape as the basic
+                // wrapped-requires-codebase test — the kanban framing
+                // is in the test name + the comment above.
+                assert!(message.contains("no cwd supplied"), "msg: {message}");
+            }
+            other => panic!("expected Validation cwd_outside_codebase, got: {:?}", other),
         }
     }
 

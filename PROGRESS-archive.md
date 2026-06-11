@@ -15,6 +15,60 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-050 — Workspace-scoped CLI session validation (phase-8)
+
+Phase 8 deliverable. Wrapped-mode sessions (any `mode=wrapped` + any CLI runtime_kind) MUST have `cwd` inside a registered `Codebase` row for the workspace. New `pub fn validate_wrapped_session_cwd(db, workspace_id, cwd) -> Result<(), AppError>` in `crates/weave-server/src/agent/mod.rs` — same free-function shape as feat-040's `validate_runtime_mode_compat`. Wired into `SessionService::create_session` at the same chokepoint, gated on `mode == SessionMode::Wrapped`. A2A `POST /api/a2a/messages` and kanban `try_automate_lane` both route through the same chokepoint — no A2A-side or kanban-side change required for the validator to fire on every inbound path. Native (HTTP) sessions skip the check entirely. The `dunce` crate was added as a new dep for cross-platform path canonicalization (handles macOS `/tmp` → `/private/tmp` and Windows UNC paths). Error code: `cwd_outside_codebase` with three message shapes (no cwd, canonicalize failed, no registered codebases) and the registered-codebase list when available. The `CodebaseStore::find_by_cwd_prefix` helper stays `#[allow(dead_code)]` (the validator does its canonicalization at the service layer, not in the store).
+
+**Architecture decisions (user picked all 3 recommended options)**
+
+Three clarifying questions were presented to the user before implementation. All three were answered with the recommended option:
+- **Provider-default-cwd fallback** — deferred. The spec mentions a provider-level default cwd fallback, but the `Provider` struct has no such field (only `config_json`, which is opaque). The validator simply rejects wrapped sessions with `cwd: None` and documents the deferral in its doc comment. A future field (a `default_cwd TEXT` column or the column-binding from feat-055) will introduce the fallback.
+- **Path canonicalize** — added `dunce = "1"` as a new dep. Spec-literal; the existing codebase uses `std::fs::canonicalize` (`tools/fs/mod.rs:90,138,169,179`) but the spec calls for `dunce` for cross-platform safety.
+- **Validator home** — free function in `agent::mod.rs` (next to `validate_runtime_mode_compat`), uses `list_by_workspace` + canonicalize in service layer. Mirrors the feat-040 pattern exactly.
+
+**Files touched (actual)**
+
+- **MODIFIED** `crates/weave-server/Cargo.toml` — added `dunce = "1"` dependency.
+- **MODIFIED** `crates/weave-server/src/agent/mod.rs` — added `use crate::db::Db;` import; new `validate_wrapped_session_cwd` function (~110 LOC + ~50 LOC doc comment + 2 inline match arms) immediately after `validate_runtime_mode_compat` (line 416).
+- **MODIFIED** `crates/weave-server/src/service/sessions.rs` — restructured `create_session` block order: parent-loading block moved from after the runtime/mode validation (line 138-154) to right after the workspace validation (line 104), so `resolved_cwd` can fall back to `parent.cwd` when the caller passes `None`. Added the `if mode == SessionMode::Wrapped { validate_wrapped_session_cwd(...) }` chokepoint call immediately after `validate_runtime_mode_compat`.
+- **NEW** 4 chokepoint-level tests in `service::sessions::tests::feat-050` section: `test_wrapped_session_requires_codebase`, `test_wrapped_session_cwd_outside_codebase_rejected`, `test_native_session_no_codebase_requirement`, `test_kanban_wrapped_autospawn_validates_cwd`.
+- **NEW** 1 A2A test in `a2a/messages::tests`: `test_a2a_wrapped_session_validates_cwd` — same chokepoint pattern as the existing `test_a2a_rejects_incompatible_pair`.
+- **MODIFIED** 2 existing tests: `test_session_resume_inherits_metadata_same_runtime`, `test_session_resume_explicit_metadata_wins` — updated to register a tempdir-backed codebase so the parent's cwd is real and the new validator accepts the resume. The pre-feat-050 fixture (parent created via `SessionStore::create` with `cwd: None`) created a parent in a state that's invalid under the new rules.
+- **MODIFIED** `feature_list.json` — feat-050 state `not_started` → `passing` with evidence.
+- **MODIFIED** `PROGRESS.md` — Current State (latest commit → feat-050, +5 tests), Next Steps (next feature → feat-051), 2 new out-of-scope items (`Provider-default-cwd fallback is deferred`, `Resume inherits cwd from parent`).
+- **MODIFIED** `DECISIONS.md` — new top entry for feat-050 (validator home, dunce choice, provider-cwd deferral, resume-inheritance refactor).
+
+**Verification gate (all 5 spec tests + 3-layer init.sh)**
+
+```
+cargo test -p weave-server wrapped_session  → 3 passed (test_wrapped_session_requires_codebase, test_wrapped_session_cwd_outside_codebase_rejected, test_kanban_wrapped_autospawn_validates_cwd)
+cargo test -p weave-server test_native_session_no_codebase_requirement  → 1 passed
+cargo test -p weave-server test_a2a_wrapped_session_validates_cwd  → 1 passed
+cargo test -p weave-server test_session_resume  → 11 passed (9 existing + 2 updated)
+./init.sh  # 3-layer gate
+→ 765 Rust tests + 113 frontend tests pass (was 760 + 113 before feat-050)
+→ clippy + cargo fmt + prettier + ESLint clean
+→ server starts; /api/health and / respond
+```
+
+**Side-effect: `SessionService::create_session` block-order change**
+
+The parent-loading block moved up. Two new validation paths that the move enables:
+- **Resume inherits cwd from parent** (production improvement): a wrapped-mode resume that doesn't supply an explicit cwd now inherits the parent's cwd. The CLI resume id (captured in feat-047) is only meaningful when the resumed session runs in the same working directory the parent used; without this, every same-runtime resume would need an explicit cwd that duplicates the parent's. The caller's explicit `cwd` always wins. Native-mode resume is unaffected (the validator is gated on `Wrapped`).
+- **No behavior change for native sessions**: the validator short-circuits on `mode == Wrapped`, so a native (HTTP) resume sees the same `None` cwd it always did. The block-order change is invisible to the native path.
+
+**Out-of-scope items noticed (logged, not fixed)**
+
+- **Provider-default-cwd fallback** (in `PROGRESS.md`): the spec mentions it, but the `Provider` struct has no such field. Deferred to a future feature. The validator's doc comment notes the deferral; a future migration can add `default_cwd TEXT` to providers or the column binding in feat-055 can introduce it.
+- **`find_by_cwd_prefix` stays `#[allow(dead_code)]`**: the validator uses `list_by_workspace` + canonicalize at the service layer. The helper is left for a future caller that wants a string-level (no-filesystem) lookup. Drop the attribute when the first consumer lands.
+- **`CodebaseStore::list_by_workspace` ORDER BY `path ASC, id ASC`** (store contract, unchanged): the validator iterates linearly and picks the longest match; the store order doesn't matter for correctness, only for the deterministic selection of the "first matching codebase" in the error message list (if two codebases share a path, `id ASC` is the tiebreaker).
+- **The A2A handler's hard-coded `cwd: None`** (`a2a/messages.rs:84`): the A2A path can never pass a cwd, so a wrapped-mode A2A request will always be rejected. The 5th verification test (`test_a2a_wrapped_session_validates_cwd`) documents this. If a future A2A surface needs wrapped sessions, add a `cwd` field to `SendMessageRequest` and pass it through. Not needed for feat-050 — A2A is native (HTTP) today.
+- **Kanban autospawn's hard-coded `cwd: None`** (`service/kanban.rs:135`): same as A2A — the validator won't fire on the current autospawn path. The 4th verification test (`test_kanban_wrapped_autospawn_validates_cwd`) exercises the chokepoint with `(claude-code, wrapped, cwd: None)` directly, which is what kanban will produce when feat-055's column binding lands. The test pins the contract for the future caller.
+
+**Next steps for the next session (post-feat-050)**
+
+feat-051 (wire `ClaudeCodeCodingAgent` end-to-end — first CLI Runtime Tool using `CliRunner`, parser, `PermissionMapper`, journey translator, resume metadata persistence, and child-process reaping) is the natural successor — depends on all of feat-037/feat-038/feat-039/feat-040/feat-041/feat-042/feat-043/feat-044/feat-045/feat-046/feat-047/feat-048/feat-049/feat-050, all `passing`. The conformance suite (feat-057) is the natural forcing function for the parser/translator dedup that the simplify pass noted in feat-045's "Map_stop_reason and deferred-emission-state-machine dedup" out-of-scope item.
+
 ### feat-048 — `JourneyTranslator` — map parsed CLI streams into Weave traces (committed `0fad5ed2...` 2026-06-11)
 
 Phase 8 deliverable. Translates parsed `StreamEvent`s from `ClaudeCodeStreamParser` into Weave `TraceEvent`s with the CLI as the source of truth for tool results — the translator NEVER re-executes CLI tools, it only records what the CLI did. New `agent::claude_code::JourneyTranslator` (in `translator.rs`, ~440 LOC) with `on_event` / `finish` API. Schema: added `status: Option<String>` to `TraceEventKind::ToolCall` (additive, defaults to `None`; `"orphaned"` for CLI tool_use blocks that never received a matching `tool_result` before the turn ended). 8 spec-named tests in `translator_test.rs` cover the spec's 8 acceptance criteria; 3 inline unit tests in `translator.rs::tests` cover `cli_tool_to_file_change` (Claude-Code-specific name → `FileAction` map: `Write` / `Edit` / `MultiEdit` / `NotebookEdit` → `FileAction::Write`; reads do NOT synthesize a `FileChange`).
