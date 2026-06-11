@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use weave_server::agent::claude_code::JourneyTranslator;
 use weave_server::agent::cli_runner::CliRunner;
 use weave_server::agent::conformance::{ClaudeCodeConformanceAdapter, ConformanceAdapter};
-use weave_server::agent::permissions::{PermissionSnapshot, ToolProfile};
+use weave_server::agent::permissions::ToolProfile;
 use weave_server::agent::turn_context::test_support::make_test_turn_context;
 use weave_server::agent::{RuntimeKind, StopReason, StreamEvent};
 use weave_server::store::traces::TraceEventKind;
