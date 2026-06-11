@@ -1,13 +1,12 @@
 import { useState } from "react";
-import { useCreateProvider, useDeleteProvider, useProviders } from "../../hooks/use-providers";
+import { useDeleteProvider, useProviders } from "../../hooks/use-providers";
 import { Modal } from "../../components/modal";
+import { AddProviderModal } from "../../components/add-provider-modal";
 import { ErrorBanner } from "../../components/error-banner";
 import { Spinner } from "../../components/spinner";
-import type { CreateProviderRequest } from "../../lib/types";
 
 export default function SettingsPage() {
   const { data: providers, isLoading, error } = useProviders();
-  const createProvider = useCreateProvider();
   const deleteProvider = useDeleteProvider();
 
   const [bannerError, setBannerError] = useState<string | null>(null);
@@ -15,44 +14,11 @@ export default function SettingsPage() {
     id: string;
     name: string;
   } | null>(null);
-  // The form keeps the pre-feat-039 required-field shape (the Settings
-  // UI only knows about HTTP providers in this slice). The wire DTO is
-  // widened to a discriminated union on `kind`; the form payload
-  // satisfies the HTTP arm.
-  const [form, setForm] = useState<
-    Required<
-      Pick<CreateProviderRequest, "type" | "name" | "base_url" | "api_key" | "default_model">
-    >
-  >({
-    type: "anthropic",
-    name: "",
-    base_url: "https://api.anthropic.com",
-    api_key: "",
-    default_model: "claude-sonnet-4-20250514",
-  });
-
-  const handleAdd = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name.trim() || !form.api_key.trim()) {
-      setBannerError("Name and API Key are required");
-      return;
-    }
-
-    createProvider.mutate(form, {
-      onSuccess: () => {
-        setForm({
-          type: "anthropic",
-          name: "",
-          base_url: "https://api.anthropic.com",
-          api_key: "",
-          default_model: "claude-sonnet-4-20250514",
-        });
-      },
-      onError: (err) => {
-        setBannerError(err instanceof Error ? err.message : "Failed to add provider");
-      },
-    });
-  };
+  // Feat-052: the "Add Provider" form moved to AddProviderModal. The
+  // page now hosts a `+ Add Provider` button + the modal; the form
+  // state (kind picker, http/cli arms, args/env editors) lives in the
+  // modal component.
+  const [addOpen, setAddOpen] = useState(false);
 
   const handleDelete = () => {
     if (!deleteTarget) return;
@@ -83,120 +49,24 @@ export default function SettingsPage() {
         <p className="mt-1.5 text-sm text-slate-500">Configure your AI providers and preferences</p>
       </div>
 
-      {/* Add provider form */}
+      {/* Add provider button — opens the kind-aware AddProviderModal */}
       <div className="mb-8 animate-fade-in-up" style={{ animationDelay: "50ms" }}>
-        <div className="rounded-2xl border border-black/[0.06] bg-white/80 backdrop-blur-sm p-6 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
-          <h2 className="text-base font-semibold text-slate-900 mb-1">Add Provider</h2>
-          <p className="text-xs text-slate-400 mb-5">
-            Connect an AI provider to use with your sessions
-          </p>
-
-          <form onSubmit={handleAdd} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-                  Type
-                </label>
-                <input
-                  type="text"
-                  value="Anthropic"
-                  readOnly
-                  className="w-full h-10 px-3.5 bg-brand-slate-50 border border-slate-200 rounded-xl text-sm text-slate-500 cursor-not-allowed"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={form.name}
-                  onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                  placeholder="e.g. Production"
-                  className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-                  Base URL
-                </label>
-                <input
-                  type="text"
-                  value={form.base_url}
-                  onChange={(e) => setForm((f) => ({ ...f, base_url: e.target.value }))}
-                  className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-                  API Key
-                </label>
-                <div className="relative">
-                  <input
-                    type="password"
-                    value={form.api_key}
-                    onChange={(e) => setForm((f) => ({ ...f, api_key: e.target.value }))}
-                    placeholder="sk-ant-..."
-                    className="w-full h-10 px-3.5 pr-10 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-                    required
-                  />
-                  <svg
-                    className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                    />
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                    />
-                  </svg>
-                </div>
-              </div>
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
-                Default Model
-              </label>
-              <input
-                type="text"
-                value={form.default_model}
-                onChange={(e) => setForm((f) => ({ ...f, default_model: e.target.value }))}
-                className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
-              />
-            </div>
-            <div className="flex justify-end pt-2">
-              <button
-                type="submit"
-                disabled={createProvider.isPending}
-                className="h-10 px-6 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md inline-flex items-center gap-2 disabled:opacity-50"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    d="M12 6v6m0 0v6m0-6h6m-6 0H6"
-                  />
-                </svg>
-                Add Provider
-              </button>
-            </div>
-          </form>
-        </div>
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="h-10 px-5 bg-brand-blue-500 text-white text-sm font-medium rounded-xl hover:bg-brand-blue-600 focus:outline-none focus:ring-2 focus:ring-brand-blue-500 focus:ring-offset-2 transition-all duration-150 shadow-sm hover:shadow-md inline-flex items-center gap-2"
+        >
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+          </svg>
+          Add Provider
+        </button>
       </div>
 
       {/* Provider list */}
@@ -246,6 +116,16 @@ export default function SettingsPage() {
                       </svg>
                     </div>
                     <span className="text-sm font-medium text-slate-900">{p.name}</span>
+                    <span
+                      className={
+                        "inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold tracking-wide border w-fit uppercase " +
+                        (p.kind === "cli"
+                          ? "bg-brand-orchid-50 text-brand-orchid-600 border-brand-orchid-200/60"
+                          : "bg-slate-100 text-slate-600 border-slate-200/60")
+                      }
+                    >
+                      {p.kind}
+                    </span>
                   </div>
                   <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold tracking-wide bg-slate-100 text-slate-600 border border-slate-200/60 w-fit uppercase">
                     {p.type}
@@ -292,7 +172,7 @@ export default function SettingsPage() {
             </svg>
           </div>
           <h3 className="text-sm font-medium text-slate-900 mb-1">No providers</h3>
-          <p className="text-sm text-slate-500">Add an Anthropic provider to get started</p>
+          <p className="text-sm text-slate-500">Add a provider to get started</p>
         </div>
       )}
 
@@ -338,6 +218,9 @@ export default function SettingsPage() {
           </button>
         </div>
       </Modal>
+
+      {/* Add provider modal — kind-aware form (HTTP or CLI) */}
+      <AddProviderModal open={addOpen} onClose={() => setAddOpen(false)} />
     </div>
   );
 }
