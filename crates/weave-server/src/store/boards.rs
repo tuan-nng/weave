@@ -51,6 +51,7 @@ pub struct NewColumnSpec<'a> {
     pub freeze_description: bool,
     pub required_fields: Vec<String>,
     pub required_artifact_types: Vec<String>,
+    pub runtime_kind: Option<&'a str>,
 }
 
 /// Stateless store for board persistence.
@@ -82,6 +83,7 @@ impl BoardStore {
                     Some(spec.freeze_description),
                     Some(&spec.required_fields),
                     Some(&spec.required_artifact_types),
+                    spec.runtime_kind,
                 )?;
             }
             Ok(board)

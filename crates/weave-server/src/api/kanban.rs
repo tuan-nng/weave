@@ -63,6 +63,8 @@ pub struct CreateColumnInline {
     pub freeze_description: Option<bool>,
     pub required_fields: Option<Vec<String>>,
     pub required_artifact_types: Option<Vec<String>>,
+    /// Nullable Runtime Tool binding for lane automation (feat-055).
+    pub runtime_kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +81,8 @@ pub struct CreateColumnRequest {
     pub freeze_description: Option<bool>,
     pub required_fields: Option<Vec<String>>,
     pub required_artifact_types: Option<Vec<String>>,
+    /// Nullable Runtime Tool binding for lane automation (feat-055).
+    pub runtime_kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +95,8 @@ pub struct UpdateColumnRequest {
     pub freeze_description: Option<bool>,
     pub required_fields: Option<Vec<String>>,
     pub required_artifact_types: Option<Vec<String>>,
+    /// `Some(None)` clears the runtime_kind binding. `None` leaves it unchanged.
+    pub runtime_kind: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +174,7 @@ pub async fn create_board(
                 freeze_description: c.freeze_description.unwrap_or(false),
                 required_fields: c.required_fields.clone().unwrap_or_default(),
                 required_artifact_types: c.required_artifact_types.clone().unwrap_or_default(),
+                runtime_kind: c.runtime_kind.as_deref(),
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -337,6 +344,7 @@ pub async fn create_column(
         body.freeze_description,
         body.required_fields.as_deref(),
         body.required_artifact_types.as_deref(),
+        body.runtime_kind.as_deref(),
     )?;
     let column_json = serde_json::to_value(&column).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to serialize column for SSE: {e}"))
@@ -378,6 +386,7 @@ pub async fn update_column(
         body.freeze_description,
         body.required_fields.as_deref(),
         body.required_artifact_types.as_deref(),
+        body.runtime_kind.as_ref().map(|s| s.as_deref()),
     )?;
     Ok(Json(DataResponse { data: column }))
 }

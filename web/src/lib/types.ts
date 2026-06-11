@@ -206,6 +206,7 @@ export interface Column {
   position: number;
   specialist_id: string | null;
   auto_trigger: boolean;
+  runtime_kind: RuntimeKind | null;
   created_at: string;
 }
 
@@ -227,6 +228,7 @@ export interface NewColumnSpec {
   position?: number;
   specialist_id?: string;
   auto_trigger?: boolean;
+  runtime_kind?: RuntimeKind;
 }
 
 // API envelopes
@@ -333,6 +335,7 @@ export interface CreateColumnRequest {
   position?: number;
   specialist_id?: string;
   auto_trigger?: boolean;
+  runtime_kind?: RuntimeKind;
 }
 
 export interface UpdateColumnRequest {
@@ -341,6 +344,8 @@ export interface UpdateColumnRequest {
   /// Tri-state: `undefined` = leave alone, `null` = clear, `string` = set.
   specialist_id?: string | null;
   auto_trigger?: boolean;
+  /// Tri-state: `undefined` = leave alone, `null` = clear, `string` = set.
+  runtime_kind?: RuntimeKind | null;
 }
 
 export interface CreateCardRequest {

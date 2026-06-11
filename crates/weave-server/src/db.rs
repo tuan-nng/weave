@@ -104,6 +104,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "012",
         include_str!("migrations/012_provider_runtime_kind.sql"),
     ),
+    (
+        "013",
+        include_str!("migrations/013_column_runtime_kind.sql"),
+    ),
 ];
 
 impl Db {
@@ -329,7 +333,7 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 12, "user_version should be 12 after all migrations");
+        assert_eq!(v1, 13, "user_version should be 13 after all migrations");
     }
 
     /// `size_bytes` returns `None` for `:memory:` databases — there is

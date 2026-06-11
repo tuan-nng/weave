@@ -22,6 +22,7 @@ function makeBoardDetail(): BoardDetail {
       position: 0,
       specialist_id: null,
       auto_trigger: false,
+      runtime_kind: null,
       created_at: "2026-06-01T00:00:00Z",
     },
     {
@@ -31,6 +32,7 @@ function makeBoardDetail(): BoardDetail {
       position: 1000,
       specialist_id: null,
       auto_trigger: false,
+      runtime_kind: null,
       created_at: "2026-06-01T00:00:00Z",
     },
   ];

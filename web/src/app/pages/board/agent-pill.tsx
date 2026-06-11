@@ -3,6 +3,17 @@
 // "agent / provider" semantic) and an amber dot if the column has
 // auto_trigger enabled.
 
+import type { RuntimeKind } from "../../../lib/types";
+
+const RUNTIME_KIND_LABEL: Record<RuntimeKind, string> = {
+  "anthropic-api": "Anthropic API",
+  "openai-api": "OpenAI API",
+  "openai-compatible": "OpenAI Compat",
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  opencode: "OpenCode",
+};
+
 export function SpecialistChip({ name }: { name: string }) {
   return (
     <span className="inline-flex items-center gap-1 bg-brand-amber-50 text-brand-amber-700 border border-brand-amber-200/60 rounded-md px-1.5 py-0.5 text-[10px] font-medium">
@@ -26,5 +37,13 @@ export function SpecialistChip({ name }: { name: string }) {
 export function AutoTriggerDot() {
   return (
     <span className="w-1.5 h-1.5 rounded-full bg-brand-amber-500" title="Auto-trigger enabled" />
+  );
+}
+
+export function RuntimeKindBadge({ kind }: { kind: RuntimeKind }) {
+  return (
+    <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-600 border border-slate-200/60 rounded-md px-1.5 py-0.5 text-[10px] font-medium">
+      {RUNTIME_KIND_LABEL[kind] ?? kind}
+    </span>
   );
 }

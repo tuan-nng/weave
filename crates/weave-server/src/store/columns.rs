@@ -51,6 +51,11 @@ pub struct Column {
     /// tasks entering this column. Empty by default. Schema-only for
     /// feat-028 — the artifacts table (feat-031) is the source of truth.
     pub required_artifact_types: Vec<String>,
+    /// Nullable Runtime Tool binding for lane automation. When set,
+    /// `try_automate_lane` uses this to select a matching provider and
+    /// set the session's `runtime_kind`. NULL means "inherit from the
+    /// workspace's first provider" (the pre-feat-055 default).
+    pub runtime_kind: Option<String>,
     pub created_at: String,
 }
 
@@ -84,6 +89,7 @@ impl ColumnStore {
         freeze_description: Option<bool>,
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
+        runtime_kind: Option<&str>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         db.with_transaction(|conn| {
@@ -97,6 +103,7 @@ impl ColumnStore {
                 freeze_description,
                 required_fields,
                 required_artifact_types,
+                runtime_kind,
             )
         })
     }
@@ -117,6 +124,7 @@ impl ColumnStore {
         freeze_description: Option<bool>,
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
+        runtime_kind: Option<&str>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         let resolved_position = match position {
@@ -129,10 +137,12 @@ impl ColumnStore {
         conn.query_row(
             "INSERT INTO columns
                 (id, board_id, name, position, specialist_id, auto_trigger,
-                 freeze_description, required_fields, required_artifact_types, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 freeze_description, required_fields, required_artifact_types,
+                 runtime_kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
-                       freeze_description, required_fields, required_artifact_types, created_at",
+                       freeze_description, required_fields, required_artifact_types,
+                       runtime_kind, created_at",
             rusqlite::params![
                 Uuid::new_v4().to_string(),
                 board_id,
@@ -143,6 +153,7 @@ impl ColumnStore {
                 freeze as i64,
                 req_fields_json,
                 req_artifacts_json,
+                runtime_kind,
                 Utc::now().to_rfc3339(),
             ],
             Self::map_row,
@@ -167,6 +178,7 @@ impl ColumnStore {
         freeze_description: Option<bool>,
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
+        runtime_kind: Option<Option<&str>>,
     ) -> Result<Column, AppError> {
         // Resolve the effective auto_trigger/specialist_id for validation.
         // The `Option<Option<T>>` pattern lets the caller pass:
@@ -222,6 +234,11 @@ impl ColumnStore {
             params.push(Box::new(json));
             idx += 1;
         }
+        if let Some(rk) = runtime_kind {
+            sets.push(format!("runtime_kind = ?{idx}"));
+            params.push(Box::new(rk.map(|x| x.to_string())));
+            idx += 1;
+        }
 
         // No-op when nothing to update — return current state.
         if sets.is_empty() {
@@ -232,7 +249,8 @@ impl ColumnStore {
         let sql = format!(
             "UPDATE columns SET {} WHERE id = ?{cid_idx}
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
-                       freeze_description, required_fields, required_artifact_types, created_at",
+                       freeze_description, required_fields, required_artifact_types,
+                       runtime_kind, created_at",
             sets.join(", ")
         );
         params.push(Box::new(column_id.to_string()));
@@ -255,7 +273,8 @@ impl ColumnStore {
         db.conn()
             .query_row(
                 "SELECT id, board_id, name, position, specialist_id, auto_trigger,
-                        freeze_description, required_fields, required_artifact_types, created_at
+                        freeze_description, required_fields, required_artifact_types,
+                        runtime_kind, created_at
                  FROM columns WHERE id = ?1",
                 [column_id],
                 Self::map_row,
@@ -274,7 +293,8 @@ impl ColumnStore {
         let conn = db.conn();
         let mut stmt = conn.prepare(
             "SELECT id, board_id, name, position, specialist_id, auto_trigger,
-                    freeze_description, required_fields, required_artifact_types, created_at
+                    freeze_description, required_fields, required_artifact_types,
+                    runtime_kind, created_at
              FROM columns WHERE board_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
@@ -324,7 +344,8 @@ impl ColumnStore {
             freeze_description: freeze_i != 0,
             required_fields,
             required_artifact_types,
-            created_at: row.get(9)?,
+            runtime_kind: row.get(9)?,
+            created_at: row.get(10)?,
         })
     }
 }
@@ -428,8 +449,10 @@ mod tests {
         let (_, bid, _) = seed_workspace_with_board(&db);
         // Seed inserts 'test-col' at position 0, so the next default
         // position is 0 + POSITION_STEP (1000).
-        let col =
-            ColumnStore::create(&db, &bid, "To Do", None, None, false, None, None, None).unwrap();
+        let col = ColumnStore::create(
+            &db, &bid, "To Do", None, None, false, None, None, None, None,
+        )
+        .unwrap();
         assert_eq!(col.name, "To Do");
         assert_eq!(col.position, 1000);
         assert!(!col.auto_trigger);
@@ -443,8 +466,19 @@ mod tests {
     fn test_create_column_explicit_position() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
-        let col = ColumnStore::create(&db, &bid, "Done", Some(2048), None, false, None, None, None)
-            .unwrap();
+        let col = ColumnStore::create(
+            &db,
+            &bid,
+            "Done",
+            Some(2048),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(col.position, 2048);
     }
 
@@ -452,7 +486,9 @@ mod tests {
     fn test_create_column_auto_trigger_requires_specialist() {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
-        let result = ColumnStore::create(&db, &bid, "Broken", None, None, true, None, None, None);
+        let result = ColumnStore::create(
+            &db, &bid, "Broken", None, None, true, None, None, None, None,
+        );
         assert!(matches!(
             result,
             Err(AppError::Validation { message: _, .. })
@@ -470,6 +506,7 @@ mod tests {
             None,
             Some("crafter"),
             true,
+            None,
             None,
             None,
             None,
@@ -495,6 +532,7 @@ mod tests {
             Some(true),
             Some(&req_fields),
             Some(&req_artifacts),
+            None,
         )
         .unwrap();
         assert!(col.freeze_description);
@@ -510,6 +548,7 @@ mod tests {
             &db,
             &cid,
             Some("Renamed"),
+            None,
             None,
             None,
             None,
@@ -537,13 +576,24 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(updated.auto_trigger);
         // Turn off
-        let updated =
-            ColumnStore::update(&db, &cid, None, None, None, Some(false), None, None, None)
-                .unwrap();
+        let updated = ColumnStore::update(
+            &db,
+            &cid,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!updated.auto_trigger);
     }
 
@@ -562,10 +612,22 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         // Now try to clear specialist while auto_trigger is still on
-        let result = ColumnStore::update(&db, &cid, None, None, Some(None), None, None, None, None);
+        let result = ColumnStore::update(
+            &db,
+            &cid,
+            None,
+            None,
+            Some(None),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(matches!(
             result,
             Err(AppError::Validation { message: _, .. })
@@ -590,6 +652,7 @@ mod tests {
             Some(true),
             Some(&req_fields),
             None,
+            None,
         )
         .unwrap();
         assert!(updated.freeze_description);
@@ -601,9 +664,45 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
         // Seed inserts 'test-col' at position 0. Add 3 more at distinct positions.
-        ColumnStore::create(&db, &bid, "C", Some(3_072), None, false, None, None, None).unwrap();
-        ColumnStore::create(&db, &bid, "A", Some(1_024), None, false, None, None, None).unwrap();
-        ColumnStore::create(&db, &bid, "B", Some(2_048), None, false, None, None, None).unwrap();
+        ColumnStore::create(
+            &db,
+            &bid,
+            "C",
+            Some(3_072),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        ColumnStore::create(
+            &db,
+            &bid,
+            "A",
+            Some(1_024),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        ColumnStore::create(
+            &db,
+            &bid,
+            "B",
+            Some(2_048),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let cols = ColumnStore::list_by_board(&db, &bid).unwrap();
         assert_eq!(cols.len(), 4);
@@ -705,5 +804,63 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(positions, vec![1000, 2000, 3000]);
+    }
+
+    #[test]
+    fn test_columns_migration_adds_runtime_kind() {
+        let db = Db::open(std::path::Path::new(":memory:")).unwrap();
+        let (_, bid, _) = seed_workspace_with_board(&db);
+        // Create a column without runtime_kind — it should be NULL.
+        let col = ColumnStore::create(&db, &bid, "Test", None, None, false, None, None, None, None)
+            .unwrap();
+        assert!(col.runtime_kind.is_none());
+
+        // Create a column with runtime_kind — it should be persisted.
+        let col = ColumnStore::create(
+            &db,
+            &bid,
+            "CLI Lane",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            Some("claude-code"),
+        )
+        .unwrap();
+        assert_eq!(col.runtime_kind.as_deref(), Some("claude-code"));
+
+        // Update runtime_kind to a different value.
+        let updated = ColumnStore::update(
+            &db,
+            &col.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some("codex")),
+        )
+        .unwrap();
+        assert_eq!(updated.runtime_kind.as_deref(), Some("codex"));
+
+        // Clear runtime_kind.
+        let updated = ColumnStore::update(
+            &db,
+            &col.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(None),
+        )
+        .unwrap();
+        assert!(updated.runtime_kind.is_none());
     }
 }

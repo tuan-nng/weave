@@ -7,7 +7,7 @@
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { AddCardButton } from "./add-card-button";
-import { AutoTriggerDot, SpecialistChip } from "./agent-pill";
+import { AutoTriggerDot, RuntimeKindBadge, SpecialistChip } from "./agent-pill";
 import { KanbanCard } from "./kanban-card";
 import type { Column, Task } from "../../../lib/types";
 
@@ -34,6 +34,9 @@ export function BoardColumn({ column, tasks, onCardClick, onAddCard }: BoardColu
           <span className="text-sm font-semibold text-slate-900 truncate">{column.name}</span>
           {column.specialist_id && <SpecialistChip name={column.specialist_id} />}
           {column.auto_trigger && <AutoTriggerDot />}
+          {column.auto_trigger && column.runtime_kind && (
+            <RuntimeKindBadge kind={column.runtime_kind} />
+          )}
         </div>
         <span className="text-[10px] font-mono text-slate-400">{tasks.length}</span>
       </div>

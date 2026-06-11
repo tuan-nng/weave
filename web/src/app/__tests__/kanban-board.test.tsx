@@ -75,6 +75,7 @@ const mockColumns = [
     position: 0,
     specialist_id: null,
     auto_trigger: false,
+    runtime_kind: null,
     created_at: "2026-06-01T00:00:00Z",
   },
   {
@@ -84,6 +85,7 @@ const mockColumns = [
     position: 1000,
     specialist_id: null,
     auto_trigger: false,
+    runtime_kind: null,
     created_at: "2026-06-01T00:00:00Z",
   },
 ];
@@ -252,5 +254,47 @@ describe("kanban-board", () => {
     await waitFor(() => {
       expect(screen.getByText(/board not found/)).toBeInTheDocument();
     });
+  });
+
+  it("renders runtime kind badge on auto-trigger column with runtime_kind", async () => {
+    const columnsWithRuntime = [
+      {
+        id: "c1",
+        board_id: "b1",
+        name: "CLI Lane",
+        position: 0,
+        specialist_id: "dev",
+        auto_trigger: true,
+        runtime_kind: "claude-code" as const,
+        created_at: "2026-06-01T00:00:00Z",
+      },
+      {
+        id: "c2",
+        board_id: "b1",
+        name: "No Runtime",
+        position: 1000,
+        specialist_id: "dev",
+        auto_trigger: true,
+        runtime_kind: null,
+        created_at: "2026-06-01T00:00:00Z",
+      },
+    ];
+    mockApi.kanban.boards.get.mockResolvedValue({
+      board: {
+        id: "b1",
+        workspace_id: "w1",
+        name: "Test Board",
+        created_at: "2026-06-01T00:00:00Z",
+      },
+      columns: columnsWithRuntime,
+      tasks: [],
+    });
+    renderBoard();
+    await screen.findByText("Test Board");
+    // The column with runtime_kind should show the badge.
+    expect(screen.getByText("Claude Code")).toBeInTheDocument();
+    // The column without runtime_kind should NOT show the badge.
+    const noRuntimeColumn = screen.getByText("No Runtime").closest("div")!;
+    expect(noRuntimeColumn.querySelector('[title="Auto-trigger enabled"]')).toBeInTheDocument();
   });
 });

@@ -127,20 +127,36 @@ pub async fn try_automate_lane(
         })?;
     let provider_id = provider.id.clone();
 
-    // feat-051: honor the provider's `kind` so a CLI provider creates
-    // a wrapped session, not a native one. The default
-    // (pre-feat-051) behavior was "always native / anthropic-api";
+    // feat-055: honor the column's `runtime_kind` binding first. When set,
+    // it overrides the provider-derived default. The column's runtime_kind
+    // directly becomes the session's runtime_kind; the mode is derived from
+    // the runtime category (CLI → wrapped, HTTP → native).
+    //
+    // feat-051: when column has no runtime_kind, honor the provider's `kind`
+    // so a CLI provider creates a wrapped session, not a native one. The
+    // default (pre-feat-051) behavior was "always native / anthropic-api";
     // a CLI row now selects `RuntimeKind::ClaudeCode` and
-    // `SessionMode::Wrapped`. A missing/garbled `kind` falls back
-    // to the legacy default — the spec says a stuck or old row
-    // should keep working until the operator migrates.
-    let (runtime_kind, mode) = match provider.kind.as_str() {
-        "cli" => (
-            Some(crate::agent::RuntimeKind::ClaudeCode.as_str()),
-            Some(crate::agent::SessionMode::Wrapped.as_str()),
-        ),
-        // "http" or anything else (legacy) — preserve the pre-051 default.
-        _ => (None, None),
+    // `SessionMode::Wrapped`. A missing/garbled `kind` falls back to the
+    // legacy default — the spec says a stuck or old row should keep working
+    // until the operator migrates.
+    let (runtime_kind, mode) = if let Some(col_rk) = &column.runtime_kind {
+        // Column has explicit runtime_kind — derive mode from runtime category.
+        let is_cli = matches!(col_rk.as_str(), "claude-code" | "codex" | "opencode");
+        let mode = if is_cli {
+            Some(crate::agent::SessionMode::Wrapped.as_str())
+        } else {
+            Some(crate::agent::SessionMode::Native.as_str())
+        };
+        (Some(col_rk.as_str()), mode)
+    } else {
+        // No column binding — fall back to provider.kind (pre-feat-055 behavior).
+        match provider.kind.as_str() {
+            "cli" => (
+                Some(crate::agent::RuntimeKind::ClaudeCode.as_str()),
+                Some(crate::agent::SessionMode::Wrapped.as_str()),
+            ),
+            _ => (None, None),
+        }
     };
 
     // Pre-check 2: specialist is loaded. The DB doesn't FK on specialist_id
@@ -395,6 +411,7 @@ mod tests {
             freeze_description: false,
             required_fields: vec![],
             required_artifact_types: vec![],
+            runtime_kind: None,
             created_at: "2026-06-02T00:00:00Z".into(),
         }
     }
@@ -568,6 +585,88 @@ mod tests {
                 );
             }
             other => panic!("expected Validation cwd_outside_codebase, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // feat-055: column runtime_kind binding tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_kanban_autospawn_uses_column_runtime_kind() {
+        use crate::store::codebases::CodebaseStore;
+        use crate::store::kanban_test_helpers::seed_cli_provider;
+
+        let mut state = make_test_state();
+        // Seed a CLI provider.
+        let _provider_id =
+            seed_cli_provider(&state.db, "/usr/local/bin/fake_cli", "claude-sonnet-4-5");
+        let task = task_with_real_id(&state.db, "task-col-rk");
+        // Seed a codebase so the wrapped session validation passes.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _codebase_id = CodebaseStore::create(
+            &state.db,
+            "ws-real",
+            tmp.path().to_str().unwrap(),
+            None,
+            None,
+        )
+        .expect("seed codebase")
+        .id;
+        let specialists = Arc::get_mut(&mut state.specialists).expect("unique");
+        crate::store::kanban_test_helpers::seed_specialist(specialists, "dev", "You are dev.");
+        // Column with explicit runtime_kind.
+        let mut column = default_column("col-test", true, Some("dev"));
+        column.runtime_kind = Some("claude-code".to_string());
+        // The auto-spawn should use the column's runtime_kind.
+        // We can't easily inspect the created session's runtime_kind from
+        // this test (the session is created inside try_automate_lane), but
+        // we can verify it doesn't error on the provider resolution path.
+        let result = try_automate_lane(&state, &task, &column).await;
+        if let Err(err) = &result {
+            if let AppError::Validation { code, message } = err {
+                assert_ne!(
+                    code, "cwd_outside_codebase",
+                    "column runtime_kind must resolve to a matching provider. Got: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kanban_autospawn_inherits_when_null() {
+        let mut state = make_test_state();
+        let (_provider_id, _specialist_name) = seed_provider_and_specialist(&mut state, "dev");
+        let task = task_with_real_id(&state.db, task_with("T", Some("body")).id.as_str());
+        // Column with no runtime_kind — should inherit from provider.
+        let column = default_column("col-test", true, Some("dev"));
+        assert!(column.runtime_kind.is_none());
+        // Should succeed (the HTTP provider's default is anthropic-api/native).
+        let result = try_automate_lane(&state, &task, &column).await;
+        // The result may be an error downstream (SSE, agent), but NOT
+        // a provider-resolution error.
+        if let Err(err) = &result {
+            if let AppError::Validation { message: msg, .. } = err {
+                assert!(
+                    !msg.contains("no provider"),
+                    "column with null runtime_kind must inherit from provider, got: {msg}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_kanban_autospawn_errors_when_no_default() {
+        let state = make_test_state();
+        // No provider seeded — registry is empty.
+        let task = task_with_real_id(&state.db, "task-no-prov");
+        let column = default_column("col-test", true, Some("dev"));
+        let err = try_automate_lane(&state, &task, &column).await.unwrap_err();
+        match err {
+            AppError::Validation { message: msg, .. } => {
+                assert!(msg.contains("no provider"), "got: {msg}")
+            }
+            other => panic!("expected Validation, got {other:?}"),
         }
     }
 

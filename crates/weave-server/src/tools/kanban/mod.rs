@@ -113,10 +113,20 @@ mod tests {
         //    Use the store API so the test exercises the same code path
         //    real callers do (defaults for freeze/required fields are
         //    set by ColumnStore::create, not by SQL column defaults).
-        let dest_cid =
-            ColumnStore::create(&db, &bid, "done", Some(2048), None, false, None, None, None)
-                .unwrap()
-                .id;
+        let dest_cid = ColumnStore::create(
+            &db,
+            &bid,
+            "done",
+            Some(2048),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .id;
         let move_card = MoveCardTool { db: db.clone() };
         let r = move_card
             .execute(json!({"card_id": new_card_id, "column_id": dest_cid}), &ctx)
@@ -178,6 +188,7 @@ mod tests {
             Some(true), // freeze_description = true
             None,
             None,
+            None,
         )
         .unwrap()
         .id;
@@ -194,13 +205,24 @@ mod tests {
                 "verification_report".to_string(),
             ]),
             None,
+            None,
         )
         .unwrap()
         .id;
-        let _open_cid =
-            ColumnStore::create(&db, &bid, "open", Some(3072), None, false, None, None, None)
-                .unwrap()
-                .id;
+        let _open_cid = ColumnStore::create(
+            &db,
+            &bid,
+            "open",
+            Some(3072),
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .id;
 
         // Create a bare card on `src` — no description, no AC, no VR.
         let card_id = uuid::Uuid::new_v4().to_string();

@@ -804,13 +804,13 @@
       "phase": "phase-9",
       "behavior": "Kanban column binding for `(runtime_kind, specialist_id)`. Add a nullable `runtime_kind` column to `columns` (default NULL = inherit workspace default). Migration is additive. `POST /api/boards/:bid/columns` and `PATCH /api/columns/:cid` accept `runtime_kind`. When a card is auto-spawned by lane automation, the created session uses the column's `(runtime_kind, specialist_id)` binding. If `runtime_kind` is NULL, behavior is unchanged (uses the workspace's default Runtime Tool). The frontend `ColumnHeader` shows a small Runtime Tool badge when `runtime_kind` is set and `auto_trigger` is on. The `try_automate_lane` service is updated to honor the binding. This feature also removes the silent first-provider fallback in the kanban flow: a column with no workspace-default Runtime Tool fails the auto-spawn with a clear error pointing at the column's binding. The A2A counterpart is feat-056.",
       "verification": "cargo test -p weave-server -- test_columns_migration_adds_runtime_kind && cargo test -p weave-server -- test_kanban_autospawn_uses_column_runtime_kind && cargo test -p weave-server -- test_kanban_autospawn_inherits_when_null && cargo test -p weave-server -- test_kanban_autospawn_errors_when_no_default && cd web && bun run test -- --run kanban-runtime-badge",
-      "state": "not_started",
+      "state": "passing",
       "dependencies": [
         "feat-024",
         "feat-025",
         "feat-040"
       ],
-      "evidence": ""
+      "evidence": "Implemented in feat-055 (2026-06-11). Backend: migration 013 (ALTER TABLE columns ADD COLUMN runtime_kind TEXT), Column struct + store (5 SQL locations updated), API DTOs (CreateColumnInline, CreateColumnRequest, UpdateColumnRequest), try_automate_lane (column.runtime_kind overrides provider.kind). Frontend: RuntimeKindBadge component, Column type extended, board-column.tsx renders badge when auto_trigger + runtime_kind set. 4 new Rust tests (test_columns_migration_adds_runtime_kind, test_kanban_autospawn_uses_column_runtime_kind, test_kanban_autospawn_inherits_when_null, test_kanban_autospawn_errors_when_no_default) + 1 new frontend test (kanban-runtime-badge). Full ./init.sh 3-layer gate green: 795 Rust + 142 frontend tests, clippy + fmt + prettier + ESLint clean, server starts, /api/health and / respond."
     },
     {
       "id": "feat-056",

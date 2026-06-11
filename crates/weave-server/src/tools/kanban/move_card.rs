@@ -257,6 +257,7 @@ mod tests {
             Some(freeze_source),
             None,
             None,
+            None,
         )
         .unwrap()
         .id;
@@ -274,6 +275,7 @@ mod tests {
             } else {
                 Some(&dest_required)
             },
+            None,
             None,
         )
         .unwrap()

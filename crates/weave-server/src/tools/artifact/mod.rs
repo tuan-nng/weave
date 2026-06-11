@@ -177,6 +177,7 @@ mod tests {
             None,
             None,
             Some(&["screenshot".to_string()]),
+            None,
         )
         .unwrap()
         .id;
@@ -193,6 +194,7 @@ mod tests {
             None,
             None,
             Some(&["test_results".to_string()]),
+            None,
         )
         .unwrap()
         .id;
