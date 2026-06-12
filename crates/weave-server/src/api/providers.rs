@@ -78,12 +78,26 @@ pub async fn create_provider(
     let name = body.name.trim();
     validate_name(name)?;
 
-    // Validate provider type
-    if body.provider_type != "anthropic" {
+    // Validate provider type. The valid values are the strings the
+    // `CodingAgent::provider_type()` method returns — one per agent
+    // family:
+    //   * "anthropic"    — the HTTP family (Anthropic API; the only
+    //                      HTTP adapter in v1)
+    //   * "claude-code"  — the Claude Code CLI adapter (feat-051;
+    //                      feat-058/059 extend the list with "codex"
+    //                      and "opencode" when those land)
+    // The kind-specific branches below enforce the family-to-kind
+    // invariant (HTTP only accepts "anthropic"; CLI accepts the CLI
+    // family names), so the allowlist here just needs to be the
+    // union of all valid families. See the regression test
+    // `test_create_cli_provider_accepts_type_claude_code` for the
+    // kind-aware Add Provider modal (feat-052) wire contract.
+    if !matches!(body.provider_type.as_str(), "anthropic" | "claude-code") {
         return Err(AppError::validation_with_code(
             "unsupported_provider_type",
             format!(
-                "unsupported provider type: '{}' (only 'anthropic' supported in v1)",
+                "unsupported provider type: '{}' (supported: 'anthropic' for kind=http, \
+                 'claude-code' for kind=cli)",
                 body.provider_type
             ),
         ));
@@ -2004,6 +2018,56 @@ mod tests {
                 .contains("sh"),
             "error must name the basename, got: {resp_json}"
         );
+    }
+
+    /// Regression: the kind-aware Add Provider modal (feat-052) sends
+    /// `type: "claude-code"` for CLI rows. The early `provider_type`
+    /// check at the top of `create_provider` previously only accepted
+    /// `"anthropic"`, so the UI's "Save Provider" click 400'd with
+    /// `unsupported_provider_type` even though the rest of the handler
+    /// (and the dispatcher in `registry::create_cli_agent_from_row`,
+    /// which dispatches by binary basename) was already prepared to
+    /// handle a CLI row. The fix widens the allowlist to the same
+    /// string the `CodingAgent::provider_type()` method returns, so
+    /// the wire contract and the agent contract match.
+    #[tokio::test]
+    async fn test_create_cli_provider_accepts_type_claude_code() {
+        let app = test_app();
+        let body = r#"{
+            "kind": "cli",
+            "type": "claude-code",
+            "name": "Claude Code UI",
+            "default_model": "claude-sonnet-4-5",
+            "binary_path": "/usr/local/bin/claude",
+            "permission_mode": "accept-edits"
+        }"#;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "the kind-aware Add Provider modal sends type=claude-code; \
+             the backend must accept it (regression: this used to 400 \
+             with unsupported_provider_type)"
+        );
+        let resp_body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_json = extract_json(&resp_body);
+        let provider = &resp_json["data"];
+        assert_eq!(provider["kind"], "cli");
+        assert_eq!(provider["type"], "claude-code");
+        assert_eq!(provider["binary_path"], "/usr/local/bin/claude");
+        assert_eq!(provider["permission_mode"], "accept-edits");
     }
 
     // ---- feat-053: healthy field on GET /api/providers ----

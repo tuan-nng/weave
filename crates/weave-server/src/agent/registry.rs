@@ -451,13 +451,19 @@ impl ProviderRegistry {
         provider: &crate::store::providers::Provider,
         turn_outcomes: Arc<Mutex<HashMap<String, TurnOutcome>>>,
     ) -> Result<Arc<dyn CodingAgent>, ProviderError> {
-        // The current `provider_type` discriminator is `"anthropic"`
-        // for both HTTP and CLI rows. The CLI-row dispatch is by
-        // binary basename: `claude` → `ClaudeCodeCodingAgent`.
+        // The `provider_type` column on the `Provider` row is the
+        // agent-family discriminator: `"anthropic"` for HTTP rows
+        // (only family in v1) and the per-CLI-adapter family name
+        // (`"claude-code"` today) for CLI rows. The CLI-row
+        // dispatch is by binary basename: `claude` → `ClaudeCodeCodingAgent`.
         // Matching is by basename, not the full path, so a row
         // pointing at `/opt/.../claude` (a symlink or alt install)
-        // still routes to the right agent. Future CLIs (Codex,
-        // OpenCode) get their own match arms.
+        // still routes to the right agent. The `provider_type`
+        // value is essentially decorative for CLI rows — the row's
+        // stored value (e.g. `"claude-code"`) is the value the
+        // `CodingAgent::provider_type()` method returns, but the
+        // dispatcher doesn't read it. Future CLIs (Codex, OpenCode)
+        // get their own match arms and their own family names.
         let binary_path_str = provider
             .binary_path
             .as_deref()

@@ -904,6 +904,39 @@ No findings. The trait / snapshot / enum / mapper separation is the minimal viab
 
 ---
 
+### fix-070 — kind-aware Add Provider modal 400'd on `type: "claude-code"` (bug fix, 2026-06-11)
+
+**Symptom (from the user):** the kind-aware Add Provider modal (feat-052, on `http://localhost:5173/settings`) 400'd with `unsupported provider type: 'claude-code' (only 'anthropic' supported in v1)` when the user submitted a CLI provider with `binary_path: /home/novpla/.local/bin/claude` and `permission_mode: accept-edits`.
+
+**Root cause:** the early `provider_type` allowlist in `create_provider` (`api/providers.rs:82-90`, pre-fix) only accepted `"anthropic"`. The check predates the kind-aware API (feat-039) and was never widened when the CLI branch and the `claude-code` adapter (feat-051) landed, so the modal's wire payload (`type: "claude-code"` for CLI rows) was rejected at the gate. The kind-specific branches downstream (`create_http_provider` requires "anthropic"; `create_cli_provider` dispatches by binary basename and stores the column verbatim) were already prepared for the family/kind split — the bug was only at the gate.
+
+**Why CI didn't catch it:** the backend tests (`test_provider_kind_cli_crud`, `test_provider_kind_validation`) send `type: "anthropic"` for CLI rows — matching the stale design comment in `registry::create_cli_agent_from_row`. The frontend tests (`settings.test.tsx`) assert the UI sends `type: "claude-code"` — but mock the API. The two never met in CI; the live modal → live server path was the gap.
+
+**Fix (1 block in `api/providers.rs`):** widen the allowlist to `matches!(body.provider_type.as_str(), "anthropic" | "claude-code")` and update the error message to list both valid values. The kind-specific branches still enforce the family-to-kind invariant (HTTP only accepts "anthropic"; CLI accepts the CLI family names). The `Provider` table's `provider_type` column is a free-form `TEXT`; no migration needed. The downstream `create_cli_agent_from_row` ignores the column and dispatches by basename — no change.
+
+**Regression test:** `test_create_cli_provider_accepts_type_claude_code` (RED → GREEN). Locks in the feat-052 wire contract.
+
+**Doc updates:** the comment in `agent/registry.rs::create_cli_agent_from_row` (which claimed `provider_type` was `"anthropic"` for both HTTP and CLI rows) was updated to describe the post-fix family/kind split.
+
+**Why a minimal one-block change was right:** the design intent (per the now-updated comment) is that `provider_type` is the agent-family discriminator. The fix matches the wire contract to the `CodingAgent::provider_type()` return value (`"claude-code"` for `ClaudeCodeCodingAgent`, `"anthropic"` for `AnthropicAgent`). It is forward-looking: when feat-058 (Codex) and feat-059 (OpenCode) land, the allowlist extends with `"codex"` and `"opencode"`. The alternative — change the frontend to send `"anthropic"` for CLI rows — would have invalidated all 12 `settings.test.tsx` tests and required a future type-picker UI change for Codex/OpenCode. The backend widening is the durable choice.
+
+**Verification:**
+
+- `cargo test -p weave-server --lib -- api::providers::` → 23/23 pass (was 22; +1 regression test).
+- `cargo test -p weave-server` → 804/804 pass.
+- `cd web && bun run test` → 142/142 pass (`settings.test.tsx`: 12/12 still pass — wire contract test is on the mock, not the live server).
+- `./init.sh` → all 3 layers pass; server starts, real `claude --version` health-check on `/home/novpla/.local/bin/claude` succeeds (`outcome=success(0)`), `/api/health` 200, `GET /` serves index.html.
+- Live API reproduction (curl against port 3000 with the exact user payload `binary_path: /home/novpla/.local/bin/claude`, `permission_mode: accept-edits`): before fix → `400 unsupported_provider_type`; after fix → `201 Created` with the row persisted (`type: "claude-code"`, `kind: "cli"`).
+- Diff is 1 file, 67 insertions / 3 deletions (mostly the regression test and the updated comment block). No schema, migration, or test-fixture changes.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- No change to `feature_list.json` (this is a bug fix, not a feature). The bug predates feat-052's evidence; the existing `test_create_cli_provider_*` tests pass "anthropic" because that was the design at the time they were written.
+- The frontend tests' mock server should ideally assert a 201 response shape that matches the backend's real response — they currently don't, which is why the contract drift went undetected. Tightening the mock is a follow-up; the live integration is now covered by the new Rust regression test.
+- The comment in `api/providers.rs` (the one updated) used to say "the kind-specific branches below enforce the family-to-kind invariant" — that statement was already true (HTTP requires "anthropic"), it just wasn't obvious until the gate stopped hiding it.
+
+---
+
 ## Cross-Session Reference
 
 ### Completed Since Project Start (as of 2026-06-11)
