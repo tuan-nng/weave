@@ -171,9 +171,28 @@ impl ClaudeCodeCodingAgent {
     /// 1. `self.args` (per-provider flags, e.g. `--verbose`).
     /// 2. `permission_snapshot.argv_flags` (e.g. `--permission-mode plan`).
     /// 3. `--resume <cli_resume_id>` when the turn is a CLI-resume attempt.
-    /// 4. The prompt: `--prompt <text>` (argv mode is the v1 default;
-    ///    real Claude Code's `--input-format stream-json` stdin path
-    ///    is a feat-053 follow-up).
+    /// 4. `--model <request.model>`.
+    /// 5. `--verbose --output-format stream-json` (force the parser's
+    ///    expected wire format on stdout).
+    /// 6. `--print` + the prompt as the last positional arg (argv
+    ///    mode is the v1 default; real Claude Code's `--input-format
+    ///    stream-json` stdin path is a feat-053 follow-up).
+    ///
+    /// `--print` enables the real `claude` CLI's non-interactive
+    /// mode (without it, the binary is interactive by default and
+    /// blocks waiting for stdin). The prompt is delivered as a
+    /// positional argument per the real CLI's usage line
+    /// `claude [options] [command] [prompt]`. `--verbose` plus
+    /// `--output-format stream-json` are required for the CLI to
+    /// emit `{"type":"text_delta",...}` JSON events on stdout, which
+    /// `ClaudeCodeStreamParser` consumes; without them, the CLI
+    /// writes plain text the parser can't read and the assistant
+    /// turn is dropped on the floor.
+    ///
+    /// (fix-072: previously this pushed `--prompt <text>`, which
+    /// the real CLI rejects with `error: unknown option '--prompt'`,
+    /// causing every wrapped session to transition to `error` status
+    /// within ~200ms.)
     fn build_args(
         &self,
         request: &MessageRequest,
@@ -197,11 +216,25 @@ impl ClaudeCodeCodingAgent {
         // it doesn't recognize.
         out.push("--model".to_string());
         out.push(request.model.clone());
+        // Force stream-json output (the parser's wire format). The real
+        // `claude` CLI requires `--verbose` whenever `--output-format
+        // stream-json` is set; without it the CLI errors with
+        // "When using --print, --output-format=stream-json requires
+        // --verbose". `--print` is added below only when a user
+        // message is present (so the trailing positional isn't an
+        // empty arg), but `--verbose --output-format stream-json` is
+        // always set so a tool-result-only turn still produces
+        // parseable events.
+        out.push("--verbose".to_string());
+        out.push("--output-format".to_string());
+        out.push("stream-json".to_string());
         if !request.messages.is_empty() {
             // Best-effort: serialize the last user message as the
             // prompt. Real Claude Code uses `--input-format stream-json`
             // and reads from stdin in a structured way — feat-053
-            // lands that. For v1 the last user message is the prompt.
+            // lands that. For v1 the last user message is the prompt,
+            // delivered as the last positional arg under `--print`
+            // non-interactive mode.
             if let Some(last_user) = request
                 .messages
                 .iter()
@@ -209,7 +242,7 @@ impl ClaudeCodeCodingAgent {
                 .find(|m| matches!(m.role, crate::agent::Role::User))
             {
                 if let Some(text) = extract_text(&last_user.content) {
-                    out.push("--prompt".to_string());
+                    out.push("--print".to_string());
                     out.push(text);
                 }
             }
@@ -559,7 +592,8 @@ impl CodingAgent for ClaudeCodeCodingAgent {
 /// `Text` variant directly, or joins the `Text` blocks of a `Blocks`
 /// variant with `\n`. Returns `None` for purely structured content
 /// (tool_use / tool_result blocks) — the agent then omits the
-/// `--prompt` argv and the CLI sees only the structured turn.
+/// `--print <prompt>` positional argv and the CLI sees only the
+/// structured turn.
 fn extract_text(content: &crate::agent::Content) -> Option<String> {
     use crate::agent::Content;
     match content {
@@ -693,6 +727,119 @@ mod tests {
             .position(|a| a == "--resume")
             .expect("--resume present when cli_resume_id is Some");
         assert_eq!(args[resume_idx + 1], "stale-id");
+    }
+
+    /// 3a. `build_args` delivers the prompt via `--print` + positional
+    /// arg, not via a `--prompt <text>` flag pair. The real
+    /// `claude` CLI rejects `--prompt` (exit 1, `error: unknown option
+    /// '--prompt'`), which previously caused every wrapped session to
+    /// transition to `error` status within ~200ms. Regression guard
+    /// for fix-072.
+    #[test]
+    fn test_build_args_prompt_uses_print_and_positional() {
+        let registry = Arc::new(ActiveChildProcesses::new());
+        let outcomes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let agent = build_agent(PathBuf::from("/bin/true"), registry, outcomes);
+        let perm = PermissionSnapshot::empty(RuntimeKind::ClaudeCode, ToolProfile::Full);
+        let mut turn = make_test_turn_context();
+        turn.cli_resume_id = None;
+        let req = MessageRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            messages: vec![crate::agent::Message {
+                role: crate::agent::Role::User,
+                content: crate::agent::Content::Text("hello".into()),
+            }],
+            system: None,
+            max_tokens: 1024,
+            tools: None,
+        };
+
+        let args = agent.build_args(&req, &turn, &perm);
+
+        // The real `claude` CLI does not accept `--prompt`. The
+        // previous argv-shape used `--prompt <text>`, which the binary
+        // rejected with exit 1, leaving the session in `error`.
+        assert!(
+            !args.iter().any(|a| a == "--prompt"),
+            "build_args must not emit --prompt (real claude CLI rejects it), got: {args:?}"
+        );
+
+        // Force the parser's expected wire format. `--verbose` is
+        // REQUIRED by the real CLI whenever `--output-format
+        // stream-json` is set; without `--verbose` the CLI errors
+        // with "When using --print, --output-format=stream-json
+        // requires --verbose". Without `--output-format stream-json`,
+        // the CLI writes plain text that the parser can't read and
+        // the assistant turn is silently dropped.
+        assert!(
+            args.iter().any(|a| a == "--verbose"),
+            "build_args must emit --verbose (required by --output-format stream-json), got: {args:?}"
+        );
+        let of_idx = args
+            .iter()
+            .position(|a| a == "--output-format")
+            .expect("--output-format must be present");
+        assert_eq!(
+            args.get(of_idx + 1).map(String::as_str),
+            Some("stream-json"),
+            "output format must be stream-json (the parser's wire format), got: {args:?}"
+        );
+
+        // Non-interactive mode: `--print` enables `claude`'s
+        // print-and-exit behavior (otherwise the binary is interactive
+        // by default and would block waiting for stdin).
+        assert!(
+            args.iter().any(|a| a == "--print"),
+            "build_args must emit --print to enable non-interactive mode, got: {args:?}"
+        );
+
+        // The prompt is the last positional arg (no flag prefix). The
+        // real `claude` CLI's usage is `claude [options] [command]
+        // [prompt]`; the prompt is positional.
+        let last = args
+            .last()
+            .expect("at least one positional arg (the prompt)");
+        assert_eq!(
+            last, "hello",
+            "the last positional arg should be the user prompt, got: {last:?} in {args:?}"
+        );
+    }
+
+    /// 3b. When the request has no user message, `build_args` does
+    /// NOT emit `--print` or a positional prompt — but it DOES
+    /// still emit `--verbose --output-format stream-json` so any
+    /// tool-result events the CLI emits are parseable. (E.g. a
+    /// tool-result-only turn.)
+    #[test]
+    fn test_build_args_omits_positional_prompt_when_no_user_message() {
+        let registry = Arc::new(ActiveChildProcesses::new());
+        let outcomes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let agent = build_agent(PathBuf::from("/bin/true"), registry, outcomes);
+        let perm = PermissionSnapshot::empty(RuntimeKind::ClaudeCode, ToolProfile::Full);
+        let turn = make_test_turn_context();
+        let req = MessageRequest {
+            model: "m".into(),
+            messages: vec![],
+            system: None,
+            max_tokens: 1024,
+            tools: None,
+        };
+
+        let args = agent.build_args(&req, &turn, &perm);
+
+        assert!(
+            !args.iter().any(|a| a == "--prompt"),
+            "no --prompt (regression guard) when no user message, got: {args:?}"
+        );
+        // No `--print` either, since the trigger to add the prompt
+        // is the existence of a user message. (`--print` is
+        // `--print <positional>`; without a positional it's a
+        // no-op flag and would still trigger non-interactive mode,
+        // which we don't want for tool-result-only turns.)
+        assert!(
+            !args.iter().any(|a| a == "--print"),
+            "no --print when no user message, got: {args:?}"
+        );
     }
 
     /// 4. `build_env` merges provider env with permission env (permission wins).

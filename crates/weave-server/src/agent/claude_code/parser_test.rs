@@ -282,6 +282,91 @@ fn test_claude_code_parser_done_stop_reason() {
 }
 
 // ---------------------------------------------------------------------------
+// 6b. test_claude_code_parser_real_cli_assistant_text — real Claude Code
+//     `--output-format stream-json` emits `assistant` lines with
+//     `message.content[]` blocks; the parser must flatten text blocks
+//     into TextDelta. Regression guard for fix-072: previously the
+//     parser didn't recognize `assistant` and the response was dropped.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_claude_code_parser_real_cli_assistant_text() {
+    let mut p = ClaudeCodeStreamParser::new();
+
+    // A typical real-CLI assistant line: a single text content block.
+    let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi!"}]},"session_id":"sess-1"}"#;
+    let r = p.feed_line(line).unwrap().expect("assistant emits");
+    assert_eq!(
+        r,
+        vec![StreamEvent::TextDelta {
+            text: "hi!".to_string()
+        }],
+        "text content block should produce a TextDelta"
+    );
+
+    // The session_id from the assistant event should be captured
+    // passively (mirrors the fake's `session_id` event contract).
+    assert_eq!(p.session_id(), Some("sess-1"));
+}
+
+// ---------------------------------------------------------------------------
+// 6c. test_claude_code_parser_real_cli_assistant_thinking — the real
+//     CLI also emits `thinking` content blocks. They should produce
+//     a Thinking event the same way the fake's top-level `thinking`
+//     line does.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_claude_code_parser_real_cli_assistant_thinking() {
+    let mut p = ClaudeCodeStreamParser::new();
+    let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"the user said hi, I should respond briefly"}]}}"#;
+    let r = p.feed_line(line).unwrap().expect("thinking emits");
+    assert_eq!(
+        r,
+        vec![StreamEvent::Thinking {
+            text: "the user said hi, I should respond briefly".to_string()
+        }]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6d. test_claude_code_parser_real_cli_result_success — the real CLI's
+//     final per-turn event is `result` (not `done`). `is_error=false`
+//     maps to Done with the `stop_reason` from the event.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_claude_code_parser_real_cli_result_success() {
+    let mut p = ClaudeCodeStreamParser::new();
+    let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"hi!","stop_reason":"end_turn","session_id":"sess-2"}"#;
+    let r = p.feed_line(line).unwrap().expect("result emits");
+    assert_eq!(
+        r,
+        vec![StreamEvent::Done {
+            stop_reason: StopReason::EndTurn
+        }],
+        "successful result should produce Done(end_turn)"
+    );
+    assert_eq!(p.session_id(), Some("sess-2"));
+}
+
+// ---------------------------------------------------------------------------
+// 6e. test_claude_code_parser_real_cli_result_error — `is_error=true`
+//     produces an Error event. (Used for permission-denied, resume
+//     rejections, etc. when the real CLI reports them as a result.)
+// ---------------------------------------------------------------------------
+#[test]
+fn test_claude_code_parser_real_cli_result_error() {
+    let mut p = ClaudeCodeStreamParser::new();
+    let line = r#"{"type":"result","subtype":"error","is_error":true,"error":"permission denied","session_id":"sess-3"}"#;
+    let r = p.feed_line(line).unwrap().expect("error result emits");
+    assert_eq!(
+        r,
+        vec![StreamEvent::Error {
+            message: "permission denied".to_string()
+        }],
+        "is_error=true should produce an Error"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 7. test_claude_code_parser_malformed_line_skipped — parser never aborts on
 //    bad input; it keeps consuming subsequent valid lines.
 // ---------------------------------------------------------------------------

@@ -1505,3 +1505,58 @@ Phase 9, second feature. The session page (`/sessions/:id`) now renders one of t
 - A2A `messages.rs:240,264` has the same cold-cache pattern — `cached_health_for` reads on a potentially-cold cache when picking the provider for an A2A `send_message`. The A2A path needs the same warm-up (or a fall-back-to-env-default, which it already has per feat-056's `state.a2a_default_runtime_kind` graceful degradation). The current A2A behavior is a softer fail (the env-default kicks in) than the wizard's hard fail, so the user impact is lower. Logged for the next A2A touch.
 - `AnthropicAgent::health_check` has no per-request timeout — it relies on the reqwest client's 300s default. After this fix, every `list_providers` call on a cold cache probes every registered HTTP agent in parallel; if any one of them points at a black-holed URL, the probe can hang for 300s. The ClaudeCodeCodingAgent's probe has a 5s `tokio::time::timeout` wrap (`agent/claude_code/agent.rs:519-526`); the AnthropicAgent's should mirror that. Not a regression from this fix (`/api/health` had the same problem), but the fix widens the surface from "external monitoring hits it" to "every user on every list hits it". Follow-up: add a per-probe timeout inside `cached_health_summary` so a single hung agent can't block the whole list response.
 - No `feature_list.json` entry for this fix (bug fix, not a feature; matches the fix-070 precedent). The `PROGRESS.md` "Latest commit" and "Out-of-Scope Items Noticed" sections get updated to reflect the new fix-071 hash.
+
+### fix-072 — Wrapped `claude-code` sessions errored in ~200ms with `unknown option '--prompt'` and never produced an assistant turn (bug fix, 2026-06-12)
+
+**Symptom (from the user):** on `http://localhost:5173/sessions/3a797b81-f89b-426f-9a05-a7e01ca90ba4` the session showed status `Error`, the chat input read `Session has ended` (disabled), the `Send` button was disabled, and only the user "hello" message was visible. The DB confirmed: `status=error` at `2026-06-12T05:52:18`, ~9s after create; 0 assistant messages. The user could not interact further with the session.
+
+**Root cause:** `ClaudeCodeCodingAgent::build_args` (`crates/weave-server/src/agent/claude_code/agent.rs:212`, pre-fix) constructed the subprocess argv as `["--permission-mode", "bypassPermissions", "--model", "claude-sonnet-4-20250514", "--prompt", "hello"]`. The real `claude` CLI does not accept `--prompt` (its usage line is `claude [options] [command] [prompt]` — the prompt is a positional, not a flag value, and the `--print`/`-p` flag is required for non-interactive mode). The CLI rejected the args with `error: unknown option '--prompt' (Did you mean one of --from-pr, --print?)`, exited 1 within ~200ms, the agent mapped that to `StreamEvent::Error + Done(Cancelled)`, and `SessionService` transitioned the row to `error`. Both the doc comment at the old line 174 ("`--prompt <text>` (argv mode is the v1 default; ...)") and the `docs/road-map/multi-runtime-tasks.md:557` design entry codified the wrong flag name, so the bug was self-reinforcing across code and docs.
+
+**Affected invariant:** the v1 design assumed the real `claude` CLI's argv shape matched what `fake_cli` (the conformance fixture in `bin/fake_cli.rs`) accepted. `fake_cli` deliberately ignores unknown flags (`parse_args` at `fake_cli.rs:104-113` only handles `--resume`), so every conformance test using the fake passed regardless of the wrong flag. The real CLI is the production target; the fake only models it for unit-test speed.
+
+**Why CI didn't catch it:** three layers of blindness, in order of severity:
+1. The `fake_cli` test harness (`crates/weave-server/src/bin/fake_cli.rs:97-99` — "unknown flags are silently ignored") was the only binary the conformance suite ever exercised. No test ever invoked the real `claude` binary, so the wrong flag was never validated end-to-end.
+2. The existing `test_build_args_resume_flag` (`agent.rs:662`) only asserts on `--resume`. It never inspects the prompt-flag path, so the wrong shape was never asserted against.
+3. The pre-fix doc comment and the design doc both stated `--prompt <text>` is the right shape, so reviewers (me, earlier) treated it as a fact.
+
+**Fix (3 logical changes across 3 files):**
+
+1. **`agent.rs::build_args`** — replace `--prompt <text>` with `--print <text>` (positional) and unconditionally add `--verbose --output-format stream-json` (the real CLI requires `--verbose` for `stream-json` and `stream-json` is the wire format the parser consumes; without these, the CLI writes plain text the parser can't read and the assistant turn is silently dropped on the floor even though the CLI exits 0).
+
+2. **`parser.rs::ClaudeCodeStreamParser::feed_line`** — add two new match arms + their handler methods for the real CLI's `assistant` and `result` event types:
+   - `handle_real_assistant` flattens Anthropic-API-shaped `message.content[]` blocks (text → `TextDelta`, thinking → `Thinking`, tool_use → register in the in-flight map for deferred emission at `result`).
+   - `handle_real_result` maps `is_error=true` → `Error`, `is_error=false` → `Done` with the event's `stop_reason`. Also flushes any pending `ToolUseStart`s (mirrors the fake's `done` arm).
+   - Captures the real CLI's `session_id` passively from any event that carries it (the real CLI emits it on every `system` / `assistant` / `result` line; the fake's `session_id` line is captured in the existing arm).
+
+3. **`agent.rs::build_args` docstring** + **`parser.rs::feed_line` docstring** — document the two wire formats (fake + real) so a future agent author doesn't reintroduce the same drift.
+
+**Regression tests (6 new, all deterministic — no real network):**
+- `test_build_args_prompt_uses_print_and_positional` (RED → GREEN) — asserts (a) no `--prompt` in argv, (b) `--verbose` present, (c) `--output-format stream-json` follows `--output-format`, (d) `--print` present, (e) the last positional arg equals the user prompt text.
+- `test_build_args_omits_positional_prompt_when_no_user_message` — tool-result-only turns must NOT push `--print` (no positional to attach) but still push `--verbose --output-format stream-json` so any tool-result events the CLI emits are parseable.
+- `test_claude_code_parser_real_cli_assistant_text` — `assistant` line with a `text` content block → `TextDelta`, plus passive session_id capture from the line.
+- `test_claude_code_parser_real_cli_assistant_thinking` — `assistant` line with a `thinking` content block → `Thinking`.
+- `test_claude_code_parser_real_cli_result_success` — `result` line with `is_error=false` → `Done(EndTurn)`, session_id captured.
+- `test_claude_code_parser_real_cli_result_error` — `result` line with `is_error=true` + `error="..."` → `Error`.
+
+The existing 16 fake-CLI parser tests + `test_build_args_resume_flag` + the 18-name conformance suite all still pass — the new arms are additive (the fake's flat `text_delta` / `tool_use` / `done` event names continue to work).
+
+**Verification:**
+
+- `cargo test -p weave-server --lib -- agent::claude_code::` → 41/41 pass (was 36; +5 from this fix; the 6th is the new build_args test in the `agent::` root test mod).
+- `cargo test -p weave-server` → 828/828 pass (was 824; +4 new tests in the agent module).
+- `cargo test -p weave-server --test cli_conformance` → 18/18 pass (the conformance suite is still running against `fake_cli`; nothing in this fix changes that contract).
+- `cargo fmt --check` clean; `cargo clippy --all-targets` reports 0 new warnings.
+- `cd web && bun run test` → 142/142 pass.
+- `./init.sh` → all 3 layers pass; server starts, `/api/health` 200, `GET /` serves `index.html`.
+- Live CLI reproduction (curl against the running server on port 3000, with the live `claude` CLI provider row):
+  - **Before fix** (the original user-reported session `3a797b81-...`): server log shows `cli_turn_start ... args=["--permission-mode", "bypassPermissions", "--model", "claude-sonnet-4-20250514", "--prompt", "hello"]`, then `cli_turn_end ... outcome=exit_error(1)`, then the `claude_code::agent` warn `claude_code: subprocess exited non-zero; emitting Error + Cancelled Done ... stderr=error: unknown option '--prompt' (Did you mean one of --from-pr, --print?)`, then `service::sessions` `agent stream error` and the row transitions to `error`.
+  - **After fix** (fresh session `8ce18e63-...`): server log shows `cli_turn_start ... args=["--permission-mode", "bypassPermissions", "--model", "claude-sonnet-4-20250514", "--verbose", "--output-format", "stream-json", "--print", "say hi in 3 words"]`, then `cli_turn_end ... outcome=success(0)`, then the parser consumes the real `assistant` / `result` events and persists `assistant` message `Hey there, friend!`. Browser screenshot (`/tmp/shots/screenshot-1781246161495.png`) shows the session with status `Ready` (green), the user "what can you do?" followed by the assistant response, and the `Resume: native` badge confirming the real CLI's session id was captured.
+
+**Why a minimal change was right:** the `fake_cli` fixture is still useful for fast, deterministic unit tests of the conformance suite — the new arms are additive, not replacements, so the existing test discipline survives. The fix targets exactly the layers that drifted (the argv shape and the parser's recognized event types) without touching the agent-loop, the session state machine, or the SSE wire format (the `StreamEvent` enum is unchanged). The feat-053 follow-up (real `--input-format stream-json` stdin path) is still out of scope; this fix makes the v1 argv path actually work.
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- The `docs/road-map/multi-runtime-tasks.md:557` paragraph still says "`argv` mode reads the prompt from `--prompt <text>`". Codifies the wrong shape; should be `--print <text>` (positional) + `--verbose --output-format stream-json`. A future docs pass should fix it; not in this fix's footprint.
+- `AnthropicAgent::health_check` per-probe timeout is still missing (logged in fix-071). Not in this fix's footprint.
+- No `feature_list.json` entry for this fix (bug fix, not a feature; matches the fix-070/fix-071 precedent).
+- Diff is 4 files, +373 / -6 (mostly the parser's new handler bodies and their doc-comment blocks; the argv-shape change itself is a single character swap in spirit and a 6-line add for `stream-json`/`verbose`).

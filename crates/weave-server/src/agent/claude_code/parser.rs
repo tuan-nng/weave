@@ -120,6 +120,20 @@ impl ClaudeCodeStreamParser {
     /// singleton. Returns `vec![ToolUseStart, Done]` (in that order)
     /// on `done` when one or more `tool_use`s were in flight.
     ///
+    /// Two wire formats are accepted (fix-072):
+    ///
+    /// 1. **Fake CLI** (the conformance harness in `bin/fake_cli.rs`):
+    ///    flat top-level `text_delta` / `tool_use` / `thinking` /
+    ///    `done` / `error` events. Kept for the conformance suite so
+    ///    `tests/cli_conformance.rs` can exercise the parser without
+    ///    spawning a real `claude` binary.
+    /// 2. **Real Claude Code** (`--output-format stream-json`): the
+    ///    Anthropic-API-shaped `assistant.message.content[]` blocks
+    ///    and a final `result` event. The real `claude` CLI is the
+    ///    production target; without these handlers, every wrapped
+    ///    session's response is dropped because the parser doesn't
+    ///    recognize `assistant` / `result` event types.
+    ///
     /// Malformed JSON and unknown event types are logged at WARN and
     /// produce an empty result — the parser NEVER aborts on bad input.
     /// The `Result::Err` variant is reserved for symmetry with
@@ -139,6 +153,16 @@ impl ClaudeCodeStreamParser {
         };
 
         let ty = v.get("type").and_then(Value::as_str);
+        // Real CLI: `system`, `assistant`, and `result` events all
+        // carry a top-level `session_id` (the real CLI mirrors
+        // Anthropic's API shape). Capture it passively the first
+        // time it appears — the fake CLI's `session_id` event is
+        // captured in the match arm below. (fix-072)
+        if self.session_id.is_none() {
+            if let Some(id) = v.get("session_id").and_then(Value::as_str) {
+                self.session_id = Some(id.to_string());
+            }
+        }
         match ty {
             Some("session_id") => {
                 // Capture but emit nothing.
@@ -222,6 +246,16 @@ impl ClaudeCodeStreamParser {
                 events.push(StreamEvent::Done { stop_reason });
                 Ok(Some(events))
             }
+            // Real `claude` CLI (`--output-format stream-json`): each
+            // `assistant` line carries a full Anthropic-API-shaped
+            // `message.content[]` array. Translate each block into
+            // the existing `StreamEvent` variants the agent loop
+            // already knows how to consume. (fix-072)
+            Some("assistant") => Ok(self.handle_real_assistant(&v)),
+            // Real CLI: final per-turn event. `is_error=true` maps
+            // to `Error`; `is_error=false` maps to `Done` with the
+            // `stop_reason` from the event. (fix-072)
+            Some("result") => Ok(self.handle_real_result(&v)),
             Some(other) => {
                 warn!(
                     event_type = %other,
@@ -384,6 +418,106 @@ impl ClaudeCodeStreamParser {
                 }
             })
             .collect()
+    }
+
+    /// Handle a real-Claude-Code `assistant` line. Each line carries
+    /// a full Anthropic-API-shaped `message.content[]` array. We
+    /// flatten it into one or more `StreamEvent`s the agent loop
+    /// already knows how to consume (TextDelta / Thinking /
+    /// ToolUseStart). Returns `None` when the line carries no
+    /// usable blocks (e.g. an empty content array or only unknown
+    /// block types). (fix-072)
+    fn handle_real_assistant(&mut self, v: &Value) -> Option<Vec<StreamEvent>> {
+        let content = v.get("message")?.get("content")?.as_array()?;
+        if content.is_empty() {
+            return None;
+        }
+        let mut out: Vec<StreamEvent> = Vec::with_capacity(content.len());
+        for block in content {
+            let block_type = block.get("type").and_then(Value::as_str);
+            match block_type {
+                Some("text") => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        out.push(StreamEvent::TextDelta {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                        out.push(StreamEvent::Thinking {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+                Some("tool_use") => {
+                    // Register in the in-flight map (same path the
+                    // fake-CLI `tool_use` line takes) so the
+                    // `Done` / `result` flush emits the assembled
+                    // `ToolUseStart`. The real CLI doesn't emit
+                    // `input_json_delta` lines, so the assembled
+                    // `input` is the block's `input` field verbatim.
+                    self.register_tool_use(block);
+                }
+                _ => {
+                    // Unknown content block type (e.g. `tool_result`
+                    // when the user pasted a user-role message). The
+                    // real CLI doesn't surface these in `assistant`
+                    // events; tool results arrive on `user` events,
+                    // not handled here. Skip silently.
+                }
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// Handle a real-Claude-Code `result` line. The fake CLI's
+    /// `done` event was a separate line; the real CLI folds
+    /// `done` and the per-turn metadata into a single `result`
+    /// event. `is_error=true` maps to `Error`; `is_error=false`
+    /// maps to `Done` with the `stop_reason` (defaulting to
+    /// `EndTurn` for the unknown case, matching the fake's
+    /// fallback). Flushes any pending deferred `ToolUseStart`s
+    /// first so multi-tool turns surface the assembled blocks
+    /// before the `Done`. (fix-072)
+    fn handle_real_result(&mut self, v: &Value) -> Option<Vec<StreamEvent>> {
+        // Capture the session_id from the result event if we
+        // haven't seen one yet. The real CLI emits it on every
+        // event, but the first one we parse is the most useful
+        // (matches the fake's "always first" contract).
+        if self.session_id.is_none() {
+            if let Some(id) = v.get("session_id").and_then(Value::as_str) {
+                self.session_id = Some(id.to_string());
+            }
+        }
+
+        let is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+        let mut events = self.flush_pending();
+        if is_error {
+            let message = v
+                .get("error")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .or_else(|| {
+                    v.get("result")
+                        .and_then(Value::as_str)
+                        .map(|r| format!("claude_code error: {r}"))
+                })
+                .unwrap_or_else(|| "claude_code: result event with is_error=true".to_string());
+            events.push(StreamEvent::Error { message });
+        } else {
+            let stop_reason = v
+                .get("stop_reason")
+                .and_then(Value::as_str)
+                .map(map_stop_reason)
+                .unwrap_or(StopReason::EndTurn);
+            events.push(StreamEvent::Done { stop_reason });
+        }
+        Some(events)
     }
 }
 
