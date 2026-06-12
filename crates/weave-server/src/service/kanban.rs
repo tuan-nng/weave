@@ -274,6 +274,11 @@ fn empty_update() -> UpdateTask {
         acceptance_criteria: None,
         completion_summary: None,
         verification_report: None,
+        priority: None,
+        labels: None,
+        scope: None,
+        verification_commands: None,
+        test_cases: None,
     }
 }
 
@@ -428,6 +433,11 @@ mod tests {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
             created_at: "2026-06-02T00:00:00Z".into(),
             updated_at: "2026-06-02T00:00:00Z".into(),
         }

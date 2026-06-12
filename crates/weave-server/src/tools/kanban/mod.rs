@@ -23,28 +23,29 @@ pub mod create_card;
 pub mod get_board;
 pub mod move_card;
 pub mod search_cards;
+pub mod update_card;
+pub mod update_task;
 
 pub use create_card::CreateCardTool;
 pub use get_board::GetBoardTool;
 pub use move_card::MoveCardTool;
 pub use search_cards::SearchCardsTool;
+pub use update_card::UpdateCardTool;
+pub use update_task::UpdateTaskTool;
 
 #[cfg(test)]
 mod tests {
-    //! Verification-gate tests for feat-028.
+    //! Verification-gate tests for feat-028 (original 4 tools) and
+    //! feat-064 (update_card + update_task + wiring of list_artifacts,
+    //! provide_artifact, create_note).
     //!
-    //! The two tests in this module are the named verification targets
-    //! from `feature_list.json`:
-    //!
-    //! - `test_kanban_tools` — exercises all four tool executors in a
-    //!   single fixture: `get_board`, `create_card`, `search_cards`,
-    //!   `move_card`. This proves the tools are registered, callable,
-    //!   and return the expected shapes.
+    //! - `test_kanban_tools` — exercises all 5 kanban tools in a single
+    //!   fixture: get_board, create_card, search_cards, move_card,
+    //!   update_card, update_task, plus list_artifacts, provide_artifact,
+    //!   create_note.
     //! - `test_move_card_transition_gates` — exercises each transition
     //!   gate (description frozen on exit, required fields on entry) as
-    //!   well as the "all gates pass" happy path. This is the heart of
-    //!   the spec line `move_card (enforces transition gates — required
-    //!   artifacts, required fields, description frozen from dev stage)`.
+    //!   well as the "all gates pass" happy path.
     use super::*;
     use crate::store::columns::ColumnStore;
     use crate::store::kanban_test_helpers::{make_test_db, seed_workspace_with_board};
@@ -134,7 +135,79 @@ mod tests {
         assert!(r.success, "move_card: {:?}", r.error);
         assert_eq!(r.data["task"]["column_id"], dest_cid);
 
-        // 8. cross-workspace defense: a stale workspace_id in ctx
+        // 8. update_card — update priority and labels on the card.
+        let update_card = UpdateCardTool { db: db.clone() };
+        let r = update_card
+            .execute(
+                json!({
+                    "card_id": new_card_id,
+                    "priority": "high",
+                    "labels": "[\"backend\"]"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "update_card: {:?}", r.error);
+        assert_eq!(r.data["task"]["priority"], "high");
+        assert_eq!(r.data["task"]["labels"], "[\"backend\"]");
+
+        // 9. update_task — set acceptance_criteria and scope.
+        let update_task = UpdateTaskTool { db: db.clone() };
+        let r = update_task
+            .execute(
+                json!({
+                    "task_id": new_card_id,
+                    "acceptance_criteria": "All tools return expected shapes",
+                    "scope": "Backend kanban tool set"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "update_task: {:?}", r.error);
+        assert_eq!(
+            r.data["task"]["acceptance_criteria"],
+            "All tools return expected shapes"
+        );
+        assert_eq!(r.data["task"]["scope"], "Backend kanban tool set");
+
+        // 10. provide_artifact — attach evidence to the card.
+        let provide = crate::tools::artifact::ProvideArtifactTool { db: db.clone() };
+        let r = provide
+            .execute(
+                json!({
+                    "task_id": new_card_id,
+                    "type": "test_results",
+                    "content": "844 Rust tests pass"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "provide_artifact: {:?}", r.error);
+        let artifact_id = r.data["artifact"]["id"].as_str().unwrap();
+
+        // 11. list_artifacts — verify the artifact is there.
+        let list = crate::tools::artifact::ListArtifactsTool { db: db.clone() };
+        let r = list.execute(json!({"task_id": new_card_id}), &ctx).await;
+        assert!(r.success, "list_artifacts: {:?}", r.error);
+        assert_eq!(r.data["count"], 1);
+        assert_eq!(r.data["artifacts"][0]["id"], artifact_id);
+
+        // 12. create_note — create a workspace note.
+        let create_note = crate::tools::note::CreateNoteTool { db: db.clone() };
+        let r = create_note
+            .execute(
+                json!({
+                    "title": "feat-064 notes",
+                    "type": "task",
+                    "content": "Two new tools wired"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(r.success, "create_note: {:?}", r.error);
+        assert_eq!(r.data["note"]["title"], "feat-064 notes");
+
+        // 13. cross-workspace defense: a stale workspace_id in ctx
         //    makes every read fail with NotFound. Use a fresh context
         //    with a workspace the seeded board does NOT belong to.
         let other_ctx = make_context_for_workspace(tmp.path(), "some-other-ws");

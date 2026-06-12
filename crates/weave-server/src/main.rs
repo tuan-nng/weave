@@ -175,6 +175,8 @@ fn build_tool_registry(db: Arc<db::Db>) -> tools::ToolRegistry {
     tool_registry.register(Arc::new(tools::kanban::CreateCardTool { db: db.clone() }));
     tool_registry.register(Arc::new(tools::kanban::SearchCardsTool { db: db.clone() }));
     tool_registry.register(Arc::new(tools::kanban::MoveCardTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::kanban::UpdateCardTool { db: db.clone() }));
+    tool_registry.register(Arc::new(tools::kanban::UpdateTaskTool { db: db.clone() }));
     tool_registry.register(Arc::new(tools::artifact::RequestArtifactTool {
         db: db.clone(),
     }));

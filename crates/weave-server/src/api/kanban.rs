@@ -119,6 +119,11 @@ pub struct UpdateTaskRequest {
     pub acceptance_criteria: Option<Option<String>>,
     pub completion_summary: Option<Option<String>>,
     pub verification_report: Option<Option<String>>,
+    pub priority: Option<String>,
+    pub labels: Option<Option<String>>,
+    pub scope: Option<Option<String>>,
+    pub verification_commands: Option<Option<String>>,
+    pub test_cases: Option<Option<String>>,
 }
 
 impl From<UpdateTaskRequest> for UpdateTask {
@@ -133,6 +138,11 @@ impl From<UpdateTaskRequest> for UpdateTask {
             acceptance_criteria: r.acceptance_criteria,
             completion_summary: r.completion_summary,
             verification_report: r.verification_report,
+            priority: r.priority,
+            labels: r.labels,
+            scope: r.scope,
+            verification_commands: r.verification_commands,
+            test_cases: r.test_cases,
         }
     }
 }

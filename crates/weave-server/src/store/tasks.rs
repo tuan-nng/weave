@@ -44,6 +44,11 @@ pub struct Task {
     pub acceptance_criteria: Option<String>,
     pub completion_summary: Option<String>,
     pub verification_report: Option<String>,
+    pub priority: Option<String>,
+    pub labels: Option<String>,
+    pub scope: Option<String>,
+    pub verification_commands: Option<String>,
+    pub test_cases: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -75,6 +80,11 @@ pub struct UpdateTask {
     pub acceptance_criteria: Option<Option<String>>,
     pub completion_summary: Option<Option<String>>,
     pub verification_report: Option<Option<String>>,
+    pub priority: Option<String>,
+    pub labels: Option<Option<String>>,
+    pub scope: Option<Option<String>>,
+    pub verification_commands: Option<Option<String>>,
+    pub test_cases: Option<Option<String>>,
 }
 
 /// Stateless store for task persistence.
@@ -86,12 +96,14 @@ pub struct TaskStore;
 /// Columns selected from the tasks table (aliased as `t` for JOINs).
 const SELECT_COLS: &str = "t.id, t.board_id, t.column_id, t.title, t.description, \
     t.position, t.status, t.session_id, t.acceptance_criteria, t.completion_summary, \
-    t.verification_report, t.created_at, t.updated_at";
+    t.verification_report, t.priority, t.labels, t.scope, t.verification_commands, \
+    t.test_cases, t.created_at, t.updated_at";
 
 /// Columns for RETURNING clause (no table alias needed).
 const RETURNING_COLS: &str = "id, board_id, column_id, title, description, \
     position, status, session_id, acceptance_criteria, completion_summary, \
-    verification_report, created_at, updated_at";
+    verification_report, priority, labels, scope, verification_commands, \
+    test_cases, created_at, updated_at";
 
 impl TaskStore {
     /// Insert a new task. `position` is auto-assigned when `None` (max+POSITION_STEP).
@@ -135,9 +147,11 @@ impl TaskStore {
 
         db.conn()
             .query_row(
-                "INSERT INTO tasks (id, board_id, column_id, title, description, position, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-                 RETURNING id, board_id, column_id, title, description, position, status, session_id, acceptance_criteria, completion_summary, verification_report, created_at, updated_at",
+                &format!(
+                    "INSERT INTO tasks (id, board_id, column_id, title, description, position, status, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                     RETURNING {RETURNING_COLS}"
+                ),
                 rusqlite::params![id, board_id, column_id, title, description, pos, status, now],
                 Self::map_row,
             )
@@ -436,6 +450,11 @@ impl TaskStore {
             && fields.acceptance_criteria.is_none()
             && fields.completion_summary.is_none()
             && fields.verification_report.is_none()
+            && fields.priority.is_none()
+            && fields.labels.is_none()
+            && fields.scope.is_none()
+            && fields.verification_commands.is_none()
+            && fields.test_cases.is_none()
         {
             return Self::get_by_id(db, task_id, workspace_id);
         }
@@ -487,6 +506,31 @@ impl TaskStore {
         if let Some(ref vr) = fields.verification_report {
             sets.push(format!("verification_report = ?{idx}"));
             params.push(Box::new(vr.clone()));
+            idx += 1;
+        }
+        if let Some(ref p) = fields.priority {
+            sets.push(format!("priority = ?{idx}"));
+            params.push(Box::new(p.clone()));
+            idx += 1;
+        }
+        if let Some(ref l) = fields.labels {
+            sets.push(format!("labels = ?{idx}"));
+            params.push(Box::new(l.clone()));
+            idx += 1;
+        }
+        if let Some(ref sc) = fields.scope {
+            sets.push(format!("scope = ?{idx}"));
+            params.push(Box::new(sc.clone()));
+            idx += 1;
+        }
+        if let Some(ref vc) = fields.verification_commands {
+            sets.push(format!("verification_commands = ?{idx}"));
+            params.push(Box::new(vc.clone()));
+            idx += 1;
+        }
+        if let Some(ref tc) = fields.test_cases {
+            sets.push(format!("test_cases = ?{idx}"));
+            params.push(Box::new(tc.clone()));
             idx += 1;
         }
 
@@ -641,8 +685,13 @@ impl TaskStore {
             acceptance_criteria: row.get(8)?,
             completion_summary: row.get(9)?,
             verification_report: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
+            priority: row.get(11)?,
+            labels: row.get(12)?,
+            scope: row.get(13)?,
+            verification_commands: row.get(14)?,
+            test_cases: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
         })
     }
 }
@@ -1096,6 +1145,11 @@ mod tests {
             acceptance_criteria: Some(Some("AC".into())),
             completion_summary: Some(Some("CS".into())),
             verification_report: Some(Some("VR".into())),
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
         };
         let updated = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
         assert_eq!(updated.title, "New title");
@@ -1123,6 +1177,11 @@ mod tests {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
         };
         let unchanged = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
         assert_eq!(unchanged.id, task.id);
@@ -1144,6 +1203,11 @@ mod tests {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
         };
         let result = TaskStore::update(&db, &task.id, &ws, &update);
         assert!(matches!(
@@ -1168,6 +1232,11 @@ mod tests {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
         };
         TaskStore::update(&db, &task.id, &ws, &first).unwrap();
         // Now only change title
@@ -1181,6 +1250,11 @@ mod tests {
             acceptance_criteria: None,
             completion_summary: None,
             verification_report: None,
+            priority: None,
+            labels: None,
+            scope: None,
+            verification_commands: None,
+            test_cases: None,
         };
         let updated = TaskStore::update(&db, &task.id, &ws, &second).unwrap();
         assert_eq!(updated.title, "Renamed");
