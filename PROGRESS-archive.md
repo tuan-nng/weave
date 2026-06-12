@@ -15,7 +15,7 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
-### feat-063 — Rich kanban auto-spawn prompt (phase-12, uncommitted, this session)
+### feat-063 — Rich kanban auto-spawn prompt (phase-12, committed `957d509` 2026-06-12)
 
 Phase-12 step 1: a structured 12-slot prompt for auto-spawned kanban sessions. Replaces the 3-line `build_initial_prompt` shim with a builder that emits column/board context, lane history, and per-gate status so the agent knows where it is, what's blocking the next move, and what the previous lane did.
 
