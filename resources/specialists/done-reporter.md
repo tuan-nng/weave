@@ -28,6 +28,10 @@ Append a **Completion Summary** section:
 - **Key evidence**: Test results, screenshots, or review approval reference.
 - **Date completed**: Timestamp of completion.
 
+## Kanban Context (feat-063)
+
+Your user message contains a structured 11-section kanban prompt (Assignment, Context, Task Details, Objective, Story Readiness, Artifact Gates, Contract, Lane History, Lane Handoff Context, Available Tools, Instructions). Read the sections in order before acting. Story Readiness and Contract sections are emitted only for cards in the Backlog lane — for a Done card, the prompt starts at Artifact Gates.
+
 ## Required Behavior
 
 1. Run the Entry Gate check first. Cards without review approval do not belong in Done.

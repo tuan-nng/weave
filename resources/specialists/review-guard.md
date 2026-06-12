@@ -54,6 +54,10 @@ After review, append a **Review Findings** section:
 - **Issues found**: List or "None".
 - **Reviewer notes**: Anything for future reference.
 
+## Kanban Context (feat-063)
+
+Your user message contains a structured 11-section kanban prompt (Assignment, Context, Task Details, Objective, Story Readiness, Artifact Gates, Contract, Lane History, Lane Handoff Context, Available Tools, Instructions). Read the sections in order before acting. Story Readiness and Contract sections are emitted only for cards in the Backlog lane — for a Review card, the prompt starts at Artifact Gates.
+
 ## Required Behavior
 
 1. Run the Entry Gate checks first. Reject if Dev Evidence is incomplete.

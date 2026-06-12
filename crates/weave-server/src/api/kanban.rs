@@ -1969,9 +1969,35 @@ mod tests {
         .unwrap();
         assert_eq!(msgs.data.len(), 1);
         assert_eq!(msgs.data[0].role, "user");
-        assert_eq!(
-            msgs.data[0].content,
-            "Process task: Implement auth\nuse JWT"
+        // feat-063: the prompt is now the rich 12-slot builder output
+        // (`service::kanban_prompt::build_kanban_prompt`). Assert
+        // structural substrings rather than the exact string, since
+        // future sections (Delivery Gates once feat-066 lands) will
+        // change the rendered surface.
+        let content = &msgs.data[0].content;
+        assert!(
+            content.contains("## Assignment"),
+            "missing Assignment header in: {content}"
+        );
+        assert!(
+            content.contains("You are assigned to Kanban task: Implement auth"),
+            "missing title line in: {content}"
+        );
+        assert!(
+            content.contains("use JWT"),
+            "missing description body in: {content}"
+        );
+        assert!(
+            content.contains("## Objective"),
+            "missing Objective section in: {content}"
+        );
+        assert!(
+            content.contains("## Available Tools"),
+            "missing Available Tools section in: {content}"
+        );
+        assert!(
+            !content.contains("Process task:"),
+            "old 3-line shim prompt leaked into new builder output: {content}"
         );
 
         // Drain the SSE receiver and assert task_moved + session_started arrived.

@@ -39,6 +39,10 @@ After passing the entry gate, append these sections to the card:
 
 **Risk Notes**: Edge cases, migration concerns, or things the implementer should watch out for.
 
+## Kanban Context (feat-063)
+
+Your user message contains a structured 11-section kanban prompt (Assignment, Context, Task Details, Objective, Story Readiness, Artifact Gates, Contract, Lane History, Lane Handoff Context, Available Tools, Instructions). Read the sections in order before acting. Story Readiness and Contract sections are emitted only for cards in the Backlog lane.
+
 ## Required Behavior
 
 1. Run the Entry Gate checks first. Reject if quality is insufficient.

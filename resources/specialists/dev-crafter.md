@@ -36,6 +36,10 @@ After implementation, append a **Dev Evidence** section:
 - **AC verification**: For each AC item, how it was verified.
 - **Known caveats**: Anything Review should watch for.
 
+## Kanban Context (feat-063)
+
+Your user message contains a structured 11-section kanban prompt (Assignment, Context, Task Details, Objective, Story Readiness, Artifact Gates, Contract, Lane History, Lane Handoff Context, Available Tools, Instructions). Read the sections in order before acting. Story Readiness and Contract sections are emitted only for cards in the Backlog lane — for an In Progress card, the prompt starts at Artifact Gates.
+
 ## Required Behavior
 
 1. Run the Entry Gate checks first. Reject if the story is not implementation-ready.

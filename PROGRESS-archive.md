@@ -15,6 +15,51 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-063 — Rich kanban auto-spawn prompt (phase-12, uncommitted, this session)
+
+Phase-12 step 1: a structured 12-slot prompt for auto-spawned kanban sessions. Replaces the 3-line `build_initial_prompt` shim with a builder that emits column/board context, lane history, and per-gate status so the agent knows where it is, what's blocking the next move, and what the previous lane did.
+
+**Architecture decision (user picked all 3 recommended options)**
+
+- **A2A-shim fate** — delete the shim; `try_automate_lane` calls `build_kanban_prompt` directly. The A2A path (`a2a/messages.rs:77,132,165`) was verified to never call `build_initial_prompt` (it sends the raw client text via `extract_text_from_parts`). The spec's "A2A has its own copy" rationale is vacuous.
+- **Missing-schema sections (5, 7, 8) in v1** — Section 5 (Story Readiness) gates on `column.name.eq_ignore_ascii_case("Backlog")` until feat-065 lands the `Column.stage` enum. Section 7 (Delivery) is omitted entirely in v1 (no `automation_json` source). Section 8 (Contract) free-text parses `task.description` for ` ```yaml ` blocks and reports presence/absence as a one-liner. All three sections have small doc comments noting the future schema additions will replace the fallback.
+- **Lane History (section 9) fallback** — current-column scan via `TaskStore::list_by_board(workspace_id, board_id)`, filtered to `task.column_id == current_column.id AND task.id != current_task.id AND task.session_id.is_some()`, top 5 with `(title, session_id, started_at, role, status)`. Empty case → "No other cards in this lane yet."
+
+**Architecture decision (lens)**
+
+User picked **Lens 3 (helper-then-flat)**: two sibling files at `crates/weave-server/src/service/`. `kanban_prompt.rs` is pure formatting (24 sync tests, no DB) + `kanban_prompt_ctx.rs` is async store-IO (6 tokio integration tests). Mirrors the existing `check_transition_gates` pattern: pure function over pre-loaded inputs, caller does the IO. The other two lenses (flat single file, sub-module tree) were rejected — flat blows past the 200-400 line target, sub-module tree adds 4 files + 4 `use` blocks without abstraction gain.
+
+**Lifetime trap resolved**
+
+The spec's "borrowed from the caller" wording for `KanbanPromptContext { task: &Task, column: &Column, board: &Board }` would force a `'static` return from the async assembler (an anti-pattern requiring `Box::leak` or stack-local references). The fields are owned instead — `Task`, `Column`, `Board` all derive `Clone`, the assembler clones once per kanban auto-spawn, and the formatter consumes the context by value. Reviewer should call this out as a deliberate simplification vs. the spec's literal wording.
+
+**Files touched**
+
+- `crates/weave-server/src/service/kanban_prompt.rs` *(new, ~480 lines)* — `pub struct KanbanPromptContext`, `pub struct LaneSession`, `pub fn build_kanban_prompt(ctx: KanbanPromptContext) -> String`, 12 private `render_section_N_*` functions, `mod tests` with 24 sync tests.
+- `crates/weave-server/src/service/kanban_prompt_ctx.rs` *(new, ~250 lines)* — `pub async fn assemble_kanban_prompt_context(state, workspace_id, task, column) -> Result<KanbanPromptContext, AppError>`, walks 4 stores (BoardStore::get_in_workspace, TaskStore::list_by_board with column+session filter, SessionStore::get_by_id per peer, ArtifactStore::list_types_for_task), `mod tests` with 6 tokio tests using `make_test_state`.
+- `crates/weave-server/src/service/mod.rs` — added `pub mod kanban_prompt;` and `pub mod kanban_prompt_ctx;` (+2 lines).
+- `crates/weave-server/src/service/kanban.rs` — deleted the 11-line `build_initial_prompt` shim (lines 19-29) + 2 dead tests (`test_build_initial_prompt_with_description`, `test_build_initial_prompt_without_description_uses_trailing_newline`); replaced the call site at the old line 235 with `assemble_kanban_prompt_context(state, &workspace_id, task, column).await?` + `build_kanban_prompt(ctx)`.
+- `crates/weave-server/src/api/kanban.rs` — the end-to-end `test_kanban_autospawn_*` test's message-content assertion was hardcoded against the old 3-line string; updated to assert the new builder's 5 structural substrings (`## Assignment`, the title line, the description body, `## Objective`, `## Available Tools`) plus a regression guard that the old `Process task:` literal does not leak into the new output.
+- `resources/specialists/{backlog-refiner,dev-crafter,todo-orchestrator,review-guard,done-reporter}.md` — each gained a 4-line `## Kanban Context (feat-063)` section between Card Body Additions and Required Behavior, explaining the 11-section prompt shape and the Backlog-only Story Readiness / Contract sections.
+
+**Verification (per `feature_list.json`)**
+
+`cargo test -p weave-server -- build_kanban_prompt` → 2 passed (`test_build_kanban_prompt_sections_in_order_for_backlog`, `test_build_kanban_prompt_omits_backlog_sections_for_non_backlog`). `cargo test -p weave-server -- test_kanban_autospawn` → 4 passed (the existing feat-051/feat-055 autospawn tests, all still green against the new builder). Full Rust suite: 844 passed (was 828; +16 net from the 30 new tests + 6 new ctx tests + 5 new code-review tests - 18 deleted/exchanged = +16). `./init.sh` 3-layer gate green: clippy + fmt clean, 142 frontend tests pass, server starts, `/api/health` 200, real `claude --version` health-check succeeds in ~80ms, clean shutdown.
+
+**Phase 6 (Quality Review) outcomes**
+
+A `feature-dev:code-reviewer` agent (5-dimension sweep: correctness, readability, architecture, security, performance) flagged 8 issues at confidence ≥ 80. 5 applied as inline fixes + 5 new tests; 2 deferred to logged out-of-scope items (full list in `PROGRESS.md` § Out-of-Scope Items Noticed):
+
+- **Applied:** (1) `Section 4 (Objective)` now caps `task.description` at 8 KB with a `[description truncated at N chars; fetch full body via the card tools]` marker (chars not bytes, so multi-byte UTF-8 sequences are never split mid-codepoint). (2) `is_first_lane_run` renamed to `is_first_active_run` and Section 4 wording changed to "You are the first card in this lane to start a session" (the original name overclaimed — there may be other cards in the column without sessions). (3) `SessionStore::get_by_id` is not workspace-scoped; the assembler in `kanban_prompt_ctx.rs` adds an inline `if session.workspace_id != workspace_id { warn!; continue; }` defensive check. (4) Markdown table in Section 9 (Lane History) now `escape_table_cell`s each cell (`|` → `\|`, `\n` → ` `) so a peer task's title with a pipe can't corrupt the table layout. (5) Leading blank line in the prompt removed — `render_section_1_assignment` uses `push_str("## Assignment\n")` directly instead of `write_section_header`, so the prompt starts with `## Assignment` (not `\n## Assignment`).
+- **Deferred:** (1) N+1 session lookups in the lane-history loop → add `SessionStore::list_for_column_with_peers` (one JOIN round trip) in a follow-up. (2) `TaskStore::list_by_board` loads the entire board → add `TaskStore::list_by_column` (push filter to SQL) in a follow-up. Both deferrals are bounded by the 5-cap and the `DEFAULT_LIST_LIMIT` (500), so the v1 cost is acceptable.
+
+**Out-of-scope items noticed (logged, not fixed)**
+
+- **PROGRESS-archive.md is at 1562 lines** — over the 1500-line threshold in `CLAUDE.md` "Working Rules". Mechanical split-by-quarter: move feat-041/042/044/045/046/048/fix-068 to `PROGRESS-archive-2026-Q2.md`, keep feat-050/051/056/fix-069/fix-070/fix-072/feat-063 in the rolling file. Logged in `PROGRESS.md` Next Steps.
+- **A2A-shim rationale in the spec is wrong** (feat-063 implementation): the spec text claims A2A "has its own copy" of `build_initial_prompt`. Verified false: `a2a/messages.rs:77,132,165` uses `extract_text_from_parts` to send the raw client text, not the kanban shim. The "shim" never had a second caller. Future specs that mention cross-module helper duplication should verify with a grep before pinning the design.
+- **A pre-existing 3-line prompt assertion in `api/kanban.rs`** (`test_kanban_autospawn_*` end-to-end test, the old line 1974 `assert_eq!(msgs.data[0].content, "Process task: Implement auth\nuse JWT")`) was the only brittle call site — fixed inline as part of feat-063. A future refactor that changes the prompt structure must update the structural-substring assertion, not the literal string.
+- **The 3-line `Process task: ...` shim is referenced from 2 other places** (now deleted): `service/kanban.rs:19-29` (definition) and `service/kanban.rs:437-449` (2 tests). No other call sites — `first_provider_id` (the other `#[allow(dead_code)]` helper in the same file) is similarly dead; the A2A path's `first_provider_id` (referenced from `a2a/messages.rs`) is a separate copy and still live. Logged in case a future cleanup pass wants to delete the `service::kanban::first_provider_id` dead helper.
+
 ### feat-056 — A2A explicit `runtime_kind` resolution + Agent Card `defaultRuntimeKind` (phase-9, committed `8153bbc` + `efcd170` 2026-06-11)
 
 Phase 9 deliverable. The A2A counterpart to feat-055 (kanban column binding): removes the silent first-provider fallback in `POST /api/a2a/messages` and replaces it with an explicit three-step `runtime_kind` resolution chain. The A2A Agent Card surfaces the configured default. The breaking change is documented in `docs/api-contracts.md` (new A2A section).

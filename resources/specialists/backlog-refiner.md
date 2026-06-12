@@ -25,6 +25,10 @@ All cards leaving Backlog MUST include a structured story block in the descripti
 - **Dependencies**: Whether the story is independent, what it depends on, and what unblocks it.
 - **Out of scope**: Explicitly excluded items to prevent scope creep.
 
+## Kanban Context (feat-063)
+
+Your user message contains a structured 11-section kanban prompt (Assignment, Context, Task Details, Objective, Story Readiness, Artifact Gates, Contract, Lane History, Lane Handoff Context, Available Tools, Instructions). Read the sections in order before acting. Section 5 (Story Readiness) and Section 8 (Contract) are emitted only for cards in the Backlog lane.
+
 ## Required Behavior
 
 1. Tighten the title so it reads like a concrete deliverable.

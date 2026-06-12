@@ -9,24 +9,14 @@
 //! work; the column's `specialist_id` is the role the agent plays.
 
 use crate::error::AppError;
+use crate::service::kanban_prompt::build_kanban_prompt;
+use crate::service::kanban_prompt_ctx::assemble_kanban_prompt_context;
 use crate::service::sessions::SessionService;
 use crate::sse::SseWireEvent;
 use crate::store::columns::Column;
 use crate::store::providers::ProviderStore;
 use crate::store::tasks::{Task, TaskStore, UpdateTask};
 use crate::AppState;
-
-/// Build the initial prompt for the auto-spawned session.
-///
-/// Format is fixed by the feat-025 spec: `"Process task: {title}\n{description}"`.
-/// When `description` is `None`, the prompt is `"Process task: {title}\n"` —
-/// a literal trailing newline so the agent sees an explicit "no body" cue.
-pub fn build_initial_prompt(task: &Task) -> String {
-    match task.description.as_deref() {
-        Some(desc) => format!("Process task: {}\n{}", task.title, desc),
-        None => format!("Process task: {}\n", task.title),
-    }
-}
 
 /// Pick the first provider in DB-creation order.
 ///
@@ -228,11 +218,20 @@ pub async fn try_automate_lane(
     };
     TaskStore::update(&state.db, &task.id, &workspace_id, &link_update)?;
 
+    // Build the rich initial prompt (feat-063). The 3-line
+    // `build_initial_prompt` shim was deleted; the new builder
+    // renders a 12-slot prompt with column/board context, lane
+    // history, and per-gate status. The assembler does the store
+    // IO (board lookup, lane-peer filter, artifact pre-load);
+    // `build_kanban_prompt` is a pure function over the resulting
+    // context.
+    let prompt_ctx = assemble_kanban_prompt_context(state, &workspace_id, task, column).await?;
+    let prompt = build_kanban_prompt(prompt_ctx);
+
     // Send the initial prompt. `send_prompt` is async — it persists the
     // user message, spawns the streaming task, and returns the user
     // message id. Errors here abort the lane (the session exists but
     // isn't running); the caller can decide whether to surface or ignore.
-    let prompt = build_initial_prompt(task);
     SessionService::send_prompt(
         &state.db,
         &state.registry,
@@ -432,20 +431,6 @@ mod tests {
             created_at: "2026-06-02T00:00:00Z".into(),
             updated_at: "2026-06-02T00:00:00Z".into(),
         }
-    }
-
-    #[test]
-    fn test_build_initial_prompt_with_description() {
-        let task = task_with("T", Some("D"));
-        assert_eq!(build_initial_prompt(&task), "Process task: T\nD");
-    }
-
-    #[test]
-    fn test_build_initial_prompt_without_description_uses_trailing_newline() {
-        let task = task_with("T", None);
-        // Literal trailing newline per spec; the agent interprets
-        // "no body follows" as a cue that the description was empty.
-        assert_eq!(build_initial_prompt(&task), "Process task: T\n");
     }
 
     #[tokio::test]
