@@ -45,12 +45,27 @@ pub struct CreateProviderRequest {
 /// feat-053: enriches each row with `healthy: bool` from the registry's
 /// 10s `HealthCache` so the new-session wizard's Step 1 can gate on
 /// per-provider health without an extra round-trip. The `cached_health_for`
-/// accessor is sync and lock-only (no I/O), so the handler stays `async`
-/// without a real await — the signature is fixed by Axum and the cost is
-/// negligible.
+/// accessor is sync and lock-only (no I/O), so the per-id read is fast.
+///
+/// **fix-071:** we warm the cache via `cached_health_summary().await`
+/// before reading the per-id flag. Without this warm-up, the very first
+/// list after server boot (or after `add_agent` / `remove_agent`
+/// invalidates the cache) would surface every provider as `healthy: false`
+/// because `cached_health_for` returns `false` for ids absent from the
+/// snapshot — and nothing on the frontend's hot path calls `/api/health`
+/// (the only other warming caller). The user-visible symptom was the
+/// wizard's Step 1 rendering "No healthy providers" on a freshly-booted
+/// server even though both providers in the DB probed successfully.
+/// `cached_health_summary` is the cache-aware accessor: on warm cache it
+/// returns instantly from the 10s TTL; on cold cache it probes all
+/// registered agents in parallel and populates the snapshot.
 pub async fn list_providers(
     axum::Extension(state): axum::Extension<AppState>,
 ) -> Result<Json<DataResponse<Vec<Provider>>>, AppError> {
+    // Warm the per-id health cache so `cached_health_for` below sees
+    // a fresh snapshot, not a cold-cache `false` for every id. See the
+    // doc comment above for the user-visible impact.
+    let _ = state.registry.cached_health_summary().await;
     let mut providers = ProviderStore::list(&state.db)?;
     for p in providers.iter_mut() {
         p.healthy = state.registry.cached_health_for(&p.id);
@@ -2072,15 +2087,19 @@ mod tests {
 
     // ---- feat-053: healthy field on GET /api/providers ----
 
-    /// A freshly booted server with no prior `cached_health_summary`
-    /// call must mark every provider `healthy: false`. The wizard's
-    /// Step 1 uses this to hide unproven providers rather than
-    /// offering broken ones (cold-start safety).
+    /// When a provider's health probe fails, GET /api/providers must
+    /// surface `healthy: false` for that provider. Uses a stub
+    /// unhealthy agent (registered directly into the registry) instead
+    /// of a real HTTP provider to keep the test deterministic and
+    /// independent of network reachability to `https://api.anthropic.com`.
     #[tokio::test]
-    async fn test_provider_healthy_field_default_false_when_cache_cold() {
-        let (app, _state) = test_app_with_state();
+    async fn test_list_providers_reflects_failed_probe_as_unhealthy() {
+        use crate::agent::CodingAgent;
+        use crate::agent::ProviderHealth;
 
-        // Create one HTTP provider so the list isn't empty.
+        let (app, state) = test_app_with_state();
+
+        // Create one provider row in the DB so the list isn't empty.
         let response = app
             .clone()
             .oneshot(
@@ -2094,8 +2113,66 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let provider_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
-        // GET /api/providers — cache is cold (no probe has run).
+        // Register a stub that reports healthy=false. list_providers
+        // will warm the cache via cached_health_summary; the probe
+        // returns unhealthy, the snapshot records `(id, false)`, and
+        // the response surfaces healthy=false.
+        struct StubUnhealthy;
+        #[async_trait::async_trait]
+        impl CodingAgent for StubUnhealthy {
+            fn provider_type(&self) -> &'static str {
+                "stub-unhealthy"
+            }
+            fn display_name(&self) -> &'static str {
+                "stub-unhealthy"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _req: crate::agent::MessageRequest,
+                _turn: &crate::agent::turn_context::TurnContext,
+            ) -> Result<
+                std::pin::Pin<
+                    Box<
+                        dyn futures_util::Stream<
+                                Item = Result<
+                                    crate::agent::StreamEvent,
+                                    crate::error::ProviderError,
+                                >,
+                            > + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                Err(crate::error::ProviderError::Unreachable("stub".into()))
+            }
+            async fn health_check(&self) -> Result<ProviderHealth, crate::error::ProviderError> {
+                Ok(ProviderHealth {
+                    healthy: false,
+                    latency_ms: 1,
+                    error: Some("simulated failure".into()),
+                })
+            }
+        }
+        state
+            .registry
+            .add_agent(&provider_id, std::sync::Arc::new(StubUnhealthy));
+
+        // GET /api/providers — list_providers warms the cache before
+        // reading per-id health (fix-071), and the probe reports
+        // unhealthy, so healthy=false.
         let response = app
             .oneshot(
                 Request::builder()
@@ -2114,7 +2191,124 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0]["healthy"], false,
-            "cold cache must surface healthy: false"
+            "failed probe must surface healthy: false"
+        );
+    }
+
+    /// **fix-071 regression test.** Before the fix, the very first
+    /// GET /api/providers on a cold cache (e.g. right after server
+    /// boot, or right after `add_agent` invalidates the cache)
+    /// surfaced every provider as `healthy: false`, even ones whose
+    /// probe would succeed. That made the new-session wizard's Step 1
+    /// render "No healthy providers" — the user-visible bug. The fix
+    /// warms the cache via `cached_health_summary` inside
+    /// `list_providers`; this test proves that a healthy agent
+    /// registered into the registry surfaces as `healthy: true` on
+    /// the very first list call (no prior `/api/health` warm-up).
+    #[tokio::test]
+    async fn test_list_providers_warms_cache_on_cold_start() {
+        use crate::agent::CodingAgent;
+        use crate::agent::ProviderHealth;
+
+        let (app, state) = test_app_with_state();
+
+        // Create one provider row in the DB so the list isn't empty.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/providers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let provider_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Register a stub that reports healthy=true. The cache is
+        // cold at this point (no prior `cached_health_summary` call)
+        // and `cached_health_for` would return false for `provider_id`
+        // on a cold cache.
+        struct StubHealthy;
+        #[async_trait::async_trait]
+        impl CodingAgent for StubHealthy {
+            fn provider_type(&self) -> &'static str {
+                "stub-healthy"
+            }
+            fn display_name(&self) -> &'static str {
+                "stub-healthy"
+            }
+            async fn list_models(
+                &self,
+            ) -> Result<Vec<crate::agent::ModelInfo>, crate::error::ProviderError> {
+                Ok(vec![])
+            }
+            async fn send_message(
+                &self,
+                _req: crate::agent::MessageRequest,
+                _turn: &crate::agent::turn_context::TurnContext,
+            ) -> Result<
+                std::pin::Pin<
+                    Box<
+                        dyn futures_util::Stream<
+                                Item = Result<
+                                    crate::agent::StreamEvent,
+                                    crate::error::ProviderError,
+                                >,
+                            > + Send,
+                    >,
+                >,
+                crate::error::ProviderError,
+            > {
+                Err(crate::error::ProviderError::Unreachable("stub".into()))
+            }
+            async fn health_check(&self) -> Result<ProviderHealth, crate::error::ProviderError> {
+                Ok(ProviderHealth {
+                    healthy: true,
+                    latency_ms: 1,
+                    error: None,
+                })
+            }
+        }
+        state
+            .registry
+            .add_agent(&provider_id, std::sync::Arc::new(StubHealthy));
+
+        // GET /api/providers — cache was cold before this call.
+        // Before fix-071: list_providers read the cold cache and
+        // reported healthy=false (the bug). After fix-071:
+        // list_providers warms the cache via cached_health_summary,
+        // the probe returns healthy=true, and the response surfaces
+        // healthy=true.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        let items = json["data"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0]["healthy"], true,
+            "fix-071: list_providers must warm the cache on a cold start \
+             and surface healthy=true for a registered healthy agent"
         );
     }
 
