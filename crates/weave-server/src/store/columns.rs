@@ -27,7 +27,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::db::Db;
@@ -93,6 +93,97 @@ impl fmt::Display for ColumnStage {
     }
 }
 
+/// Per-column automation configuration. Stored as JSON in the
+/// `automation_json` TEXT column. `None` = no automation (legacy behavior).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AutomationConfig {
+    /// Artifact type names required before entering this column.
+    #[serde(default)]
+    pub required_artifacts: Vec<String>,
+    /// Delivery rules for git-based checks.
+    #[serde(default)]
+    pub delivery_rules: DeliveryRules,
+    /// Contract rules for story validation.
+    #[serde(default)]
+    pub contract_rules: ContractRules,
+    /// Checklist rules for verification_report scanning.
+    #[serde(default)]
+    pub checklist_rules: ChecklistRules,
+    /// Optional shell command validator with caching.
+    #[serde(default)]
+    pub validator_command: Option<ValidatorCommand>,
+    /// Gate behavior: blocking (reject) or warning (log + allow).
+    #[serde(default)]
+    pub gate_mode: GateMode,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DeliveryRules {
+    pub require_committed_changes: bool,
+    pub require_clean_worktree: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ContractRules {
+    pub require_canonical_story: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChecklistRules {
+    pub required_checklist: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidatorCommand {
+    pub command: String,
+    /// Seconds before the subprocess is killed. Default 30.
+    #[serde(default = "default_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_timeout_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateMode {
+    /// Reject the move on gate failure (default).
+    #[default]
+    Blocking,
+    /// Allow the move but log a warning.
+    Warning,
+}
+
+impl GateMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocking => "blocking",
+            Self::Warning => "warning",
+        }
+    }
+}
+
+impl FromStr for GateMode {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "blocking" => Ok(GateMode::Blocking),
+            "warning" => Ok(GateMode::Warning),
+            _ => Err(AppError::validation(format!(
+                "invalid gate_mode '{s}'; valid values: blocking, warning"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for GateMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Domain representation of a column row.
 #[derive(Debug, Clone, Serialize)]
 pub struct Column {
@@ -122,6 +213,9 @@ pub struct Column {
     /// allowed target-column transitions. Defaults to `Dev` (most
     /// permissive) for existing columns.
     pub stage: ColumnStage,
+    /// Per-column automation configuration (delivery/contract/checklist/
+    /// validator gates + gate_mode). `None` = no automation (legacy).
+    pub automation: Option<AutomationConfig>,
     pub created_at: String,
 }
 
@@ -157,6 +251,7 @@ impl ColumnStore {
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<&str>,
         stage: ColumnStage,
+        automation: Option<&AutomationConfig>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         db.with_transaction(|conn| {
@@ -172,6 +267,7 @@ impl ColumnStore {
                 required_artifact_types,
                 runtime_kind,
                 stage,
+                automation,
             )
         })
     }
@@ -194,6 +290,7 @@ impl ColumnStore {
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<&str>,
         stage: ColumnStage,
+        automation: Option<&AutomationConfig>,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         let resolved_position = match position {
@@ -203,15 +300,21 @@ impl ColumnStore {
         let freeze = freeze_description.unwrap_or(false);
         let req_fields_json = json_string_vec(required_fields.unwrap_or(&[]))?;
         let req_artifacts_json = json_string_vec(required_artifact_types.unwrap_or(&[]))?;
+        let automation_json = automation
+            .map(|a| {
+                serde_json::to_string(a)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize automation: {e}")))
+            })
+            .transpose()?;
         conn.query_row(
             "INSERT INTO columns
                 (id, board_id, name, position, specialist_id, auto_trigger,
                  freeze_description, required_fields, required_artifact_types,
-                 runtime_kind, stage, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 runtime_kind, stage, automation_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
                        freeze_description, required_fields, required_artifact_types,
-                       runtime_kind, stage, created_at",
+                       runtime_kind, stage, automation_json, created_at",
             rusqlite::params![
                 Uuid::new_v4().to_string(),
                 board_id,
@@ -224,6 +327,7 @@ impl ColumnStore {
                 req_artifacts_json,
                 runtime_kind,
                 stage.as_str(),
+                automation_json,
                 Utc::now().to_rfc3339(),
             ],
             Self::map_row,
@@ -250,6 +354,7 @@ impl ColumnStore {
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<Option<&str>>,
         stage: Option<ColumnStage>,
+        automation: Option<Option<&AutomationConfig>>,
     ) -> Result<Column, AppError> {
         // Resolve the effective auto_trigger/specialist_id for validation.
         // The `Option<Option<T>>` pattern lets the caller pass:
@@ -315,6 +420,17 @@ impl ColumnStore {
             params.push(Box::new(s.as_str().to_string()));
             idx += 1;
         }
+        if let Some(a) = automation {
+            let json = match a {
+                Some(cfg) => Some(serde_json::to_string(cfg).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("serialize automation: {e}"))
+                })?),
+                None => None,
+            };
+            sets.push(format!("automation_json = ?{idx}"));
+            params.push(Box::new(json));
+            idx += 1;
+        }
 
         // No-op when nothing to update — return current state.
         if sets.is_empty() {
@@ -326,7 +442,7 @@ impl ColumnStore {
             "UPDATE columns SET {} WHERE id = ?{cid_idx}
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
                        freeze_description, required_fields, required_artifact_types,
-                       runtime_kind, stage, created_at",
+                       runtime_kind, stage, automation_json, created_at",
             sets.join(", ")
         );
         params.push(Box::new(column_id.to_string()));
@@ -350,7 +466,7 @@ impl ColumnStore {
             .query_row(
                 "SELECT id, board_id, name, position, specialist_id, auto_trigger,
                         freeze_description, required_fields, required_artifact_types,
-                        runtime_kind, stage, created_at
+                        runtime_kind, stage, automation_json, created_at
                  FROM columns WHERE id = ?1",
                 [column_id],
                 Self::map_row,
@@ -370,7 +486,7 @@ impl ColumnStore {
         let mut stmt = conn.prepare(
             "SELECT id, board_id, name, position, specialist_id, auto_trigger,
                     freeze_description, required_fields, required_artifact_types,
-                    runtime_kind, stage, created_at
+                    runtime_kind, stage, automation_json, created_at
              FROM columns WHERE board_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
@@ -412,6 +528,18 @@ impl ColumnStore {
             parse_string_vec("required_artifact_types", &req_artifacts_json).unwrap_or_default();
         let stage_str: String = row.get(10)?;
         let stage = ColumnStage::from_str(&stage_str).unwrap_or_default();
+        let automation_json: Option<String> = row.get(11)?;
+        let automation =
+            automation_json.and_then(|j| match serde_json::from_str::<AutomationConfig>(&j) {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "malformed automation_json; treating as no automation"
+                    );
+                    None
+                }
+            });
         Ok(Column {
             id: row.get(0)?,
             board_id: row.get(1)?,
@@ -424,7 +552,8 @@ impl ColumnStore {
             required_artifact_types,
             runtime_kind: row.get(9)?,
             stage,
-            created_at: row.get(11)?,
+            automation,
+            created_at: row.get(12)?,
         })
     }
 }
@@ -540,6 +669,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert_eq!(col.name, "To Do");
@@ -567,6 +697,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert_eq!(col.position, 2048);
@@ -588,6 +719,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         );
         assert!(matches!(
             result,
@@ -611,6 +743,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert!(col.auto_trigger);
@@ -635,6 +768,7 @@ mod tests {
             Some(&req_artifacts),
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert!(col.freeze_description);
@@ -650,6 +784,7 @@ mod tests {
             &db,
             &cid,
             Some("Renamed"),
+            None,
             None,
             None,
             None,
@@ -681,6 +816,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(updated.auto_trigger);
@@ -692,6 +828,7 @@ mod tests {
             None,
             None,
             Some(false),
+            None,
             None,
             None,
             None,
@@ -719,6 +856,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         // Now try to clear specialist while auto_trigger is still on
@@ -728,6 +866,7 @@ mod tests {
             None,
             None,
             Some(None),
+            None,
             None,
             None,
             None,
@@ -761,6 +900,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(updated.freeze_description);
@@ -784,6 +924,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         ColumnStore::create(
@@ -798,6 +939,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         ColumnStore::create(
@@ -812,6 +954,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
 
@@ -934,6 +1077,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert!(col.runtime_kind.is_none());
@@ -951,6 +1095,7 @@ mod tests {
             None,
             Some("claude-code"),
             ColumnStage::Dev,
+            None,
         )
         .unwrap();
         assert_eq!(col.runtime_kind.as_deref(), Some("claude-code"));
@@ -968,6 +1113,7 @@ mod tests {
             None,
             Some(Some("codex")),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(updated.runtime_kind.as_deref(), Some("codex"));
@@ -984,6 +1130,7 @@ mod tests {
             None,
             None,
             Some(None),
+            None,
             None,
         )
         .unwrap();

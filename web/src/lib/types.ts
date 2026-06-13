@@ -231,6 +231,37 @@ export interface NewColumnSpec {
   runtime_kind?: RuntimeKind;
 }
 
+/// Per-column automation config (feat-066).
+export interface DeliveryRules {
+  require_committed_changes?: boolean;
+  require_clean_worktree?: boolean;
+}
+
+export interface ContractRules {
+  require_canonical_story?: boolean;
+}
+
+export interface ChecklistRules {
+  required_checklist?: boolean;
+}
+
+export interface ValidatorCommand {
+  command: string;
+  /// Seconds before the subprocess is killed. Default 30.
+  timeout_secs?: number;
+}
+
+export type GateMode = "blocking" | "warning";
+
+export interface AutomationConfig {
+  required_artifacts?: string[];
+  delivery_rules?: DeliveryRules;
+  contract_rules?: ContractRules;
+  checklist_rules?: ChecklistRules;
+  validator_command?: ValidatorCommand;
+  gate_mode?: GateMode;
+}
+
 // API envelopes
 
 export interface ApiErrorResponse {
@@ -336,6 +367,9 @@ export interface CreateColumnRequest {
   specialist_id?: string;
   auto_trigger?: boolean;
   runtime_kind?: RuntimeKind;
+  /// Per-column automation config (delivery/contract/checklist/validator
+  /// gates + gate_mode). Optional; omit = no automation (legacy).
+  automation?: AutomationConfig;
 }
 
 export interface UpdateColumnRequest {
@@ -346,6 +380,8 @@ export interface UpdateColumnRequest {
   auto_trigger?: boolean;
   /// Tri-state: `undefined` = leave alone, `null` = clear, `string` = set.
   runtime_kind?: RuntimeKind | null;
+  /// Automation config. Tri-state like runtime_kind above.
+  automation?: AutomationConfig | null;
 }
 
 export interface CreateCardRequest {

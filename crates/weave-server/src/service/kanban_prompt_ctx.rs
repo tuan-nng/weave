@@ -208,6 +208,7 @@ mod tests {
             required_artifact_types: vec![],
             runtime_kind: None,
             stage: ColumnStage::Backlog,
+            automation: None,
             created_at: "2026-06-12T00:00:00Z".into(),
         }
     }

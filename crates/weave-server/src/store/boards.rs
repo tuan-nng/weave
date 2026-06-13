@@ -102,6 +102,7 @@ impl BoardStore {
                     Some(&spec.required_artifact_types),
                     spec.runtime_kind,
                     spec.stage,
+                    None,
                 )?;
             }
             Ok(board)

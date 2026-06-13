@@ -31,7 +31,7 @@ use crate::error::AppError;
 use crate::service::kanban::try_automate_lane;
 use crate::sse::SseWireEvent;
 use crate::store::boards::{BoardStore, NewColumnSpec};
-use crate::store::columns::{Column, ColumnStore};
+use crate::store::columns::{AutomationConfig, Column, ColumnStore};
 use crate::store::providers::ProviderStore;
 use crate::store::tasks::{Task, TaskStore, UpdateTask};
 use crate::store::workspaces::WorkspaceStore;
@@ -88,6 +88,9 @@ pub struct CreateColumnRequest {
     /// Kanban stage: backlog | todo | dev | review | done (feat-065).
     /// Defaults to "dev" when omitted.
     pub stage: Option<String>,
+    /// Automation config (delivery/contract/checklist/validator gates +
+    /// gate_mode). Optional; omitted = no automation (legacy behavior).
+    pub automation: Option<AutomationConfig>,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +108,9 @@ pub struct UpdateColumnRequest {
     /// Kanban stage: backlog | todo | dev | review | done (feat-065).
     /// `None` leaves it unchanged.
     pub stage: Option<String>,
+    /// Automation config (delivery/contract/checklist/validator gates +
+    /// gate_mode). `Some(None)` clears automation. `None` leaves it unchanged.
+    pub automation: Option<Option<AutomationConfig>>,
 }
 
 #[derive(Deserialize)]
@@ -379,6 +385,7 @@ pub async fn create_column(
         body.required_artifact_types.as_deref(),
         body.runtime_kind.as_deref(),
         stage,
+        body.automation.as_ref(),
     )?;
     let column_json = serde_json::to_value(&column).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to serialize column for SSE: {e}"))
@@ -428,6 +435,7 @@ pub async fn update_column(
         body.required_artifact_types.as_deref(),
         body.runtime_kind.as_ref().map(|s| s.as_deref()),
         stage,
+        body.automation.as_ref().map(|a| a.as_ref()),
     )?;
     Ok(Json(DataResponse { data: column }))
 }

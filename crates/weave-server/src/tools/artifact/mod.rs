@@ -179,6 +179,7 @@ mod tests {
             Some(&["screenshot".to_string()]),
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
@@ -197,6 +198,7 @@ mod tests {
             Some(&["test_results".to_string()]),
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;

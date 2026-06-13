@@ -126,6 +126,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
@@ -264,6 +265,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
@@ -282,6 +284,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
@@ -297,6 +300,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;

@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use crate::db::Db;
 use crate::error::AppError;
 use crate::service::kanban::check_transition_gates;
+use crate::service::{self};
 use crate::store::artifacts::ArtifactStore;
 use crate::store::columns::{Column, ColumnStore};
 use crate::store::tasks::{TaskStore, VALID_TASK_STATUSES};
@@ -162,14 +163,31 @@ impl ToolExecutor for MoveCardTool {
         //    on same-column moves and the all-defaults case, so this is
         //    a no-op for the common path. The artifact-type set is
         //    pre-loaded here (feat-031) so the gate stays a pure
-        //    function over its inputs.
+        //    function over its inputs. The GateContext (feat-066)
+        //    carries the DB and cwd the new delivery/validator gates
+        //    need; pass `None` if neither gate is configured.
         let present_artifact_types =
             match ArtifactStore::list_types_for_task(&self.db, &task.id, &ctx.workspace_id) {
                 Ok(set) => set,
                 Err(e) => return error(e.to_string()),
             };
-        if let Err(e) =
-            check_transition_gates(&task, &source_column, &dest_column, &present_artifact_types)
+        let gate_ctx = service::kanban::GateContext {
+            db: &self.db,
+            cwd: ctx.codebase_root.clone(),
+        };
+        let needs_ctx = dest_column.automation.as_ref().is_some_and(|a| {
+            a.delivery_rules.require_committed_changes
+                || a.delivery_rules.require_clean_worktree
+                || a.validator_command.is_some()
+        });
+        if let Err(e) = check_transition_gates(
+            &task,
+            &source_column,
+            &dest_column,
+            &present_artifact_types,
+            if needs_ctx { Some(&gate_ctx) } else { None },
+        )
+        .await
         {
             return error(e.to_string());
         }
@@ -290,6 +308,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
@@ -310,6 +329,7 @@ mod tests {
             None,
             None,
             ColumnStage::Dev,
+            None,
         )
         .unwrap()
         .id;
