@@ -10,11 +10,19 @@
 // parent-level banner required. The optional `onCreated` callback fires
 // AFTER the modal has closed on a successful create; the caller decides
 // what to do (typically: navigate to the new board's detail page).
+//
+// feat-068 (F-1): adds a `Template` picker (Standard / Empty). The
+// Standard template pre-populates the board with 5 columns matching
+// the bundled specialists + the canonical stage mapping
+// (Backlog→backlog, To Do→todo, In Progress→dev, Review→review,
+// Done→done). This mirrors the backend's `NewColumnSpec` shape —
+// the server-side `NewColumnSpec` already accepts a `stage` field,
+// so no API change is needed.
 
 import { useEffect, useState } from "react";
 import { Modal } from "./modal";
 import { useCreateBoard } from "../hooks/use-board";
-import type { Board, CreateBoardRequest } from "../lib/types";
+import type { Board, CreateBoardRequest, NewColumnSpec } from "../lib/types";
 
 interface NewBoardModalProps {
   /** null = closed; non-null = open and bound to this workspace. */
@@ -23,6 +31,50 @@ interface NewBoardModalProps {
   /** Fires AFTER the modal has closed on a successful create. */
   onCreated?: (board: Board) => void;
 }
+
+type BoardTemplate = "standard" | "empty";
+
+/// Canonical Standard template — matches the backend's default
+/// template at `store/boards.rs:425-461` and the bundled specialists
+/// in `resources/specialists/`. The stage values per column close
+/// the "wrong next stage" prompt bug (feat-068 F-2/F-3).
+const STANDARD_TEMPLATE_COLUMNS: NewColumnSpec[] = [
+  {
+    name: "Backlog",
+    position: 0,
+    specialist_id: "backlog-refiner",
+    auto_trigger: true,
+    stage: "backlog",
+  },
+  {
+    name: "To Do",
+    position: 1000,
+    specialist_id: "todo-orchestrator",
+    auto_trigger: true,
+    stage: "todo",
+  },
+  {
+    name: "In Progress",
+    position: 2000,
+    specialist_id: "dev-crafter",
+    auto_trigger: true,
+    stage: "dev",
+  },
+  {
+    name: "Review",
+    position: 3000,
+    specialist_id: "review-guard",
+    auto_trigger: true,
+    stage: "review",
+  },
+  {
+    name: "Done",
+    position: 4000,
+    specialist_id: "done-reporter",
+    auto_trigger: false,
+    stage: "done",
+  },
+];
 
 const FIELD_CLASS =
   "w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150";
@@ -37,6 +89,7 @@ export function NewBoardModal({ workspaceId, onClose, onCreated }: NewBoardModal
   const createBoard = useCreateBoard(workspaceId ?? "");
 
   const [name, setName] = useState("");
+  const [template, setTemplate] = useState<BoardTemplate>("standard");
   const [error, setError] = useState<string | null>(null);
 
   // Reset form + error on every open transition (mount, or null→id, or
@@ -44,6 +97,7 @@ export function NewBoardModal({ workspaceId, onClose, onCreated }: NewBoardModal
   useEffect(() => {
     if (workspaceId !== null) {
       setName("");
+      setTemplate("standard");
       setError(null);
     }
   }, [workspaceId]);
@@ -61,7 +115,10 @@ export function NewBoardModal({ workspaceId, onClose, onCreated }: NewBoardModal
       setError("Name is required");
       return;
     }
-    const payload: CreateBoardRequest = { name: trimmedName };
+    const payload: CreateBoardRequest = {
+      name: trimmedName,
+      columns: template === "standard" ? STANDARD_TEMPLATE_COLUMNS : undefined,
+    };
     createBoard.mutate(payload, {
       onSuccess: (board) => {
         onClose();
@@ -122,6 +179,47 @@ export function NewBoardModal({ workspaceId, onClose, onCreated }: NewBoardModal
             autoFocus
             className={FIELD_CLASS}
           />
+        </div>
+
+        {/* Template picker (F-1). Standard pre-populates the 5
+            canonical columns with their stage and specialist
+            bindings; Empty creates a board with zero columns
+            (the user adds them by hand via the + Add column
+            button). */}
+        <div>
+          <label className={LABEL_CLASS}>Template</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setTemplate("standard")}
+              aria-pressed={template === "standard"}
+              className={`h-auto px-3 py-2.5 text-left rounded-xl border text-xs transition-colors ${
+                template === "standard"
+                  ? "border-brand-blue-400 bg-brand-blue-50/60 text-slate-900"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+            >
+              <div className="text-[13px] font-medium">Standard</div>
+              <div className="text-[10px] text-slate-500 mt-0.5">
+                Backlog → To Do → In Progress → Review → Done
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setTemplate("empty")}
+              aria-pressed={template === "empty"}
+              className={`h-auto px-3 py-2.5 text-left rounded-xl border text-xs transition-colors ${
+                template === "empty"
+                  ? "border-brand-blue-400 bg-brand-blue-50/60 text-slate-900"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+            >
+              <div className="text-[13px] font-medium">Empty</div>
+              <div className="text-[10px] text-slate-500 mt-0.5">
+                No columns — add them after creating
+              </div>
+            </button>
+          </div>
         </div>
 
         {/* Actions */}

@@ -29,6 +29,7 @@ export default function BoardPage() {
     createColumn,
     updateTask,
     moveTask,
+    moveColumn,
     deleteTask,
     isCreatingCard,
     isCreatingColumn,
@@ -133,6 +134,7 @@ export default function BoardPage() {
               toPosition: input.toPosition,
             })
           }
+          onMoveColumn={(input) => moveColumn(input)}
           isCreatingColumn={isCreatingColumn}
           isCreatingCard={isCreatingCard}
           isMovingTask={isMovingTask}
@@ -141,6 +143,8 @@ export default function BoardPage() {
 
       <TaskDetailPanel
         task={selectedTask}
+        columns={columns}
+        workspaceId={workspaceId}
         onClose={() => setSelectedTaskId(null)}
         onSave={(taskId, data) => {
           updateTask(taskId, data);
@@ -148,6 +152,12 @@ export default function BoardPage() {
         onDelete={(taskId) => {
           deleteTask(taskId);
           setSelectedTaskId(null);
+        }}
+        onMoveToColumn={(taskId, toColumnId) => {
+          // Append to the end of the target column. The server
+          // computes the canonical position (max + POSITION_STEP)
+          // and the SSE `task_moved` event patches the cache.
+          moveTask({ taskId, toColumnId, toPosition: Number.MAX_SAFE_INTEGER });
         }}
         isSaving={isUpdatingTask}
         isDeleting={isDeletingTask}

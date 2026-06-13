@@ -514,6 +514,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
             created_at: "2026-06-12T00:00:00Z".into(),
             updated_at: "2026-06-12T00:00:00Z".into(),
         }
@@ -1093,5 +1094,43 @@ mod tests {
         let rest = &prompt[body_start..];
         let end = rest.find("\n## ").unwrap_or(rest.len());
         Some(rest[..end].to_string())
+    }
+
+    /// F-3 regression test (the doc's recommended test for
+    /// `docs/design-docs/kanban-ui-gaps-2026-06-13.md`): create a
+    /// column with `stage=todo` and assert the assembled prompt
+    /// says "advance to Dev" (not "advance to Review"). Pre-feat-068
+    /// every UI-created column defaulted to `stage=dev`; the prompt
+    /// template's `match column.stage` arm then always said "advance
+    /// to Review" regardless of position. With the stage picker
+    /// exposed in the Add Column modal, the column's `stage` is
+    /// settable and the prompt line is correct.
+    #[test]
+    fn test_prompt_uses_stage_for_next_stage_line_todo() {
+        let ctx = ctx_with("Refine auth story", None, "To Do", vec![], vec![]);
+        let out = build_kanban_prompt(ctx);
+        let instructions = extract_section(&out, "Instructions").expect("Instructions section");
+        assert!(
+            instructions.contains("advance to Dev"),
+            "todo-stage prompt must say 'advance to Dev'; got: {instructions}"
+        );
+        assert!(
+            !instructions.contains("advance to Review"),
+            "todo-stage prompt must not say 'advance to Review'; got: {instructions}"
+        );
+    }
+
+    /// F-3 regression test: the dev-stage prompt must still say
+    /// "advance to Review" (this is the one case where the pre-feat-068
+    /// default of `stage=dev` happened to be correct).
+    #[test]
+    fn test_prompt_uses_stage_for_next_stage_line_dev() {
+        let ctx = ctx_with("Implement auth", None, "In Progress", vec![], vec![]);
+        let out = build_kanban_prompt(ctx);
+        let instructions = extract_section(&out, "Instructions").expect("Instructions section");
+        assert!(
+            instructions.contains("advance to Review"),
+            "dev-stage prompt must say 'advance to Review'; got: {instructions}"
+        );
     }
 }

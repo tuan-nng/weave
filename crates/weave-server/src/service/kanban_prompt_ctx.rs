@@ -231,6 +231,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
             created_at: "2026-06-12T00:00:00Z".into(),
             updated_at: "2026-06-12T00:00:00Z".into(),
         }

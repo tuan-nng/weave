@@ -76,6 +76,11 @@ const mockColumns = [
     specialist_id: null,
     auto_trigger: false,
     runtime_kind: null,
+    stage: "todo" as const,
+    automation: null,
+    freeze_description: false,
+    required_fields: [],
+    required_artifact_types: [],
     created_at: "2026-06-01T00:00:00Z",
   },
   {
@@ -86,6 +91,11 @@ const mockColumns = [
     specialist_id: null,
     auto_trigger: false,
     runtime_kind: null,
+    stage: "done" as const,
+    automation: null,
+    freeze_description: false,
+    required_fields: [],
+    required_artifact_types: [],
     created_at: "2026-06-01T00:00:00Z",
   },
 ];
@@ -103,6 +113,7 @@ const mockTasks = [
     acceptance_criteria: null,
     completion_summary: null,
     verification_report: null,
+    codebase_id: null,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-01T00:00:00Z",
   },
@@ -118,6 +129,7 @@ const mockTasks = [
     acceptance_criteria: null,
     completion_summary: null,
     verification_report: null,
+    codebase_id: null,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-01T00:00:00Z",
   },
@@ -133,6 +145,7 @@ const mockTasks = [
     acceptance_criteria: null,
     completion_summary: null,
     verification_report: null,
+    codebase_id: null,
     created_at: "2026-06-01T00:00:00Z",
     updated_at: "2026-06-01T00:00:00Z",
   },
@@ -266,6 +279,11 @@ describe("kanban-board", () => {
         specialist_id: "dev",
         auto_trigger: true,
         runtime_kind: "claude-code" as const,
+        stage: "dev" as const,
+        automation: null,
+        freeze_description: false,
+        required_fields: [],
+        required_artifact_types: [],
         created_at: "2026-06-01T00:00:00Z",
       },
       {
@@ -276,6 +294,11 @@ describe("kanban-board", () => {
         specialist_id: "dev",
         auto_trigger: true,
         runtime_kind: null,
+        stage: "dev" as const,
+        automation: null,
+        freeze_description: false,
+        required_fields: [],
+        required_artifact_types: [],
         created_at: "2026-06-01T00:00:00Z",
       },
     ];
@@ -294,7 +317,24 @@ describe("kanban-board", () => {
     // The column with runtime_kind should show the badge.
     expect(screen.getByText("Claude Code")).toBeInTheDocument();
     // The column without runtime_kind should NOT show the badge.
-    const noRuntimeColumn = screen.getByText("No Runtime").closest("div")!;
-    expect(noRuntimeColumn.querySelector('[title="Auto-trigger enabled"]')).toBeInTheDocument();
+    // After the feat-068 header restructure (drag handle + move
+    // buttons), the "No Runtime" text and the auto-trigger dot
+    // live in different sibling divs inside the column. The
+    // column's outer <div> wraps both, so we look for the dot
+    // by its title via the column-name's enclosing column
+    // container. `getAllByText` is used because the column
+    // header is rendered twice in StrictMode-style dev
+    // double-invocation.
+    const noRuntimeHeaders = screen.getAllByText("No Runtime");
+    for (const el of noRuntimeHeaders) {
+      // Walk up to the column's outer <div> (the one with
+      // `flex-shrink-0 flex flex-col bg-white border`).
+      let columnRoot: HTMLElement | null = el as HTMLElement;
+      while (columnRoot && !columnRoot.className.includes("flex-shrink-0 flex flex-col bg-white")) {
+        columnRoot = columnRoot.parentElement;
+      }
+      expect(columnRoot).not.toBeNull();
+      expect(columnRoot!.querySelector('[title="Auto-trigger enabled"]')).toBeInTheDocument();
+    }
   });
 });

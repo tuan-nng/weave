@@ -49,6 +49,11 @@ pub struct Task {
     pub scope: Option<String>,
     pub verification_commands: Option<String>,
     pub test_cases: Option<String>,
+    /// Card-level codebase binding (feat-068). When set, sessions
+    /// spawned from this card by lane automation use this codebase's
+    /// `cwd`. `None` falls back to the workspace's first registered
+    /// codebase (the pre-feat-068 default).
+    pub codebase_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -85,6 +90,10 @@ pub struct UpdateTask {
     pub scope: Option<Option<String>>,
     pub verification_commands: Option<Option<String>>,
     pub test_cases: Option<Option<String>>,
+    /// Card-level codebase binding (feat-068). Tri-state like the
+    /// other nullable string fields: `None` = leave alone,
+    /// `Some(None)` = clear, `Some(Some(id))` = set.
+    pub codebase_id: Option<Option<String>>,
 }
 
 /// Stateless store for task persistence.
@@ -97,13 +106,13 @@ pub struct TaskStore;
 const SELECT_COLS: &str = "t.id, t.board_id, t.column_id, t.title, t.description, \
     t.position, t.status, t.session_id, t.acceptance_criteria, t.completion_summary, \
     t.verification_report, t.priority, t.labels, t.scope, t.verification_commands, \
-    t.test_cases, t.created_at, t.updated_at";
+    t.test_cases, t.codebase_id, t.created_at, t.updated_at";
 
 /// Columns for RETURNING clause (no table alias needed).
 const RETURNING_COLS: &str = "id, board_id, column_id, title, description, \
     position, status, session_id, acceptance_criteria, completion_summary, \
     verification_report, priority, labels, scope, verification_commands, \
-    test_cases, created_at, updated_at";
+    test_cases, codebase_id, created_at, updated_at";
 
 impl TaskStore {
     /// Insert a new task. `position` is auto-assigned when `None` (max+POSITION_STEP).
@@ -455,6 +464,7 @@ impl TaskStore {
             && fields.scope.is_none()
             && fields.verification_commands.is_none()
             && fields.test_cases.is_none()
+            && fields.codebase_id.is_none()
         {
             return Self::get_by_id(db, task_id, workspace_id);
         }
@@ -531,6 +541,11 @@ impl TaskStore {
         if let Some(ref tc) = fields.test_cases {
             sets.push(format!("test_cases = ?{idx}"));
             params.push(Box::new(tc.clone()));
+            idx += 1;
+        }
+        if let Some(ref cb) = fields.codebase_id {
+            sets.push(format!("codebase_id = ?{idx}"));
+            params.push(Box::new(cb.clone()));
             idx += 1;
         }
 
@@ -690,8 +705,9 @@ impl TaskStore {
             scope: row.get(13)?,
             verification_commands: row.get(14)?,
             test_cases: row.get(15)?,
-            created_at: row.get(16)?,
-            updated_at: row.get(17)?,
+            codebase_id: row.get(16)?,
+            created_at: row.get(17)?,
+            updated_at: row.get(18)?,
         })
     }
 }
@@ -1150,6 +1166,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
         let updated = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
         assert_eq!(updated.title, "New title");
@@ -1182,6 +1199,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
         let unchanged = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
         assert_eq!(unchanged.id, task.id);
@@ -1208,6 +1226,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
         let result = TaskStore::update(&db, &task.id, &ws, &update);
         assert!(matches!(
@@ -1237,6 +1256,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
         TaskStore::update(&db, &task.id, &ws, &first).unwrap();
         // Now only change title
@@ -1255,6 +1275,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
         let updated = TaskStore::update(&db, &task.id, &ws, &second).unwrap();
         assert_eq!(updated.title, "Renamed");
@@ -1383,5 +1404,79 @@ mod tests {
         assert_eq!(from_a.len(), 1);
         assert_eq!(from_b.len(), 1);
         assert_ne!(from_a[0].id, from_b[0].id);
+    }
+
+    /// F-4: card-level codebase binding (feat-068). Setting
+    /// `codebase_id` via `UpdateTask` persists the value, and clearing
+    /// via `Some(None)` resets it. The `get_by_id` round-trip carries
+    /// the field back unchanged.
+    #[test]
+    fn test_task_codebase_id_roundtrip() {
+        let db = test_db();
+        let (ws, board_id, col_id) = seed_workspace_with_board(&db);
+        let task = create_test_task(&db, &ws, &board_id, &col_id, "T", "active");
+        assert!(
+            task.codebase_id.is_none(),
+            "newly-created task should have no codebase_id"
+        );
+
+        // Set a codebase_id.
+        let update = UpdateTask {
+            codebase_id: Some(Some("cb-mine".into())),
+            ..UpdateTask {
+                title: None,
+                description: None,
+                column_id: None,
+                position: None,
+                status: None,
+                session_id: None,
+                acceptance_criteria: None,
+                completion_summary: None,
+                verification_report: None,
+                priority: None,
+                labels: None,
+                scope: None,
+                verification_commands: None,
+                test_cases: None,
+                codebase_id: None,
+            }
+        };
+        let set = TaskStore::update(&db, &task.id, &ws, &update).unwrap();
+        assert_eq!(set.codebase_id.as_deref(), Some("cb-mine"));
+
+        // Round-trip via get_by_id.
+        let fetched = TaskStore::get_by_id(&db, &task.id, &ws).unwrap();
+        assert_eq!(
+            fetched.codebase_id.as_deref(),
+            Some("cb-mine"),
+            "codebase_id must round-trip through get_by_id"
+        );
+
+        // Clear it via Some(None).
+        let clear = UpdateTask {
+            codebase_id: Some(None),
+            ..UpdateTask {
+                title: None,
+                description: None,
+                column_id: None,
+                position: None,
+                status: None,
+                session_id: None,
+                acceptance_criteria: None,
+                completion_summary: None,
+                verification_report: None,
+                priority: None,
+                labels: None,
+                scope: None,
+                verification_commands: None,
+                test_cases: None,
+                codebase_id: None,
+            }
+        };
+        let cleared = TaskStore::update(&db, &task.id, &ws, &clear).unwrap();
+        assert!(
+            cleared.codebase_id.is_none(),
+            "Some(None) must clear the codebase_id"
+        );
     }
 }

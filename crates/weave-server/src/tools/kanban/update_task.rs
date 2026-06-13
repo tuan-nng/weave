@@ -106,6 +106,7 @@ impl ToolExecutor for UpdateTaskTool {
             scope: scope.flatten(),
             verification_commands: verification_commands.flatten(),
             test_cases: test_cases.flatten(),
+            codebase_id: None,
         };
 
         match TaskStore::update(&self.db, &task_id, &ctx.workspace_id, &fields) {

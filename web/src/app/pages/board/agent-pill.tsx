@@ -3,7 +3,7 @@
 // "agent / provider" semantic) and an amber dot if the column has
 // auto_trigger enabled.
 
-import type { RuntimeKind } from "../../../lib/types";
+import type { ColumnStage, RuntimeKind } from "../../../lib/types";
 
 const RUNTIME_KIND_LABEL: Record<RuntimeKind, string> = {
   "anthropic-api": "Anthropic API",
@@ -12,6 +12,24 @@ const RUNTIME_KIND_LABEL: Record<RuntimeKind, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+};
+
+/// Short, single-word stage labels for the column header badge
+/// (feat-068 F-3). The full "In Progress" / "Backlog" / etc. names
+/// would overflow a 280px column header; the short labels preserve
+/// the meaning in 6-8 chars.
+const STAGE_SHORT_LABEL: Record<ColumnStage, string> = {
+  backlog: "Backlog",
+  todo: "Todo",
+  dev: "In Prog",
+  review: "Review",
+  // "Done" matches the column-name label too, so we use
+  // "Shipped" to keep the in-DOM text unique (a "Done" column
+  // with a "Done" stage badge would render the same word twice
+  // in 280px-wide headers, and `findByText` in tests would
+  // match both). Wire value `done` is still rendered in the
+  // Lane footer / prompt.
+  done: "Shipped",
 };
 
 export function SpecialistChip({ name }: { name: string }) {
@@ -44,6 +62,22 @@ export function RuntimeKindBadge({ kind }: { kind: RuntimeKind }) {
   return (
     <span className="inline-flex items-center gap-1 bg-slate-100 text-slate-600 border border-slate-200/60 rounded-md px-1.5 py-0.5 text-[10px] font-medium">
       {RUNTIME_KIND_LABEL[kind] ?? kind}
+    </span>
+  );
+}
+
+/// Per-column stage badge (feat-068 F-3). Renders the short
+/// stage name in a slate pill. The orchestrator's prompt uses
+/// the same `stage` value to pick the "advance to &lt;stage&gt;"
+/// line, so the badge on the column header matches what the
+/// agent will see.
+export function StageBadge({ stage }: { stage: ColumnStage }) {
+  return (
+    <span
+      className="inline-flex items-center bg-slate-50 text-slate-500 border border-slate-200/60 rounded-md px-1.5 py-0.5 text-[10px] font-medium"
+      title={`Stage: ${stage}`}
+    >
+      {STAGE_SHORT_LABEL[stage] ?? stage}
     </span>
   );
 }

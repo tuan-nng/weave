@@ -173,22 +173,41 @@ pub async fn try_automate_lane(
     // workspace has no codebases, surface that as a clear error
     // BEFORE the validator's more cryptic "no cwd supplied" so the
     // operator knows what to fix.
+    //
+    // feat-068: a card may carry an explicit `codebase_id` binding
+    // (set by the operator via the card detail panel). Honor it first;
+    // fall back to the workspace's first registered codebase (the
+    // pre-feat-068 behavior) when the card has no binding. Native
+    // (HTTP) runtimes don't need a codebase at all.
     let codebase_id: Option<String> = if mode == Some("wrapped") {
-        let codebases =
-            crate::store::codebases::CodebaseStore::list_by_workspace(&state.db, &workspace_id)?;
-        match codebases.into_iter().next() {
-            Some(cb) => Some(cb.id),
-            None => {
-                return Err(AppError::validation_with_code(
-                    "cwd_outside_codebase",
-                    format!(
-                        "kanban auto-spawn for a CLI provider requires the workspace \
-                         to have at least one registered codebase (kanban tasks don't \
-                         carry their own cwd). Register a codebase for workspace \
-                         '{workspace_id}' via POST /api/codebases, or move the task to a \
-                         non-CLI provider lane."
-                    ),
-                ));
+        if let Some(cb_id) = task.codebase_id.as_deref() {
+            // Card has an explicit binding — use it directly. The
+            // `validate_wrapped_session_cwd` chokepoint in
+            // `SessionService::create_session` (service/sessions.rs)
+            // verifies the codebase still exists and is the cwd
+            // target; a stale binding surfaces as a clear
+            // `cwd_outside_codebase` 4xx.
+            Some(cb_id.to_string())
+        } else {
+            let codebases = crate::store::codebases::CodebaseStore::list_by_workspace(
+                &state.db,
+                &workspace_id,
+            )?;
+            match codebases.into_iter().next() {
+                Some(cb) => Some(cb.id),
+                None => {
+                    return Err(AppError::validation_with_code(
+                        "cwd_outside_codebase",
+                        format!(
+                            "kanban auto-spawn for a CLI provider requires either a \
+                             card-level codebase binding or a registered codebase in the \
+                             workspace. Set a Codebase on the card, or register a \
+                             codebase for workspace '{workspace_id}' via \
+                             POST /api/codebases, or move the task to a non-CLI provider \
+                             lane."
+                        ),
+                    ));
+                }
             }
         }
     } else {
@@ -287,6 +306,7 @@ fn empty_update() -> UpdateTask {
         scope: None,
         verification_commands: None,
         test_cases: None,
+        codebase_id: None,
     }
 }
 
@@ -850,6 +870,7 @@ mod tests {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
             created_at: "2026-06-02T00:00:00Z".into(),
             updated_at: "2026-06-02T00:00:00Z".into(),
         }
@@ -987,7 +1008,8 @@ mod tests {
                     "got code={code} msg={message}"
                 );
                 assert!(
-                    message.contains("at least one registered codebase"),
+                    message.contains("a registered codebase in the workspace")
+                        && message.contains("card-level codebase binding"),
                     "message must guide the operator, got: {message}"
                 );
             }

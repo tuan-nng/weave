@@ -113,6 +113,11 @@ export interface Task {
   acceptance_criteria: string | null;
   completion_summary: string | null;
   verification_report: string | null;
+  /// Optional codebase binding (feat-068). When set, sessions spawned
+  /// from this card by lane automation run with this codebase's
+  /// `cwd`. `null` falls back to the workspace's first registered
+  /// codebase (the pre-feat-068 default).
+  codebase_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -199,6 +204,8 @@ export interface Board {
   created_at: string;
 }
 
+export type ColumnStage = "backlog" | "todo" | "dev" | "review" | "done";
+
 export interface Column {
   id: string;
   board_id: string;
@@ -207,6 +214,15 @@ export interface Column {
   specialist_id: string | null;
   auto_trigger: boolean;
   runtime_kind: RuntimeKind | null;
+  /// Per-column kanban stage (feat-065). Defaults to "dev" when the
+  /// backend omits it. Drives the "next stage" line in the orchestrator
+  /// prompt and the lane badge in the column header.
+  stage: ColumnStage;
+  /// Per-column automation config (feat-066). `null` = no automation.
+  automation: AutomationConfig | null;
+  freeze_description: boolean;
+  required_fields: string[];
+  required_artifact_types: string[];
   created_at: string;
 }
 
@@ -229,6 +245,11 @@ export interface NewColumnSpec {
   specialist_id?: string;
   auto_trigger?: boolean;
   runtime_kind?: RuntimeKind;
+  /// Per-column kanban stage (feat-065/068). Drives the
+  /// "advance to <stage>" line in the orchestrator prompt. The
+  /// canonical Standard template (Backlog/To Do/In Progress/Review/Done)
+  /// sets each column's stage to the matching enum value.
+  stage?: ColumnStage;
 }
 
 /// Per-column automation config (feat-066).
@@ -367,6 +388,11 @@ export interface CreateColumnRequest {
   specialist_id?: string;
   auto_trigger?: boolean;
   runtime_kind?: RuntimeKind;
+  /// Per-column kanban stage (feat-065/068). Defaults to "todo" for
+  /// new auto-trigger columns (matches the most common user intent);
+  /// callers creating non-auto columns can omit to accept the
+  /// server's "dev" default.
+  stage?: ColumnStage;
   /// Per-column automation config (delivery/contract/checklist/validator
   /// gates + gate_mode). Optional; omit = no automation (legacy).
   automation?: AutomationConfig;
@@ -419,6 +445,10 @@ export interface UpdateTaskRequest {
   acceptance_criteria?: string | null;
   completion_summary?: string | null;
   verification_report?: string | null;
+  /// Optional codebase binding (feat-068). Tri-state like
+  /// description: `undefined` = leave alone, `null` = clear, `string`
+  /// = set to this codebase id.
+  codebase_id?: string | null;
 }
 
 // SSE event types — match backend SseWireEvent

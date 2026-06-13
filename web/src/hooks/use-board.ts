@@ -68,14 +68,11 @@ export interface UseBoardResult {
   createBoard: (data: CreateBoardRequest) => void;
   createCard: (data: CreateCardRequest) => void;
   updateTask: (taskId: string, data: UpdateTaskRequest) => void;
-  moveTask: (input: {
-    taskId: string;
-    toColumnId: string;
-    /** Position relative to neighbors. Server rebalances when adjacent
-     *  gaps fall below MIN_GAP; the optimistic value is overwritten by
-     *  the SSE `task_moved` event's server-canonical position. */
-    toPosition: number;
-  }) => void;
+  moveTask: (input: { taskId: string; toColumnId: string; toPosition: number }) => void;
+  /// Move a column to a new position (feat-068 F-6). The
+  /// optimistic value is overwritten by the SSE `column_added`
+  /// event (or whatever the server's canonical position is).
+  moveColumn: (input: { columnId: string; toPosition: number }) => void;
   deleteTask: (taskId: string) => void;
   createColumn: (data: CreateColumnRequest) => void;
   updateColumn: (columnId: string, data: UpdateColumnRequest) => void;
@@ -357,6 +354,18 @@ export function useBoard(workspaceId: string, boardId: string): UseBoardResult {
       api.kanban.columns.update(columnId, data),
   });
 
+  /// feat-068 (F-6): column reordering. The optimistic
+  /// position write goes through `updateColumn`; the server
+  /// rebalances when the resulting gap is < MIN_GAP and the
+  /// SSE `column_added` event patches the cache with the
+  /// canonical value (the same discipline as card moves). No
+  /// optimistic cache patch here — the server response + SSE
+  /// event is the single-writer path.
+  const moveColumnMutation = useMutation({
+    mutationFn: ({ columnId, toPosition }: { columnId: string; toPosition: number }) =>
+      api.kanban.columns.update(columnId, { position: toPosition }),
+  });
+
   const deleteBoardMutation = useMutation({
     mutationFn: () => api.kanban.boards.delete(workspaceId, boardId),
     onSuccess: () => {
@@ -381,6 +390,10 @@ export function useBoard(workspaceId: string, boardId: string): UseBoardResult {
     (input: { taskId: string; toColumnId: string; toPosition: number }) =>
       moveTaskMutation.mutate(input),
     [moveTaskMutation],
+  );
+  const moveColumn = useCallback(
+    (input: { columnId: string; toPosition: number }) => moveColumnMutation.mutate(input),
+    [moveColumnMutation],
   );
   const deleteTask = useCallback(
     (taskId: string) => deleteTaskMutation.mutate(taskId),
@@ -434,6 +447,7 @@ export function useBoard(workspaceId: string, boardId: string): UseBoardResult {
     createCard,
     updateTask,
     moveTask,
+    moveColumn,
     deleteTask,
     createColumn,
     updateColumn,

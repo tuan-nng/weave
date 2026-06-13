@@ -138,6 +138,9 @@ pub struct UpdateTaskRequest {
     pub scope: Option<Option<String>>,
     pub verification_commands: Option<Option<String>>,
     pub test_cases: Option<Option<String>>,
+    /// Card-level codebase binding (feat-068). Tri-state: `None` =
+    /// leave alone, `Some(None)` = clear, `Some(Some(id))` = set.
+    pub codebase_id: Option<Option<String>>,
 }
 
 impl From<UpdateTaskRequest> for UpdateTask {
@@ -157,6 +160,7 @@ impl From<UpdateTaskRequest> for UpdateTask {
             scope: r.scope,
             verification_commands: r.verification_commands,
             test_cases: r.test_cases,
+            codebase_id: r.codebase_id,
         }
     }
 }

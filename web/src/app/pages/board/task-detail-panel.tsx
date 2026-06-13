@@ -2,26 +2,54 @@
 // task from props (the parent passes the canonical `Task` from
 // useBoard, so SSE patches propagate without an extra useQuery).
 // Saves via the parent's updateTask callback.
+//
+// feat-068 (F-4 / F-8 / F-10): adds a "Lane" footer showing the
+// column's specialist / runtime / stage (F-10), a "Codebase"
+// dropdown (F-4) — the user picks a codebase for sessions
+// spawned from this card by lane automation; `null` falls
+// back to the workspace's first registered codebase, and a
+// "Move to column…" button (F-8) that opens a popover with
+// the list of columns from the same board. The popover is
+// an inline `<details>` element (no portal / no library) —
+// the keyboard / focus story is simple, and the popover
+// stays inside the slide-over's z-stack.
 
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
+import { useCodebases } from "../../../hooks/use-codebase";
 import { ROUTES } from "../../../lib/routes";
-import type { Task, TaskStatus, UpdateTaskRequest } from "../../../lib/types";
+import type { Codebase, Column, Task, TaskStatus, UpdateTaskRequest } from "../../../lib/types";
 
 interface TaskDetailPanelProps {
   task: Task | null;
+  /// The full column list (so F-8 "Move to…" can render a picker
+  /// and F-10 "Lane" footer can show the current column's
+  /// specialist / runtime / stage). Parent passes the columns
+  /// from `useBoard().columns` so they stay in sync with the
+  /// SSE-patched cache.
+  columns: Column[];
+  /// The workspace id, used to fetch the codebases list for
+  /// the F-4 codebase dropdown.
+  workspaceId: string;
   onClose: () => void;
   onSave: (taskId: string, data: UpdateTaskRequest) => void;
   onDelete: (taskId: string) => void;
+  /// Move the task to a different column. Parent wires this to
+  /// `useBoard().moveTask` (which routes through
+  /// `PATCH /api/tasks/:tid` with `column_id` + `position`).
+  onMoveToColumn: (taskId: string, toColumnId: string) => void;
   isSaving: boolean;
   isDeleting: boolean;
 }
 
 export function TaskDetailPanel({
   task,
+  columns,
+  workspaceId,
   onClose,
   onSave,
   onDelete,
+  onMoveToColumn,
   isSaving,
   isDeleting,
 }: TaskDetailPanelProps) {
@@ -35,7 +63,23 @@ export function TaskDetailPanel({
     acceptance_criteria: string;
     completion_summary: string;
     verification_report: string;
+    /// Card-level codebase binding (feat-068 F-4). `""` =
+    /// "no binding" (server clears the column). When the user
+    /// saves without touching the dropdown, we OMIT the
+    /// field so the server's tri-state preserves the prior
+    /// value.
+    codebase_id: string;
   }>(blankDraft);
+
+  const { data: codebases = [] } = useCodebases(workspaceId);
+  // F-8: open state for the "Move to…" popover. The popover's
+  // button list is only mounted when open so the DOM stays
+  // clean (and the in-DOM `<button>` entries don't shadow other
+  // matches in tests). Lifting into React state also makes
+  // close-on-outside-click trivial — the `<summary>` toggle
+  // syncs to this on each click via the `onToggle` handler
+  // below.
+  const [movePopoverOpen, setMovePopoverOpen] = useState(false);
 
   useEffect(() => {
     if (task) {
@@ -46,6 +90,7 @@ export function TaskDetailPanel({
         acceptance_criteria: task.acceptance_criteria ?? "",
         completion_summary: task.completion_summary ?? "",
         verification_report: task.verification_report ?? "",
+        codebase_id: task.codebase_id ?? "",
       });
     } else {
       setDraft(blankDraft);
@@ -56,6 +101,7 @@ export function TaskDetailPanel({
   const open = task !== null;
   // `hasChanges` — compare to the current canonical task. Disabled
   // Save when no edits OR title is empty.
+  const taskCodebaseId = task?.codebase_id ?? "";
   const hasChanges =
     !!task &&
     (draft.title !== task.title ||
@@ -63,7 +109,8 @@ export function TaskDetailPanel({
       draft.status !== task.status ||
       draft.acceptance_criteria !== (task.acceptance_criteria ?? "") ||
       draft.completion_summary !== (task.completion_summary ?? "") ||
-      draft.verification_report !== (task.verification_report ?? ""));
+      draft.verification_report !== (task.verification_report ?? "") ||
+      (draft.codebase_id || null) !== (taskCodebaseId || null));
   const canSave = hasChanges && draft.title.trim().length > 0 && !isSaving;
 
   function handleSave() {
@@ -89,8 +136,15 @@ export function TaskDetailPanel({
       data.verification_report =
         draft.verification_report === "" ? null : draft.verification_report;
     }
+    if ((draft.codebase_id || null) !== (taskCodebaseId || null)) {
+      data.codebase_id = draft.codebase_id === "" ? null : draft.codebase_id;
+    }
     onSave(task.id, data);
   }
+
+  // F-10: Lane footer. Look up the current column by id and render
+  // a one-line summary of the binding state.
+  const currentColumn = task ? columns.find((c) => c.id === task.column_id) : undefined;
 
   return (
     <>
@@ -174,6 +228,19 @@ export function TaskDetailPanel({
             </Link>
           )}
 
+          {/* Lane footer (F-10). Below the agent pill, before the
+              form fields. Renders the column's binding state so
+              the user knows which specialist / runtime / stage
+              will pick up the card on the next move. */}
+          {currentColumn && (
+            <div className="mb-5 text-[11px] text-slate-500 bg-slate-50 border border-slate-200/60 rounded-lg px-3 py-2">
+              <span className="font-medium text-slate-700">Lane:</span> {currentColumn.name}
+              {currentColumn.specialist_id ? ` (${currentColumn.specialist_id}` : " ("}
+              {currentColumn.runtime_kind ? `, ${currentColumn.runtime_kind}` : ""}
+              {`,\u00a0stage: ${currentColumn.stage})`}
+            </div>
+          )}
+
           <div className="space-y-4">
             <Field label="Title">
               <input
@@ -204,6 +271,32 @@ export function TaskDetailPanel({
                 <option value="done">done</option>
                 <option value="archived">archived</option>
               </select>
+            </Field>
+
+            {/* F-4: codebase binding dropdown. The user can pin
+                a specific codebase to this card; sessions spawned
+                by lane automation will use this codebase's cwd.
+                "Workspace default (first codebase)" means the
+                binding is empty — the server picks the first
+                registered codebase in the workspace. */}
+            <Field label="Codebase">
+              <select
+                value={draft.codebase_id}
+                onChange={(e) => setDraft((d) => ({ ...d, codebase_id: e.target.value }))}
+                className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
+              >
+                <option value="">Workspace default (first codebase)</option>
+                {codebases.map((cb: Codebase) => (
+                  <option key={cb.id} value={cb.id}>
+                    {cb.label ?? cb.path}
+                    {cb.label ? ` — ${cb.path}` : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="text-[10px] text-slate-400 mt-1.5">
+                Pinned codebase for sessions spawned by lane automation. "Workspace default" picks
+                the first registered codebase when the runtime requires a cwd.
+              </p>
             </Field>
 
             <Field label="Acceptance Criteria">
@@ -240,14 +333,71 @@ export function TaskDetailPanel({
 
         {/* Footer */}
         <div className="h-16 flex-shrink-0 flex items-center justify-between px-5 border-t border-slate-200/80 bg-white">
-          <button
-            type="button"
-            onClick={() => task && onDelete(task.id)}
-            disabled={!task || isDeleting}
-            className="h-9 px-3 text-xs font-medium text-brand-red-600 bg-brand-red-50 border border-brand-red-200/60 rounded-lg hover:bg-brand-red-100 transition-colors disabled:opacity-50"
-          >
-            {isDeleting ? "Deleting…" : "Delete"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => task && onDelete(task.id)}
+              disabled={!task || isDeleting}
+              className="h-9 px-3 text-xs font-medium text-brand-red-600 bg-brand-red-50 border border-brand-red-200/60 rounded-lg hover:bg-brand-red-100 transition-colors disabled:opacity-50"
+            >
+              {isDeleting ? "Deleting…" : "Delete"}
+            </button>
+            {/* F-8: Move to column… (keyboard-accessible fallback
+                for the drag-only move). `<details>` keeps the
+                focus / escape-key semantics simple. The popover
+                button list is only mounted when `open` is true
+                so the DOM stays clean and the in-DOM `<button>`
+                entries don't shadow other text matches in
+                tests / screen readers. */}
+            <details
+              className="relative"
+              data-testid="move-to-popover"
+              open={movePopoverOpen}
+              onToggle={(e) => setMovePopoverOpen((e.target as HTMLDetailsElement).open)}
+            >
+              <summary
+                className="h-9 px-3 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors cursor-pointer list-none inline-flex items-center gap-1 select-none"
+                aria-label="Move to column"
+              >
+                Move to…
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </summary>
+              {movePopoverOpen && (
+                <div className="absolute bottom-full left-0 mb-1 w-48 max-h-60 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg py-1 z-50">
+                  {columns
+                    .filter((c) => c.id !== task?.column_id)
+                    .map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => {
+                          if (!task) return;
+                          onMoveToColumn(task.id, c.id);
+                          setMovePopoverOpen(false);
+                          // Close the panel after the move so the
+                          // user can see the new column.
+                          onClose();
+                        }}
+                        className="block w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        {c.name}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </details>
+          </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -278,6 +428,7 @@ const blankDraft = {
   acceptance_criteria: "",
   completion_summary: "",
   verification_report: "",
+  codebase_id: "",
 };
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

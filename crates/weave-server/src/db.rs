@@ -118,6 +118,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "017",
         include_str!("migrations/017_kanban_session_watch.sql"),
     ),
+    ("018", include_str!("migrations/018_task_codebase_id.sql")),
 ];
 
 impl Db {
@@ -344,8 +345,8 @@ mod tests {
 
         assert_eq!(v1, v2, "user_version should not change on second run");
         assert_eq!(
-            v1, 17,
-            "user_version should be 17 after all migrations (feat-067 adds 017)"
+            v1, 18,
+            "user_version should be 18 after all migrations (feat-068 adds 018)"
         );
     }
 

@@ -93,6 +93,7 @@ impl ToolExecutor for UpdateCardTool {
             scope: None,
             verification_commands: None,
             test_cases: None,
+            codebase_id: None,
         };
 
         match TaskStore::update(&self.db, &card_id, &ctx.workspace_id, &fields) {

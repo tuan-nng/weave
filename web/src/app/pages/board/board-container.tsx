@@ -2,6 +2,14 @@
 // resolves drops into useBoard.moveTask calls. The container is purely
 // a presentational + dnd-wiring shell: it reads from useBoard (passed
 // via props from the page) and renders columns / add-column placeholder.
+//
+// feat-068 (F-6 / F-9): the DndContext now also handles
+// column-level drags. The `data.kind` discriminator on the
+// sortable item separates card drags from column drags in
+// `handleDragStart` / `handleDragEnd`. Column reordering uses
+// the same midpoint-position computation as card reordering.
+// The scrollable main element gets a `mask-image` to fade
+// off-screen content (F-9).
 
 import { useState } from "react";
 import {
@@ -15,7 +23,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { SortableContext, arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { AddColumnButton } from "./add-column-button";
 import { AddColumnModal } from "./add-column-modal";
 import { AddCardModal } from "./add-card-modal";
@@ -29,6 +37,19 @@ export interface MoveTaskInput {
   toPosition: number;
 }
 
+/// One column reordering step. The container passes a stable
+/// `columns` prop, so we can't reorder in-place — we have to
+/// compute a new position for the moved column and ask the
+/// parent to PATCH it.
+export interface MoveColumnInput {
+  columnId: string;
+  /// New position relative to neighbors. The server rebalances
+  /// when adjacent gaps fall below `MIN_GAP = 2`; the optimistic
+  /// value is overwritten by the `column_added` SSE event's
+  /// server-canonical position (the same pattern as card moves).
+  toPosition: number;
+}
+
 interface BoardContainerProps {
   columns: Column[];
   tasksByColumn: Map<string, Task[]>;
@@ -36,6 +57,7 @@ interface BoardContainerProps {
   onCreateColumn: (data: CreateColumnRequest) => void;
   onCreateCard: (data: CreateCardRequest) => void;
   onMoveTask: (input: MoveTaskInput) => void;
+  onMoveColumn: (input: MoveColumnInput) => void;
   isCreatingColumn: boolean;
   isCreatingCard: boolean;
   isMovingTask: boolean;
@@ -48,6 +70,7 @@ export function BoardContainer({
   onCreateColumn,
   onCreateCard,
   onMoveTask,
+  onMoveColumn,
   isCreatingColumn,
   isCreatingCard,
   isMovingTask,
@@ -63,6 +86,10 @@ export function BoardContainer({
   // original card) keeps the live card visible at the cursor and lets
   // the source position collapse cleanly.
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+  /// Active column shown in the DragOverlay for column drags.
+  /// Distinct from `activeTask` so card and column drags don't
+  /// share overlay state.
+  const [activeColumn, setActiveColumn] = useState<Column | null>(null);
   const [addCardColumnId, setAddCardColumnId] = useState<string | null>(null);
   const [addColumnOpen, setAddColumnOpen] = useState(false);
 
@@ -74,22 +101,64 @@ export function BoardContainer({
     return undefined;
   }
 
+  function findColumnById(id: string): Column | undefined {
+    return columns.find((c) => c.id === id);
+  }
+
   function handleDragStart(event: DragStartEvent) {
     const id = String(event.active.id);
+    const data = event.active.data.current as { kind?: "card" | "column" } | undefined;
+    if (data?.kind === "column") {
+      const col = findColumnById(id);
+      if (col) setActiveColumn(col);
+      return;
+    }
     const found = findTaskById(id);
     if (found) setActiveTask(found);
   }
 
   function handleDragEnd(event: DragEndEvent) {
     setActiveTask(null);
+    setActiveColumn(null);
     const { active, over } = event;
     if (!over) return;
-    const taskId = String(active.id);
+    const activeId = String(active.id);
     const overId = String(over.id);
+    const activeData = active.data.current as { kind?: "card" | "column" } | undefined;
 
-    // Resolve the drop target. Two cases:
-    //   1) `over` is a column droppable (`col:<cid>`) — drop at end.
-    //   2) `over` is another card — drop above it in that column.
+    if (activeData?.kind === "column") {
+      // Column drag. `over` is another column id. Compute the new
+      // position as the midpoint of the neighbors' positions in the
+      // ordered list. The server rebalances when adjacent gaps fall
+      // below MIN_GAP (the same discipline as card moves).
+      if (activeId === overId) return;
+      const fromIdx = columns.findIndex((c) => c.id === activeId);
+      const toIdx = columns.findIndex((c) => c.id === overId);
+      if (fromIdx === -1 || toIdx === -1) return;
+      const reordered = arrayMove(columns, fromIdx, toIdx);
+      // `reordered[toIdx]` is the moved column. Its new position
+      // is the midpoint of its new neighbors.
+      const newNeighbors = reordered.filter((c) => c.id !== activeId);
+      const before = reordered[toIdx - 1]?.position;
+      const after = reordered[toIdx + 1]?.position;
+      let toPosition: number;
+      if (before === undefined && after === undefined) {
+        toPosition = 1000;
+      } else if (before === undefined) {
+        toPosition = (after ?? 1000) - 1000;
+      } else if (after === undefined) {
+        toPosition = before + 1000;
+      } else {
+        toPosition = Math.floor((before + after) / 2);
+      }
+      onMoveColumn({ columnId: activeId, toPosition });
+      // `newNeighbors` is the post-move column list; unused below.
+      void newNeighbors;
+      return;
+    }
+
+    // Card drag. (Existing logic, copied verbatim.)
+    const taskId = activeId;
     let toColumnId: string;
     let toIndex: number;
 
@@ -146,20 +215,51 @@ export function BoardContainer({
       collisionDetection={closestCorners}
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
-      onDragCancel={() => setActiveTask(null)}
+      onDragCancel={() => {
+        setActiveTask(null);
+        setActiveColumn(null);
+      }}
     >
-      <div className="flex items-start gap-3 px-5 py-5 min-h-0 h-full">
-        {columns.map((col) => (
-          <BoardColumn
-            key={col.id}
-            column={col}
-            tasks={tasksByColumn.get(col.id) ?? []}
-            onCardClick={onCardClick}
-            onAddCard={() => setAddCardColumnId(col.id)}
-          />
-        ))}
-        <AddColumnButton onClick={() => setAddColumnOpen(true)} />
-      </div>
+      <SortableContext items={columns.map((c) => c.id)}>
+        {/*
+          F-9: horizontal scroll affordance. The `mask-image` fades
+          the right edge so off-screen columns are visible. The
+          scroll container is the parent <main> in board.tsx; this
+          inner div just lays out the columns.
+        */}
+        <div
+          className="flex items-start gap-3 px-5 py-5 min-h-0 h-full"
+          style={{
+            maskImage: "linear-gradient(to right, black 0%, black 92%, transparent 100%)",
+            WebkitMaskImage: "linear-gradient(to right, black 0%, black 92%, transparent 100%)",
+          }}
+        >
+          {columns.map((col, idx) => (
+            <BoardColumn
+              key={col.id}
+              column={col}
+              tasks={tasksByColumn.get(col.id) ?? []}
+              isFirst={idx === 0}
+              isLast={idx === columns.length - 1}
+              onCardClick={onCardClick}
+              onAddCard={() => setAddCardColumnId(col.id)}
+              onMoveLeft={() => {
+                if (idx === 0) return;
+                const prev = columns[idx - 1];
+                const toPosition = (prev.position + col.position) / 2;
+                onMoveColumn({ columnId: col.id, toPosition });
+              }}
+              onMoveRight={() => {
+                if (idx === columns.length - 1) return;
+                const next = columns[idx + 1];
+                const toPosition = (col.position + next.position) / 2;
+                onMoveColumn({ columnId: col.id, toPosition });
+              }}
+            />
+          ))}
+          <AddColumnButton onClick={() => setAddColumnOpen(true)} />
+        </div>
+      </SortableContext>
       <DragOverlay>
         {activeTask ? (
           <div className="rounded-xl border border-slate-300 bg-white px-3 py-2.5 shadow-lg w-[256px] rotate-1">
@@ -168,6 +268,18 @@ export function BoardContainer({
             </span>
             <div className="mt-2">
               <TaskStatusChip status={activeTask.status} />
+            </div>
+          </div>
+        ) : activeColumn ? (
+          <div className="w-[280px] flex-shrink-0 flex flex-col bg-white border border-black/[0.06] rounded-2xl max-h-full shadow-lg rotate-1">
+            <div className="flex items-center gap-1.5 px-3.5 py-2.5 border-b border-slate-100">
+              <span className="text-sm font-semibold text-slate-900 truncate">
+                {activeColumn.name}
+              </span>
+              {activeColumn.specialist_id && <span className="text-[10px] text-slate-400">·</span>}
+              {activeColumn.specialist_id && (
+                <span className="text-[10px] text-slate-500">{activeColumn.specialist_id}</span>
+              )}
             </div>
           </div>
         ) : null}

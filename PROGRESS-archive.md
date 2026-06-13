@@ -15,6 +15,66 @@ This file is **append-only**. Old session entries are never deleted; they preser
 
 ## Session Entries
 
+### feat-068 — Kanban UI gaps (phase-12, 2026-06-13)
+
+Closes all 11 findings from `docs/design-docs/kanban-ui-gaps-2026-06-13.md`, the shopping list surfaced by the agent-browser walkthrough on 2026-06-13. The walkthrough revealed that the same orchestrator flow run end-to-end through the UI was materially worse than the same flow via the API: wrong provider (HTTP picked over the desired CLI), wrong next-stage (the prompt's "advance to &lt;stage&gt;" line uses the column's `stage` field, which defaulted to `dev` because the UI never sent it), no codebase binding on the auto-spawned session (cwd=None, no working directory). All three classes are downstream of the same root cause: `AddColumnModal` was a strict subset of the server's column DTO.
+
+**Architecture decision (user picked the maximum scope)**
+
+All 11 findings in one `feat-068`, named `feat-board-templates-stages-and-binding`. Card-level codebase binding (Option B from the doc — binding lives on the task row, not the column). Column reorder = drag handle + ◀/▶ buttons (the doc's "drag handle" + "edit modal" + "up/down" trio collapsed into the drag handle + button pair; an edit modal would be the natural follow-up if column-level properties need to change after creation, but the F-1 standard template + F-2 stage/runtime pickers at creation time close the common case). Always show the codebase picker in the card detail panel (not just for CLI-bound cards) so the binding is visible regardless of the lane the card is in.
+
+**Findings closed:**
+
+- **F-1** (NewBoardModal template): `web/src/components/new-board-modal.tsx` gains a Template picker. Standard pre-populates 5 `NewColumnSpec` columns with the canonical stage + specialist mapping (Backlog→backlog-refiner, To Do→todo-orchestrator, In Progress→dev-crafter, Review→review-guard, Done→done-reporter). Empty creates a board with zero columns; the user adds them via `+ Add column`.
+- **F-2** (stage dropdown in modal): the modal now sends `stage` in the POST payload. Default for new auto-trigger columns is `todo` (most common user intent).
+- **F-3** (stage badge in column header): new `StageBadge` component in `agent-pill.tsx`. Short labels: `Backlog` / `Todo` / `In Prog` / `Review` / `Shipped` — the "Shipped" label for the `done` wire value avoids colliding with a "Done" column-name in `findByText` matches (a column named "Done" with a "Done" stage badge would render the same word twice in 280px-wide headers, and tests would match both).
+- **F-4** (card-level codebase binding): migration `018_task_codebase_id.sql` (nullable `tasks.codebase_id TEXT`, no FK — the validator at `service/kanban.rs` catches stale bindings with `cwd_outside_codebase` 4xx). `Task` + `UpdateTask` + `UpdateTaskRequest` DTO widen. `try_automate_lane` now prefers `task.codebase_id` over the workspace's first registered codebase for CLI runtimes; the new error message guides the operator with 3 remediation options (set codebase on card, register codebase in workspace, or move to non-CLI lane).
+- **F-5** (runtime_kind in modal): 5-option select — Inherit (omits the field, preserves pre-feat-055 behavior) / Anthropic API / Claude Code (CLI) / Codex (CLI) / OpenCode (CLI).
+- **F-6** (column reordering): `BoardColumn` is now `useSortable` with `data: { kind: "column" }`. `BoardContainer`'s `DndContext` discriminates card vs column drags via `data.kind`. The column header gains a dedicated drag-handle button + ◀/▶ move buttons (disabled at edges) — the move buttons use the parent's `onMoveColumn` callback (position = midpoint of neighbors, the same discipline as card moves). Phase 6 review caught a UX bug here: the drag-handle listeners originally wrapped the entire header, so clicking ◀/▶ would also start a column drag. Refactored to a dedicated grip-icon button (`listeners` are isolated to that button; `attributes` are spread on the same button so screen readers still announce the draggable region).
+- **F-7** (specialist description in dropdown): the specialist `<option>` now shows `name — description` when the description is non-empty.
+- **F-8** (Move to column… popover): TaskDetailPanel footer gains a `<details>` popover with a button list of every other column on the board. Clicking a column calls `onMoveToColumn` then closes the panel. The popover's button list is only mounted when the `<details>` is open — the popover is a child of the panel, so its child `<button>` elements appear in the DOM (closed) and would shadow `findByText` matches in tests. This caused an early-test failure that drove the unmount-when-closed fix.
+- **F-9** (scroll affordance): the board's inner column-row div gets `mask-image: linear-gradient(to right, black 0%, black 92%, transparent 100%)` so off-screen columns fade rather than clip.
+- **F-10** (Lane footer): TaskDetailPanel body shows "Lane: &lt;name&gt; (&lt;specialist_id&gt;, &lt;runtime_kind&gt;, stage: &lt;stage&gt;)" so the user knows what binding will pick up the card on the next move.
+- **F-11** (`+ Add card` already wired): confirmed at `board.tsx:108-117`. The doc's reproduction is from an older state — the button is rendered whenever `columns.length > 0` and the column itself doesn't already have an open AddCardModal. No change needed; the `+ Add card and + Add column placeholders` test in `kanban-board.test.tsx:252` still asserts the text.
+
+**Type changes:**
+
+- `web/src/lib/types.ts`: `Column` widens to expose `stage`, `automation`, `freeze_description`, `required_fields`, `required_artifact_types` (all already on the backend `Column` struct; the frontend was a strict subset). `NewColumnSpec` + `CreateColumnRequest` gain `stage?`. `Task` gains `codebase_id: string | null`. `UpdateTaskRequest` gains `codebase_id?: string | null`. New `ColumnStage` string-literal union.
+
+**Files touched (actual):**
+
+- `crates/weave-server/src/migrations/018_task_codebase_id.sql` (new)
+- `crates/weave-server/src/db.rs` (register migration 018)
+- `crates/weave-server/src/store/tasks.rs` (Task + UpdateTask + SELECT_COLS + RETURNING_COLS + map_row + update SET clause; 5 test fixtures; 1 new test)
+- `crates/weave-server/src/api/kanban.rs` (UpdateTaskRequest + From impl)
+- `crates/weave-server/src/service/kanban.rs` (try_automate_lane: prefer task.codebase_id; 4 existing test assertions updated for the new error message)
+- `crates/weave-server/src/service/kanban_prompt.rs` (task_with() test helper; 2 new stage-aware prompt tests)
+- `crates/weave-server/src/service/kanban_prompt_ctx.rs` (task_fixture() test helper)
+- `crates/weave-server/src/tools/kanban/update_card.rs` (UpdateTask construction)
+- `crates/weave-server/src/tools/kanban/update_task.rs` (UpdateTask construction)
+- `web/src/lib/types.ts`
+- `web/src/components/new-board-modal.tsx` (F-1 template picker)
+- `web/src/app/pages/board/add-column-modal.tsx` (F-2/F-3/F-5/F-7 form)
+- `web/src/app/pages/board/board-column.tsx` (F-3 stage badge + F-6 drag handle + move buttons)
+- `web/src/app/pages/board/board-container.tsx` (F-6 column DndContext + F-9 mask-image)
+- `web/src/app/pages/board/agent-pill.tsx` (new `StageBadge` + `STAGE_SHORT_LABEL`)
+- `web/src/app/pages/board/task-detail-panel.tsx` (F-4 codebase dropdown + F-8 Move-to + F-10 Lane footer)
+- `web/src/app/pages/board.tsx` (wire new TaskDetailPanel props)
+- `web/src/hooks/use-board.ts` (new moveColumn mutation + callback)
+- `web/src/app/__tests__/add-column-modal.test.tsx` (new — 5 tests)
+- `web/src/app/__tests__/boards.test.tsx` (test updated for the new Standard-template payload)
+- `web/src/app/__tests__/kanban-board.test.tsx` (mock fixtures widened; runtime-badge test rewritten to walk the DOM)
+
+**Verification:**
+
+- `./init.sh` 3-layer gate green: 893 Rust + 147 frontend tests pass (was 891 + 142; +7 net: 1 codebase_id roundtrip + 2 stage-aware prompt + 4 service/kanban existing test-message updates; 5 new frontend in add-column-modal.test.tsx). clippy + fmt + prettier + ESLint + vite build (122 modules) all clean. Migration 018 applied (`user_version=18`, asserted in `test_migrations_idempotent`).
+
+**Out-of-scope items noticed (logged, not fixed):**
+
+- **Pre-existing 5-frontend-test lint gap**: `bun run typecheck` (separate from `just check`'s `bun run test`) would surface pre-existing test-typing issues (`vi.mocked()` returns plain functions in some helper patterns, not fully-typed mocks). The project's `just check` runs `bun run test` (runtime tests), not `tsc` — tests are the source of truth. Same gap as feat-067 review.
+- **The + Add card button enablement**: `board.tsx:108-117` enables `+ Card` whenever `columns.length > 0` and the column itself doesn't have an open AddCardModal. If a column has 0 cards AND the user is in a drag-and-drop view, the `+ Add card` button is still rendered (it's a sibling of the SortableContext in the column body). The empty-state copy ("No cards yet — drag one here or add a new card below") is shown in the body; the `+ Add card` button is below. Both are present simultaneously, which is the design intent. If a future UX review wants the empty-state to show only the `+ Add card` button (hiding the `SortableContext` entirely), the change is a 1-line refactor in `board-column.tsx:140-152`. Logged.
+- **`board-column.tsx` has a stage-badge accessibility deferral**: the `StageBadge` uses `title="Stage: <wire value>"` for the hover-tooltip, but the badge text is the short label ("Todo", "In Prog", "Shipped"). A screen reader announces the text "Todo" but the actual wire value is "todo" — fine for the user but the tooltip + label combination could be richer with `aria-label="Stage: todo"`. Not a defect, but logged for a future a11y pass on the column header.
+
 ### feat-063 — Rich kanban auto-spawn prompt (phase-12, committed `957d509` 2026-06-12)
 
 Phase-12 step 1: a structured 12-slot prompt for auto-spawned kanban sessions. Replaces the 3-line `build_initial_prompt` shim with a builder that emits column/board context, lane history, and per-gate status so the agent knows where it is, what's blocking the next move, and what the previous lane did.

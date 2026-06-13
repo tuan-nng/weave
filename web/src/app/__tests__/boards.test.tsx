@@ -180,7 +180,9 @@ describe("boards list", () => {
     });
     fireEvent.click(trigger);
 
-    // Fill the form and submit.
+    // Fill the form and submit. The modal now defaults to the
+    // "Standard" template (5 columns + bundled specialists +
+    // stage mapping), so the create payload carries `columns` too.
     const nameInput = (await screen.findByPlaceholderText(
       /e\.g\. Product Sprint Q3/i,
     )) as HTMLInputElement;
@@ -192,6 +194,13 @@ describe("boards list", () => {
     await waitFor(() => {
       expect(mockApi.kanban.boards.create).toHaveBeenCalledWith("w1", {
         name: "Sprint 2",
+        columns: expect.arrayContaining([
+          expect.objectContaining({ name: "Backlog", stage: "backlog" }),
+          expect.objectContaining({ name: "To Do", stage: "todo" }),
+          expect.objectContaining({ name: "In Progress", stage: "dev" }),
+          expect.objectContaining({ name: "Review", stage: "review" }),
+          expect.objectContaining({ name: "Done", stage: "done" }),
+        ]),
       });
     });
     await waitFor(() => {
