@@ -43,6 +43,22 @@ pub struct Session {
     /// is `cli_resume_id`. `None` for native HTTP sessions and for
     /// any session that has not yet produced per-turn state.
     pub runtime_metadata_json: Option<String>,
+    /// F-14: the `role` of the most recent message in this session
+    /// (`"user"`, `"assistant"`, `"system"`, or `None` for a fresh
+    /// session with no messages). The frontend uses this together
+    /// with `status` to decide whether the agent is "running" vs.
+    /// "needs user input" without an extra history round-trip.
+    pub last_message_role: Option<String>,
+    /// F-14: derived boolean — `true` when the session is in a
+    /// state where the user must send the next prompt. True when
+    /// `status == "ready"` and the most recent message was from
+    /// the assistant (i.e. the agent finished a turn). False for
+    /// sessions that have never produced a turn, are running, are
+    /// errored, cancelled, completed, or connecting. The frontend
+    /// uses this to render a "Needs input" pill + a rose-tinted
+    /// card border so the user can spot a paused agent at a glance
+    /// (and to drive the nav badge count).
+    pub awaiting_user_input: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -184,6 +200,16 @@ impl SessionStore {
                 "SELECT id, workspace_id, provider_id, specialist_id,
                         parent_session_id, context_id, status, model, cwd, codebase_id,
                         runtime_kind, mode, runtime_metadata_json,
+                        (SELECT role FROM messages
+                          WHERE session_id = sessions.id
+                          ORDER BY created_at DESC, id DESC
+                          LIMIT 1) AS last_message_role,
+                        CASE WHEN status = 'ready'
+                              AND (SELECT role FROM messages
+                                    WHERE session_id = sessions.id
+                                    ORDER BY created_at DESC, id DESC
+                                    LIMIT 1) = 'assistant'
+                             THEN 1 ELSE 0 END AS awaiting_user_input,
                         created_at, updated_at
                  FROM sessions WHERE id = ?1",
                 [id],
@@ -239,6 +265,16 @@ impl SessionStore {
             "SELECT id, workspace_id, provider_id, specialist_id,
                     parent_session_id, context_id, status, model, cwd, codebase_id,
                     runtime_kind, mode, runtime_metadata_json,
+                    (SELECT role FROM messages
+                      WHERE session_id = sessions.id
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT 1) AS last_message_role,
+                    CASE WHEN status = 'ready'
+                          AND (SELECT role FROM messages
+                                WHERE session_id = sessions.id
+                                ORDER BY created_at DESC, id DESC
+                                LIMIT 1) = 'assistant'
+                         THEN 1 ELSE 0 END AS awaiting_user_input,
                     created_at, updated_at
              FROM sessions
              WHERE workspace_id = ?1
@@ -323,7 +359,7 @@ impl SessionStore {
     /// `LoopLimit`) before this method is called.
     ///
     /// Parameterized (`?1` / `?2` / `?3`) — no string interpolation.
-    /// Drift on the 15-column RETURNING list is a silent bug (see
+    /// Drift on the 17-column RETURNING list is a silent bug (see
     /// `map_row`); kept in lockstep with `create` / `get_by_id` /
     /// `list_by_workspace` / `update_status`.
     pub fn update_runtime_metadata(
@@ -371,6 +407,50 @@ impl SessionStore {
         Ok(())
     }
 
+    /// F-14: list sessions that are currently awaiting a user reply,
+    /// workspace-scoped. "Awaiting" = `status='ready'` and the most
+    /// recent message is from the assistant (the agent finished a
+    /// turn and is idle). The query is the same shape as the per-row
+    /// `awaiting_user_input` derivation in `get_by_id` /
+    /// `list_by_workspace`, just filtered to that subset.
+    ///
+    /// The frontend uses this for the global "Sessions" nav badge so
+    /// the user can see at a glance how many agents across all
+    /// workspaces are waiting on them. Returns the full `Session` row
+    /// (cheap; SQLite scan, no N+1 history fetch).
+    pub fn list_awaiting_input(db: &Db, workspace_id: &str) -> Result<Vec<Session>, AppError> {
+        let conn = db.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, workspace_id, provider_id, specialist_id,
+                    parent_session_id, context_id, status, model, cwd, codebase_id,
+                    runtime_kind, mode, runtime_metadata_json,
+                    (SELECT role FROM messages
+                      WHERE session_id = sessions.id
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT 1) AS last_message_role,
+                    CASE WHEN status = 'ready'
+                          AND (SELECT role FROM messages
+                                WHERE session_id = sessions.id
+                                ORDER BY created_at DESC, id DESC
+                                LIMIT 1) = 'assistant'
+                         THEN 1 ELSE 0 END AS awaiting_user_input,
+                    created_at, updated_at
+             FROM sessions
+             WHERE workspace_id = ?1
+               AND status = 'ready'
+               AND (SELECT role FROM messages
+                     WHERE session_id = sessions.id
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT 1) = 'assistant'
+             ORDER BY updated_at DESC
+             LIMIT 200",
+        )?;
+        let rows: Vec<Session> = stmt
+            .query_map(rusqlite::params![workspace_id], Self::map_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Map a result row to a `Session`.
     ///
     /// Column indices MUST match the SELECT/RETURNING column lists in
@@ -392,8 +472,23 @@ impl SessionStore {
     ///  10: runtime_kind       (TEXT; parsed via `RuntimeKind::from_str`)
     ///  11: mode               (TEXT; parsed via `SessionMode::from_str`)
     ///  12: runtime_metadata_json (TEXT NULL)
-    ///  13: created_at
-    ///  14: updated_at
+    ///  13: last_message_role  (TEXT NULL — F-14 derived, role of the most recent message)
+    ///  14: awaiting_user_input (INTEGER 0/1 — F-14 derived, true when ready + last msg is assistant)
+    ///  15: created_at
+    ///  16: updated_at
+    ///
+    /// Read sites (SELECT): all 17 columns are present (the last two
+    /// are subqueries; see `get_by_id` / `list_by_workspace` /
+    /// `list_awaiting_input`).
+    ///
+    /// Write sites (INSERT/UPDATE RETURNING): the table itself only
+    /// has 15 columns — `last_message_role` and `awaiting_user_input`
+    /// are derived. The INSERT/UPDATE RETURNING therefore omits the
+    /// derived fields, and the caller patches them in via
+    /// `patch_derived_fields`. The split keeps the SELECT path's
+    /// 17-column shape simple while letting writes avoid a
+    /// second SELECT (the caller does ONE read or ONE write, not
+    /// both).
     fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         // The 2 typed enum columns are read as String and parsed via
         // `FromStr`. The column-level DEFAULTs on migration 011
@@ -412,6 +507,27 @@ impl SessionStore {
             rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
+        // Derived columns may be absent on INSERT/UPDATE RETURNING rows
+        // (those return 15 columns, not 17). Be defensive: read each
+        // derived field with the `?` only after a graceful fallback.
+        // On 17-col rows, indices 13/14 are last_message_role/awaiting;
+        // on 15-col rows, indices 13/14 are created_at/updated_at.
+        // Reading by the wrong type or missing column returns an error
+        // we catch with `.ok()` and replace with the row-real default.
+        let last_message_role: Option<String> =
+            row.get::<_, Option<String>>(13).unwrap_or_default();
+        let awaiting_user_input: bool = match row.get::<_, Option<i64>>(14) {
+            Ok(Some(v)) => v != 0,
+            _ => false,
+        };
+        let created_at: String = row
+            .get::<_, String>(15)
+            .or_else(|_| row.get::<_, String>(13))
+            .unwrap_or_default();
+        let updated_at: String = row
+            .get::<_, String>(16)
+            .or_else(|_| row.get::<_, String>(14))
+            .unwrap_or_default();
         Ok(Session {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
@@ -426,8 +542,10 @@ impl SessionStore {
             runtime_kind,
             mode,
             runtime_metadata_json: row.get(12)?,
-            created_at: row.get(13)?,
-            updated_at: row.get(14)?,
+            last_message_role,
+            awaiting_user_input,
+            created_at,
+            updated_at,
         })
     }
 
@@ -1494,5 +1612,99 @@ pub(crate) mod tests {
         );
         assert_eq!(map.get(&ws2_id), Some(&1), "ws2: 1 active");
         assert_eq!(map.len(), 2, "only two workspaces with active sessions");
+    }
+
+    /// F-14: `list_awaiting_input` returns only sessions in
+    /// `status='ready'` whose most recent message is from the
+    /// assistant. A `ready` session with no messages (still
+    /// connecting-to-an-agent) is excluded; a `ready` session whose
+    /// last message is from the user is also excluded.
+    #[test]
+    fn test_list_awaiting_input_filters_correctly() {
+        let db = test_db();
+        let (ws_id, provider_id) = seed_deps(&db);
+
+        // session A: ready + last msg assistant → must appear
+        let s_a = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None,
+        )
+        .unwrap();
+        SessionStore::update_status(&db, &s_a.id, "ready").unwrap();
+        MessageStore::create(&db, &s_a.id, "user", "hi", None).unwrap();
+        MessageStore::create(&db, &s_a.id, "assistant", "hello", None).unwrap();
+
+        // session B: ready + last msg user → excluded
+        let s_b = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None,
+        )
+        .unwrap();
+        SessionStore::update_status(&db, &s_b.id, "ready").unwrap();
+        MessageStore::create(&db, &s_b.id, "user", "follow-up", None).unwrap();
+
+        // session C: ready + no messages → excluded
+        let s_c = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None,
+        )
+        .unwrap();
+        SessionStore::update_status(&db, &s_c.id, "ready").unwrap();
+
+        // session D: error + assistant last → excluded (status gate)
+        let s_d = SessionStore::create(
+            &db,
+            &ws_id,
+            &provider_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            RuntimeKind::default(),
+            SessionMode::default(),
+            None,
+        )
+        .unwrap();
+        SessionStore::update_status(&db, &s_d.id, "ready").unwrap();
+        MessageStore::create(&db, &s_d.id, "assistant", "x", None).unwrap();
+        SessionStore::update_status(&db, &s_d.id, "error").unwrap();
+
+        let awaiting = SessionStore::list_awaiting_input(&db, &ws_id).expect("list");
+        assert_eq!(awaiting.len(), 1, "only session A qualifies");
+        assert_eq!(awaiting[0].id, s_a.id);
+        assert!(awaiting[0].awaiting_user_input);
+        assert_eq!(awaiting[0].last_message_role.as_deref(), Some("assistant"));
     }
 }

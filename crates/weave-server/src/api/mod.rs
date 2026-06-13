@@ -55,6 +55,11 @@ pub fn router(state: AppState, start_time: ServerStartTime) -> Router {
             "/api/workspaces/{wid}/sessions",
             get(sessions::list_sessions).post(sessions::create_session),
         )
+        // F-14: awaiting-input sessions for the global nav badge.
+        .route(
+            "/api/workspaces/{wid}/sessions/awaiting-input",
+            get(sessions::list_awaiting_input_sessions),
+        )
         .route(
             "/api/sessions/{id}",
             get(sessions::get_session)

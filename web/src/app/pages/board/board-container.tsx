@@ -51,6 +51,9 @@ export interface MoveColumnInput {
 }
 
 interface BoardContainerProps {
+  /// F-15: workspace id, threaded down to AddCardModal so the
+  /// codebase dropdown can fetch the right list.
+  workspaceId: string;
   columns: Column[];
   tasksByColumn: Map<string, Task[]>;
   onCardClick: (task: Task) => void;
@@ -64,6 +67,7 @@ interface BoardContainerProps {
 }
 
 export function BoardContainer({
+  workspaceId,
   columns,
   tasksByColumn,
   onCardClick,
@@ -287,6 +291,7 @@ export function BoardContainer({
       {addCardColumnId !== null && (
         <AddCardModal
           open
+          workspaceId={workspaceId}
           onClose={() => setAddCardColumnId(null)}
           onSubmit={(data) => {
             onCreateCard({ ...data, column_id: addCardColumnId });

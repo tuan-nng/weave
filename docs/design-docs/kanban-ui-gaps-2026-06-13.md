@@ -270,3 +270,17 @@ A single `feat-board-templates-and-stages` work item covering all of the "full c
   - Card: `check what to do today` (id `d96e6e04-...`)
   - Orchestrator session (UI run): `e5d7de56-f8fa-46c4-9126-07406a69d8bf` (`cwd=None`, `runtime=anthropic-api`)
 - Pre-existing context: see `PROGRESS-archive.md` § feat-051/055/063/065 for the lane-automation and stage design that these findings build on. The "previous `todo-orchestrator` session ended in `error`" note there (re: the API run) is consistent with the `cwd=None` pattern this UI run produced.
+
+---
+
+## Appendix B — Second walkthrough (2026-06-13, post-feat-068)
+
+After feat-068 landed, the same walkthrough was repeated. The 11 findings above are all closed. **Five new small findings** surfaced, addressed in feat-069:
+
+- **F-12 — Title flash on TaskDetailPanel open.** The previous `useEffect(() => setDraft(...))` design produced a one-frame empty title on first paint (the user sees "Untitled" or a blank box flicker before the effect runs). Replaced with a `useState` lazy initializer + a `lastSyncedTaskIdRef` guard so re-opens and SSE `task_updated` patches don't re-overwrite in-flight edits.
+- **F-13 — Save button affordance.** Disabled Save / Delete buttons had no visible reason. Added `title` tooltips explaining *why* the button is disabled ("No task selected" / "No changes to save" / "Title is required" / "Saving…") plus `disabled:cursor-not-allowed` for the cursor story.
+- **F-14 — Agent-needs-input notification (headline fix).** The Agent pill on a card was a static "Agent" badge. The user had no way to tell whether the agent was actively working or waiting on their next prompt. Backend: `Session` struct now carries derived `last_message_role` (Option<String>) + `awaiting_user_input` (bool) computed via SQL scalar subqueries — no migration needed, derived not stored. New endpoint `GET /api/workspaces/{wid}/sessions/awaiting-input` returns the workspace's paused-agent list. Frontend: `useAgentStatus` hook + `describeSession()` state machine. KanbanCard pill now switches tone + label: "Running" (blue) / "Needs input" (rose, with dot + ring + rose border) / "Error" (rose) / "Cancelled" (slate) / "Completed" (emerald).
+- **F-15 — Codebase dropdown on Add Card modal.** The codebase binding existed on the column (feat-068) and on the task detail panel (F-4) but not on the card-creation flow. New card couldn't be pinned to a specific codebase at creation time. Added a Codebase dropdown to `AddCardModal`, plumbed through `BoardContainer → onCreateCard → createCard`. Backend `CreateCardRequest.codebase_id` widens + `TaskStore::create` validates workspace scope (cross-workspace ids return 404 — `CodebaseStore::get_in_workspace` is the workspace-scope guard).
+- **F-16 — Sessions nav badge.** No way to see at-a-glance which workspaces have a paused agent waiting. Added a `usePendingInputCount()` hook in the layout that sums per-workspace counts, renders a small rose pill next to the "Sessions" label. 10-second refetch keeps it fresh without spamming the API.
+
+**Verification:** 896 Rust + 153 frontend tests pass (was 894 + 147; +2 Rust for `list_awaiting_input_filters_correctly` + `test_create_card_with_codebase_id_round_trips`; +6 frontend for the `describeSession` state machine in `use-agent-status.test.ts`). `./init.sh` 3-layer gate green.

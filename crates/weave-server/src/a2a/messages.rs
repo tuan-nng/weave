@@ -587,6 +587,8 @@ mod tests {
             runtime_kind: RuntimeKind::ClaudeCode,
             mode: SessionMode::Wrapped,
             runtime_metadata_json: None,
+            last_message_role: None,
+            awaiting_user_input: false,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         };

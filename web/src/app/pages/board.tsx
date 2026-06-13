@@ -122,6 +122,7 @@ export default function BoardPage() {
       {/* Horizontally-scrollable board */}
       <main className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
         <BoardContainer
+          workspaceId={workspaceId}
           columns={columns}
           tasksByColumn={tasksByColumn}
           onCardClick={(t: Task) => setSelectedTaskId(t.id)}

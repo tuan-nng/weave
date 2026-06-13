@@ -119,6 +119,14 @@ impl TaskStore {
     ///
     /// Returns `Validation` if `column_id` does not belong to `board_id`.
     /// This prevents cross-board and cross-workspace task placement.
+    ///
+    /// F-15: `codebase_id` is the card-level codebase binding (feat-068).
+    /// When supplied, it must reference a codebase in the same workspace
+    /// as the board — the FK enforces existence, the explicit lookup
+    /// enforces workspace scope (the FK alone would allow cross-workspace
+    /// references). Cross-workspace ids surface as `Validation` so the
+    /// frontend gets an actionable 400.
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         db: &Db,
         board_id: &str,
@@ -127,6 +135,7 @@ impl TaskStore {
         description: Option<&str>,
         position: Option<i64>,
         status: Option<&str>,
+        codebase_id: Option<&str>,
     ) -> Result<Task, AppError> {
         let status = status.unwrap_or("active");
         validate_status(status)?;
@@ -135,6 +144,11 @@ impl TaskStore {
                 "column '{}' does not belong to board '{}'",
                 column_id, board_id
             )));
+        }
+        // F-15: validate codebase workspace scope before insert.
+        if let Some(cid) = codebase_id {
+            let board = crate::store::boards::BoardStore::get_by_id(db, board_id)?;
+            crate::store::codebases::CodebaseStore::get_in_workspace(db, cid, &board.workspace_id)?;
         }
         let now = Utc::now().to_rfc3339();
         let id = Uuid::new_v4().to_string();
@@ -157,11 +171,11 @@ impl TaskStore {
         db.conn()
             .query_row(
                 &format!(
-                    "INSERT INTO tasks (id, board_id, column_id, title, description, position, status, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                    "INSERT INTO tasks (id, board_id, column_id, title, description, position, status, codebase_id, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
                      RETURNING {RETURNING_COLS}"
                 ),
-                rusqlite::params![id, board_id, column_id, title, description, pos, status, now],
+                rusqlite::params![id, board_id, column_id, title, description, pos, status, codebase_id, now],
                 Self::map_row,
             )
             .map_err(AppError::from)
@@ -1075,7 +1089,8 @@ mod tests {
     fn test_create_task_default_position() {
         let db = test_db();
         let (_, board_id, col_id) = seed_workspace_with_board(&db);
-        let task = TaskStore::create(&db, &board_id, &col_id, "New", None, None, None).unwrap();
+        let task =
+            TaskStore::create(&db, &board_id, &col_id, "New", None, None, None, None).unwrap();
         assert_eq!(task.title, "New");
         assert_eq!(task.status, "active");
         assert_eq!(task.position, 1000);
@@ -1093,6 +1108,7 @@ mod tests {
             Some("desc"),
             Some(5000),
             Some("done"),
+            None,
         )
         .unwrap();
         assert_eq!(task.position, 5000);
@@ -1104,7 +1120,16 @@ mod tests {
     fn test_create_task_invalid_status() {
         let db = test_db();
         let (_, board_id, col_id) = seed_workspace_with_board(&db);
-        let result = TaskStore::create(&db, &board_id, &col_id, "X", None, None, Some("bogus"));
+        let result = TaskStore::create(
+            &db,
+            &board_id,
+            &col_id,
+            "X",
+            None,
+            None,
+            Some("bogus"),
+            None,
+        );
         assert!(matches!(
             result,
             Err(AppError::Validation { message: _, .. })

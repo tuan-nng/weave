@@ -128,6 +128,18 @@ pub async fn get_session(
     Ok(Json(DataResponse { data: session }))
 }
 
+/// F-14: list sessions in this workspace that are awaiting a user
+/// reply. The frontend's Sessions nav badge calls this once per
+/// workspace it knows about, sums the counts, and renders a single
+/// number. Cheap (SQLite scan, indexed by workspace_id).
+pub async fn list_awaiting_input_sessions(
+    axum::Extension(state): axum::Extension<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<DataResponse<Vec<crate::store::sessions::Session>>>, AppError> {
+    let sessions = SessionStore::list_awaiting_input(&state.db, &workspace_id)?;
+    Ok(Json(DataResponse { data: sessions }))
+}
+
 /// DELETE /api/sessions/{id}
 pub async fn delete_session(
     axum::Extension(state): axum::Extension<AppState>,

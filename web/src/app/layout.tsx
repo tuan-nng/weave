@@ -1,4 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router";
+import { usePendingInputCount } from "@/hooks/use-pending-input-count";
 import { ROUTES } from "@/lib/routes";
 
 const NAV_ITEMS = [
@@ -106,6 +107,8 @@ const SECONDARY_NAV = [
 
 export default function AppLayout() {
   const location = useLocation();
+  // F-16: pending-input badge next to "Sessions" nav label.
+  const { count: pendingInputCount } = usePendingInputCount();
 
   const isActive = (href: string) => {
     if (href === "/") return location.pathname === "/";
@@ -137,6 +140,10 @@ export default function AppLayout() {
         <nav className="flex-1 px-3 py-3 space-y-0.5 overflow-y-auto">
           {NAV_ITEMS.map((item) => {
             const active = isActive(item.href);
+            // F-16: badge for the Sessions nav — shows the count of
+            // sessions across all workspaces awaiting user input.
+            const badge =
+              item.label === "Sessions" && pendingInputCount > 0 ? pendingInputCount : null;
             return (
               <Link
                 key={item.label}
@@ -157,7 +164,16 @@ export default function AppLayout() {
                 >
                   {item.icon}
                 </span>
-                <span>{item.label}</span>
+                <span className="flex-1">{item.label}</span>
+                {badge !== null && (
+                  <span
+                    className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full text-[10px] font-semibold bg-brand-red-100 text-brand-red-700"
+                    title={`${badge} session${badge === 1 ? "" : "s"} awaiting your input`}
+                    data-testid="sessions-pending-input-badge"
+                  >
+                    {badge}
+                  </span>
+                )}
               </Link>
             );
           })}

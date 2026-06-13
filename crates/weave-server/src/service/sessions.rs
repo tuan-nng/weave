@@ -5775,6 +5775,8 @@ You are broken."#,
             runtime_kind: crate::agent::RuntimeKind::AnthropicApi,
             mode: crate::agent::SessionMode::Native,
             runtime_metadata_json: None,
+            last_message_role: None,
+            awaiting_user_input: false,
             created_at: "2026-06-10T00:00:00Z".into(),
             updated_at: "2026-06-10T00:00:00Z".into(),
         };

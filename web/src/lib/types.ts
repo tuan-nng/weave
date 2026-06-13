@@ -60,6 +60,18 @@ export interface Session {
   /// HTTP runtimes and for CLI sessions that have not yet captured a
   /// stored id.
   runtime_metadata_json: string | null;
+  /// F-14: role of the most recent message in the session
+  /// (`"user"` | `"assistant"` | `"system"` | `null` for empty
+  /// sessions). Drives the Agent pill on the kanban card without an
+  /// extra history round-trip.
+  last_message_role: string | null;
+  /// F-14: derived flag — `true` when the agent has finished a turn
+  /// (status="ready" and the latest message is from the assistant).
+  /// The kanban card surfaces this as a rose "Needs input" pill +
+  /// card border, and the Sessions nav uses it for the
+  /// pending-input count badge. Computed by the backend in
+  /// `SessionStore` to avoid an N+1 history fetch per card.
+  awaiting_user_input: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -416,6 +428,10 @@ export interface CreateCardRequest {
   description?: string;
   position?: number;
   status?: TaskStatus;
+  /// F-15: optional card-level codebase binding (feat-068).
+  /// `null`/omitted → leave alone; a string id → bind. The
+  /// server validates workspace scope; cross-workspace ids 400.
+  codebase_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------

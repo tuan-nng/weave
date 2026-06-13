@@ -14,7 +14,7 @@
 // the keyboard / focus story is simple, and the popover
 // stays inside the slide-over's z-stack.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useCodebases } from "../../../hooks/use-codebase";
 import { ROUTES } from "../../../lib/routes";
@@ -55,7 +55,11 @@ export function TaskDetailPanel({
 }: TaskDetailPanelProps) {
   // Local form state. Initialized from the canonical `task` whenever
   // the panel opens or the user switches to a different card (keyed
-  // by task.id via the useEffect dependency).
+  // by task.id via the useState lazy initializer + a sync effect for
+  // late-arriving task data). The lazy initializer avoids the
+  // one-frame flash of an empty form that the previous effect-only
+  // design produced (the first render saw `blankDraft`, then the
+  // effect ran and replaced it).
   const [draft, setDraft] = useState<{
     title: string;
     description: string;
@@ -69,7 +73,7 @@ export function TaskDetailPanel({
     /// field so the server's tri-state preserves the prior
     /// value.
     codebase_id: string;
-  }>(blankDraft);
+  }>(() => draftFromTask(task));
 
   const { data: codebases = [] } = useCodebases(workspaceId);
   // F-8: open state for the "Move to…" popover. The popover's
@@ -81,22 +85,23 @@ export function TaskDetailPanel({
   // below.
   const [movePopoverOpen, setMovePopoverOpen] = useState(false);
 
+  // Track the last task id we synced draft from, so the effect
+  // below only fires on a card switch (not on every SSE `task_updated`
+  // patch — otherwise the user's in-flight edits would be overwritten
+  // by a re-render that lands between the field mutation and the
+  // server's broadcast). The effect still fires on `task?.id` change
+  // for the canonical "switched cards" case.
+  const lastSyncedTaskIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (task) {
-      setDraft({
-        title: task.title,
-        description: task.description ?? "",
-        status: task.status as TaskStatus,
-        acceptance_criteria: task.acceptance_criteria ?? "",
-        completion_summary: task.completion_summary ?? "",
-        verification_report: task.verification_report ?? "",
-        codebase_id: task.codebase_id ?? "",
-      });
-    } else {
+    if (!task) {
+      lastSyncedTaskIdRef.current = null;
       setDraft(blankDraft);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task?.id]);
+    if (lastSyncedTaskIdRef.current === task.id) return;
+    lastSyncedTaskIdRef.current = task.id;
+    setDraft(draftFromTask(task));
+  }, [task]);
 
   const open = task !== null;
   // `hasChanges` — compare to the current canonical task. Disabled
@@ -338,7 +343,8 @@ export function TaskDetailPanel({
               type="button"
               onClick={() => task && onDelete(task.id)}
               disabled={!task || isDeleting}
-              className="h-9 px-3 text-xs font-medium text-brand-red-600 bg-brand-red-50 border border-brand-red-200/60 rounded-lg hover:bg-brand-red-100 transition-colors disabled:opacity-50"
+              title={!task ? "No task selected" : "Delete this card"}
+              className="h-9 px-3 text-xs font-medium text-brand-red-600 bg-brand-red-50 border border-brand-red-200/60 rounded-lg hover:bg-brand-red-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isDeleting ? "Deleting…" : "Delete"}
             </button>
@@ -410,7 +416,18 @@ export function TaskDetailPanel({
               type="button"
               onClick={handleSave}
               disabled={!canSave}
-              className="h-9 px-4 text-sm font-medium text-white bg-brand-blue-500 rounded-xl hover:bg-brand-blue-600 transition-colors disabled:opacity-50"
+              title={
+                !task
+                  ? "No task selected"
+                  : !hasChanges
+                    ? "No changes to save"
+                    : draft.title.trim().length === 0
+                      ? "Title is required"
+                      : isSaving
+                        ? "Saving…"
+                        : "Save changes"
+              }
+              className="h-9 px-4 text-sm font-medium text-white bg-brand-blue-500 rounded-xl hover:bg-brand-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSaving ? "Saving…" : "Save"}
             </button>
@@ -430,6 +447,27 @@ const blankDraft = {
   verification_report: "",
   codebase_id: "",
 };
+
+function draftFromTask(task: Task | null): {
+  title: string;
+  description: string;
+  status: TaskStatus;
+  acceptance_criteria: string;
+  completion_summary: string;
+  verification_report: string;
+  codebase_id: string;
+} {
+  if (!task) return blankDraft;
+  return {
+    title: task.title,
+    description: task.description ?? "",
+    status: task.status as TaskStatus,
+    acceptance_criteria: task.acceptance_criteria ?? "",
+    completion_summary: task.completion_summary ?? "",
+    verification_report: task.verification_report ?? "",
+    codebase_id: task.codebase_id ?? "",
+  };
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

@@ -1,31 +1,56 @@
 // AddCardModal — small form to create a new card in a specific column.
 // Uses the shared `Modal` component for the backdrop / close behavior.
-// The modal returns just `{title, description?}`; the parent (BoardContainer)
-// injects the column_id before calling `api.kanban.cards.create`.
+// The modal returns `{title, description?, codebase_id?}`; the parent
+// (BoardContainer) injects the column_id before calling
+// `api.kanban.cards.create`.
+//
+// F-15: Add a Codebase dropdown so the operator can pin the new
+// card to a specific codebase at creation time. The dropdown is the
+// same `useCodebases` list the TaskDetailPanel already uses (F-4),
+// so the UX is consistent and the two views can't disagree about
+// what codebases exist. Empty / "None" = no card-level binding, and
+// the column's own binding (if any) wins for session spawning.
 
 import { useState } from "react";
+import { useCodebases } from "../../../hooks/use-codebase";
 import { Modal } from "../../../components/modal";
 
 export interface AddCardDraft {
   title: string;
   description?: string;
+  /// F-15: optional card-level codebase binding. `null` =
+  /// "no binding" (server omits the field, column binding wins).
+  codebase_id?: string | null;
 }
 
 interface AddCardModalProps {
   open: boolean;
+  workspaceId: string;
   onClose: () => void;
   onSubmit: (data: AddCardDraft) => void;
   isSubmitting: boolean;
 }
 
-export function AddCardModal({ open, onClose, onSubmit, isSubmitting }: AddCardModalProps) {
+export function AddCardModal({
+  open,
+  workspaceId,
+  onClose,
+  onSubmit,
+  isSubmitting,
+}: AddCardModalProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  /// F-15: `""` = "no binding". The form only sends a non-null
+  /// id; the API treats null and absent as the same shape.
+  const [codebaseId, setCodebaseId] = useState<string>("");
+  /// F-15: fetch the workspace's codebases so the user can pick one.
+  const { data: codebases = [] } = useCodebases(workspaceId);
 
   function handleClose() {
     if (isSubmitting) return;
     setTitle("");
     setDescription("");
+    setCodebaseId("");
     onClose();
   }
 
@@ -36,9 +61,11 @@ export function AddCardModal({ open, onClose, onSubmit, isSubmitting }: AddCardM
     onSubmit({
       title: trimmedTitle,
       description: description.trim() || undefined,
+      codebase_id: codebaseId === "" ? null : codebaseId,
     });
     setTitle("");
     setDescription("");
+    setCodebaseId("");
   }
 
   return (
@@ -93,6 +120,29 @@ export function AddCardModal({ open, onClose, onSubmit, isSubmitting }: AddCardM
             placeholder="Optional context, links, or acceptance criteria…"
             className="w-full px-3.5 py-2 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150 resize-none"
           />
+        </div>
+
+        {/* F-15: Codebase dropdown. Same data source as the
+            TaskDetailPanel F-4 dropdown so the two views can't drift.
+            "None" preserves the column-level binding; choosing a
+            specific codebase pins the card for session spawning. */}
+        <div>
+          <label className="block text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">
+            Codebase
+          </label>
+          <select
+            value={codebaseId}
+            onChange={(e) => setCodebaseId(e.target.value)}
+            className="w-full h-10 px-3.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-brand-blue-500/30 focus:border-brand-blue-400 transition-all duration-150"
+          >
+            <option value="">None (use column binding)</option>
+            {codebases.map((cb) => (
+              <option key={cb.id} value={cb.id}>
+                {cb.label ?? cb.path}
+                {cb.label ? ` — ${cb.path}` : ""}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="flex items-center justify-end gap-2 pt-2">

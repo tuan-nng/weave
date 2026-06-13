@@ -27,6 +27,10 @@ export const queryKeys = {
     list: (workspaceId: string, params?: PaginationParams) =>
       [...queryKeys.sessions.all(), "list", workspaceId, params] as const,
     detail: (id: string) => [...queryKeys.sessions.all(), "detail", id] as const,
+    /// F-14: list of sessions in a workspace awaiting user input.
+    /// Powers the Sessions nav badge.
+    awaitingInput: (workspaceId: string) =>
+      [...queryKeys.sessions.all(), "awaitingInput", workspaceId] as const,
     history: (sessionId: string, params?: PaginationParams) =>
       [...queryKeys.sessions.all(), "history", sessionId, params] as const,
   },

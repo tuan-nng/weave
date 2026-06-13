@@ -120,6 +120,13 @@ pub struct CreateCardRequest {
     pub description: Option<String>,
     pub position: Option<i64>,
     pub status: Option<String>,
+    /// F-15: optional card-level codebase binding (feat-068). When
+    /// present, the new task is bound to the given codebase id; the
+    /// column still has its own binding, but card-level wins for
+    /// session spawning. The id must reference a codebase in the
+    /// same workspace (cross-workspace ids are rejected with 400).
+    #[serde(default)]
+    pub codebase_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -480,6 +487,7 @@ pub async fn create_card(
         body.description.as_deref(),
         body.position,
         body.status.as_deref(),
+        body.codebase_id.as_deref(),
     )?;
     let task_json = serde_json::to_value(&task).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to serialize task for SSE: {e}"))
@@ -2386,6 +2394,141 @@ mod tests {
         assert_eq!(
             json.get("data").and_then(|d| d.as_array()).map(|a| a.len()),
             Some(0)
+        );
+    }
+
+    /// F-15: `POST /api/workspaces/{wid}/boards/{bid}/cards` accepts
+    /// an optional `codebase_id` and stores it on the new card.
+    /// Cross-workspace ids are rejected with 400 (workspace scope).
+    #[tokio::test]
+    async fn test_create_card_with_codebase_id_round_trips() {
+        let state = make_test_state();
+        let ws_id: String = state
+            .db
+            .conn()
+            .query_row("SELECT id FROM workspaces WHERE name='default'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Second workspace for the cross-workspace rejection case.
+        let other_ws = crate::store::workspaces::WorkspaceStore::create(&state.db, "other")
+            .expect("create other ws");
+
+        // Register a codebase in `ws_id`.
+        let cb = crate::store::codebases::CodebaseStore::create(
+            &state.db,
+            &ws_id,
+            "/tmp/fifteen",
+            Some("main"),
+            Some("Fifteen"),
+        )
+        .unwrap();
+        // Register a codebase in the other workspace.
+        let other_cb = crate::store::codebases::CodebaseStore::create(
+            &state.db,
+            &other_ws.id,
+            "/tmp/other",
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Create a board with one column.
+        let app = test_app(state);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/workspaces/{}/boards", ws_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"B","columns":[{"name":"C1"}]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let board_id = extract_json(&body)["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // The create-board response doesn't inline the columns;
+        // fetch the detail to get the column id.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/workspaces/{}/boards/{}", ws_id, board_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let col_id = extract_json(&body)["data"]["columns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Happy path: create a card with a valid codebase_id in the
+        // same workspace.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/cards",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"column_id":"{}","title":"Bound","codebase_id":"{}"}}"#,
+                        col_id, cb.id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = extract_json(&body);
+        assert_eq!(json["data"]["codebase_id"], cb.id);
+        // The JSON response uses the SQL RETURNING clause, so the
+        // codebase_id is proven to be persisted (not just the in-memory
+        // struct). The TaskStore::update round-trip (and the task-detail
+        // panel F-4 / task-detail updates) is already covered by
+        // test_task_codebase_id_roundtrip in store/tasks.rs.
+
+        // Negative path: cross-workspace codebase_id must 400.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/workspaces/{}/boards/{}/cards",
+                        ws_id, board_id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"column_id":"{}","title":"CrossWS","codebase_id":"{}"}}"#,
+                        col_id, other_cb.id
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "cross-workspace codebase_id must be rejected (CodebaseStore::get_in_workspace returns NotFound)"
         );
     }
 }

@@ -98,6 +98,7 @@ impl ToolExecutor for CreateCardTool {
             description.as_deref(),
             None,
             status.as_deref(),
+            None,
         ) {
             Ok(task) => success(json!({"task": task})),
             Err(e) => error(e.to_string()),

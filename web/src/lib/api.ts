@@ -148,6 +148,11 @@ export const api = {
     list: (workspaceId: string, params?: PaginationParams) =>
       apiFetch<PaginatedResponse<Session>>(`/api/workspaces/${workspaceId}/sessions${qs(params)}`),
     get: (id: string) => apiFetch<Session>(`/api/sessions/${id}`),
+    /// F-14: list sessions in this workspace that are awaiting user
+    /// input. The Sessions nav badge uses this to render a count
+    /// next to the "Sessions" label.
+    awaitingInput: (workspaceId: string) =>
+      apiFetch<Session[]>(`/api/workspaces/${workspaceId}/sessions/awaiting-input`),
     create: (workspaceId: string, data: CreateSessionRequest) =>
       apiFetch<Session>(`/api/workspaces/${workspaceId}/sessions`, {
         method: "POST",
