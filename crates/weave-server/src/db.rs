@@ -114,6 +114,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ),
     ("015", include_str!("migrations/015_column_stage.sql")),
     ("016", include_str!("migrations/016_column_automation.sql")),
+    (
+        "017",
+        include_str!("migrations/017_kanban_session_watch.sql"),
+    ),
 ];
 
 impl Db {
@@ -339,7 +343,10 @@ mod tests {
             .expect("failed to query user_version");
 
         assert_eq!(v1, v2, "user_version should not change on second run");
-        assert_eq!(v1, 16, "user_version should be 16 after all migrations");
+        assert_eq!(
+            v1, 17,
+            "user_version should be 17 after all migrations (feat-067 adds 017)"
+        );
     }
 
     /// `size_bytes` returns `None` for `:memory:` databases — there is

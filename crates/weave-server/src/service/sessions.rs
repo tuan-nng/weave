@@ -258,6 +258,13 @@ impl SessionService {
             ));
         }
 
+        // feat-067: bump the lifecycle supervisor's `last_activity_at`
+        // on every `send_prompt` call. The bump is fire-and-forget
+        // (the helper logs and swallows DB errors). A session with no
+        // `kanban_session_watch` row is unaffected — only
+        // kanban-auto-spawned sessions are watched.
+        crate::store::kanban_session_watch::bump_activity(db, session_id);
+
         // Save user message (raw text, no JSON encoding)
         let user_msg = MessageStore::create(db, session_id, "user", prompt, None)?;
 

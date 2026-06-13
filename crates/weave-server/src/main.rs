@@ -105,7 +105,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let active_sessions = Arc::new(service::ActiveSessions::new());
     let active_child_processes = Arc::new(service::ActiveChildProcesses::new());
-    let sse_manager = Arc::new(sse::SseManager::new());
+    let sse_manager = Arc::new(sse::SseManager::with_db(db.clone()));
     let shutdown_token = CancellationToken::new();
     let state = AppState {
         db: db.clone(),
@@ -128,6 +128,12 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
 
     let cleanup_handle = tokio::spawn(run_cleanup(state.clone()));
 
+    // feat-067: spawn the kanban-auto-spawned session lifecycle
+    // supervisor. Runs every 30s; scans `kanban_session_watch` for
+    // stalled sessions and either re-prompts them or fails them
+    // after the recovery budget is exhausted.
+    let supervisor_handle = service::kanban_lifecycle::start(state.clone(), shutdown_token.clone());
+
     let drain_cap = shutdown_drain_cap_from_env();
     if let Some(c) = drain_cap {
         info!(cap_secs = c.as_secs(), "Drain cap active");
@@ -144,6 +150,20 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         Err(_) => warn!(
             budget_secs = CLEANUP_BUDGET.as_secs(),
             "Cleanup task exceeded its budget; abandoning"
+        ),
+    }
+
+    // feat-067: the supervisor's loop is gated on `shutdown_token` —
+    // it's already exited by now (cleanup awaited the same token).
+    // We still `await` its JoinHandle to surface any panic, and bound
+    // the wait by the same CLEANUP_BUDGET so a misbehaving supervisor
+    // can't block shutdown indefinitely.
+    match tokio::time::timeout(CLEANUP_BUDGET, supervisor_handle).await {
+        Ok(Ok(())) => info!("Lifecycle supervisor finished cleanly"),
+        Ok(Err(e)) => warn!(error = %e, "Lifecycle supervisor panicked"),
+        Err(_) => warn!(
+            budget_secs = CLEANUP_BUDGET.as_secs(),
+            "Lifecycle supervisor exceeded its budget; abandoning"
         ),
     }
 

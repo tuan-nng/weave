@@ -218,6 +218,14 @@ pub async fn try_automate_lane(
     };
     TaskStore::update(&state.db, &task.id, &workspace_id, &link_update)?;
 
+    // feat-067: register the session with the lifecycle supervisor.
+    // The supervisor reads `kanban_session_watch` to detect stalled
+    // sessions, so the row must exist BEFORE the prompt is sent.
+    // `create_watch` is INSERT OR IGNORE — a retry on a partial
+    // failure (the row was inserted but the call returned an error)
+    // is safe and idempotent.
+    crate::store::kanban_session_watch::create_watch(&state.db, &session.id, &task.id)?;
+
     // Build the rich initial prompt (feat-063). The 3-line
     // `build_initial_prompt` shim was deleted; the new builder
     // renders a 12-slot prompt with column/board context, lane

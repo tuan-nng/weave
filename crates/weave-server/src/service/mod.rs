@@ -1,4 +1,5 @@
 pub mod kanban;
+pub mod kanban_lifecycle;
 pub mod kanban_prompt;
 pub mod kanban_prompt_ctx;
 pub mod sessions;

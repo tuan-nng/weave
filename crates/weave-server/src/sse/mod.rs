@@ -1,10 +1,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 
 use crate::agent;
+use crate::db::Db;
 
 // ---------------------------------------------------------------------------
 // SseManager — per-entity broadcast channels + event buffer
@@ -19,6 +20,14 @@ pub struct SseManager {
     channels: RwLock<HashMap<String, tokio::sync::broadcast::Sender<SseWireEvent>>>,
     buffer: EventBuffer,
     counters: RwLock<HashMap<String, AtomicU64>>,
+    /// feat-067: optional DB handle for the activity-bump hook. When
+    /// set, every `broadcast` call fires a fire-and-forget
+    /// `kanban_session_watch` UPDATE for the broadcast's `entity_id`.
+    /// The UPDATE is a no-op when no watch row exists for the id, so
+    /// non-kanban broadcasts (board events, ad-hoc test entities) cost
+    /// one wasted SQL execute. Tests that don't need the hook can
+    /// construct via `SseManager::new_without_db`.
+    db: Option<Arc<Db>>,
 }
 
 impl Default for SseManager {
@@ -28,11 +37,27 @@ impl Default for SseManager {
 }
 
 impl SseManager {
+    /// Construct an `SseManager` without the activity-bump hook. Used
+    /// by the unit tests in this file that don't have a DB.
     pub fn new() -> Self {
         Self {
             channels: RwLock::new(HashMap::new()),
             buffer: EventBuffer::new(100),
             counters: RwLock::new(HashMap::new()),
+            db: None,
+        }
+    }
+
+    /// Construct an `SseManager` with the activity-bump hook enabled.
+    /// Every `broadcast` call bumps `kanban_session_watch.last_activity_at`
+    /// for the broadcast's `entity_id`. The bump is a single SQL UPDATE
+    /// with `WHERE session_id = ?` — a no-op when the row doesn't exist.
+    pub fn with_db(db: Arc<Db>) -> Self {
+        Self {
+            channels: RwLock::new(HashMap::new()),
+            buffer: EventBuffer::new(100),
+            counters: RwLock::new(HashMap::new()),
+            db: Some(db),
         }
     }
 
@@ -62,6 +87,12 @@ impl SseManager {
     ///
     /// Returns the monotonically increasing event ID. The event is also
     /// stored in the ring buffer for reconnection replay.
+    ///
+    /// feat-067: when an `Arc<Db>` was supplied at construction
+    /// (`SseManager::with_db`), this method also bumps
+    /// `kanban_session_watch.last_activity_at` for `entity_id`. The
+    /// bump is a single SQL UPDATE that no-ops when no watch row
+    /// exists, so the cost on non-session broadcasts is bounded.
     pub fn broadcast(&self, entity_id: &str, event: SseWireEvent) -> u64 {
         // Use write lock for atomic check-and-create (avoids TOCTOU race)
         let mut channels = self.channels.write().expect("sse channels lock poisoned");
@@ -91,6 +122,17 @@ impl SseManager {
 
         // Broadcast (ignore if no receivers)
         let _ = tx.send(event);
+
+        // feat-067: bump activity for the broadcast's entity. The
+        // `bump_activity` helper is a fire-and-forget SQL UPDATE that
+        // no-ops when no `kanban_session_watch` row exists for the id.
+        // A board-channel broadcast (`board:{id}`) carries no session
+        // id, so the UPDATE matches zero rows and the activity
+        // timestamp is left alone — which is the right behavior: a
+        // board event is a UI signal, not session progress.
+        if let Some(db) = &self.db {
+            crate::store::kanban_session_watch::bump_activity(db, entity_id);
+        }
 
         id
     }
@@ -309,6 +351,20 @@ pub enum SseWireEvent {
         specialist_id: String,
         board_id: String,
     },
+    /// feat-067: emitted by the lifecycle supervisor when a
+    /// kanban-auto-spawned session's recovery count has hit
+    /// `max_recovery_retries` and the supervisor has given up. Broadcast
+    /// on BOTH the session channel (`session:{id}`) and the board channel
+    /// (`board:{board_id}`) so the session page UI can show a failure
+    /// banner and the kanban board can render a warning badge. The
+    /// `task_id` and `board_id` are the supervisor's view of the card;
+    /// the frontend treats this as the authoritative "stuck" signal.
+    SessionFailed {
+        session_id: String,
+        task_id: String,
+        board_id: String,
+        reason: String,
+    },
     Heartbeat {},
     /// Server-initiated disconnect notice. Broadcast to all live subscribers
     /// when the server begins a graceful shutdown (feat-034). The `reason`
@@ -341,6 +397,7 @@ impl SseWireEvent {
             Self::TaskDeleted { .. } => "task_deleted",
             Self::ColumnAdded { .. } => "column_added",
             Self::SessionStarted { .. } => "session_started",
+            Self::SessionFailed { .. } => "session_failed",
             Self::Heartbeat { .. } => "heartbeat",
             Self::Shutdown { .. } => "shutdown",
         }
@@ -770,6 +827,16 @@ mod tests {
             .event_type(),
             "session_started"
         );
+        assert_eq!(
+            SseWireEvent::SessionFailed {
+                session_id: "s".into(),
+                task_id: "t".into(),
+                board_id: "b".into(),
+                reason: "stalled".into(),
+            }
+            .event_type(),
+            "session_failed"
+        );
         assert_eq!(SseWireEvent::Heartbeat {}.event_type(), "heartbeat");
     }
 
@@ -832,6 +899,19 @@ mod tests {
         assert_eq!(v["specialist_id"], "dev");
         assert_eq!(v["board_id"], "b-1");
 
+        let v: serde_json::Value = serde_json::from_str(&sse_data(&SseWireEvent::SessionFailed {
+            session_id: "s-1".into(),
+            task_id: "t-1".into(),
+            board_id: "b-1".into(),
+            reason: "stalled".into(),
+        }))
+        .unwrap();
+        assert_eq!(v["type"], "session_failed");
+        assert_eq!(v["session_id"], "s-1");
+        assert_eq!(v["task_id"], "t-1");
+        assert_eq!(v["board_id"], "b-1");
+        assert_eq!(v["reason"], "stalled");
+
         // Heartbeat is the empty-payload sentinel — the data line is
         // exactly `{"type":"heartbeat"}`.
         let v: serde_json::Value =
@@ -869,6 +949,89 @@ mod tests {
                 assert_eq!(board_id, "b-1");
             }
             _ => panic!("expected SessionStarted"),
+        }
+    }
+
+    // --- feat-067: broadcast -> kanban_session_watch bump hook ---
+
+    /// `SseManager::with_db` constructs a manager that bumps the
+    /// `kanban_session_watch.last_activity_at` for every broadcast
+    /// whose `entity_id` matches an existing watch row. The bump is a
+    /// fire-and-forget SQL UPDATE; this test seeds a watch row, calls
+    /// `broadcast`, and asserts the row's `last_activity_at` advanced.
+    #[tokio::test]
+    async fn test_broadcast_bumps_kanban_session_watch_activity() {
+        use crate::store::kanban_session_watch;
+        use std::sync::Arc;
+
+        // Build a manager with the DB hook enabled.
+        let db = Arc::new(crate::db::Db::open(std::path::Path::new(":memory:")).unwrap());
+        let manager = SseManager::with_db(db.clone());
+
+        // Seed a watch row by hand (the row needs a real session FK
+        // because of `ON DELETE CASCADE`).
+        let now = chrono::Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO workspaces (id, name, status, created_at, updated_at)
+                 VALUES ('ws-x', 'x', 'active', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO providers (id, type, kind, name, config_json, default_model, created_at)
+                 VALUES ('p-x', 'anthropic', 'http', 'p', '{}', 'm', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (id, workspace_id, provider_id, status, created_at, updated_at)
+                 VALUES ('s-x', 'ws-x', 'p-x', 'ready', ?1, ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        kanban_session_watch::create_watch(&db, "s-x", "t-x").unwrap();
+
+        // Backdate the row by 1 second so the bump is observable.
+        let one_sec_ago = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        db.conn()
+            .execute(
+                "UPDATE kanban_session_watch SET last_activity_at = ?1",
+                rusqlite::params![one_sec_ago],
+            )
+            .unwrap();
+        let before = kanban_session_watch::get(&db, "s-x").unwrap().unwrap();
+        assert!(
+            before.last_activity_at < now,
+            "test setup: row should be backdated relative to current time"
+        );
+
+        // Broadcast — the hook should bump the row.
+        manager.broadcast("s-x", SseWireEvent::TextDelta { text: "hi".into() });
+
+        let after = kanban_session_watch::get(&db, "s-x").unwrap().unwrap();
+        assert!(
+            after.last_activity_at > before.last_activity_at,
+            "last_activity_at should advance after broadcast; before={}, after={}",
+            before.last_activity_at,
+            after.last_activity_at
+        );
+    }
+
+    /// `SseManager::new()` (no DB) must still broadcast normally —
+    /// the bump is a no-op when `db` is `None`. This is the regression
+    /// guard for the existing `test_broadcast_and_subscribe` etc.
+    #[tokio::test]
+    async fn test_broadcast_without_db_is_noop_for_bump() {
+        let manager = SseManager::new();
+        let mut rx = manager.subscribe("s-x");
+        manager.broadcast("s-x", SseWireEvent::TextDelta { text: "ok".into() });
+        let event = rx.recv().await.unwrap();
+        match event {
+            SseWireEvent::TextDelta { text } => assert_eq!(text, "ok"),
+            _ => panic!("expected TextDelta"),
         }
     }
 }
