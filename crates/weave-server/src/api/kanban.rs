@@ -65,6 +65,8 @@ pub struct CreateColumnInline {
     pub required_artifact_types: Option<Vec<String>>,
     /// Nullable Runtime Tool binding for lane automation (feat-055).
     pub runtime_kind: Option<String>,
+    /// Kanban stage: backlog | todo | dev | review | done (feat-065).
+    pub stage: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +85,9 @@ pub struct CreateColumnRequest {
     pub required_artifact_types: Option<Vec<String>>,
     /// Nullable Runtime Tool binding for lane automation (feat-055).
     pub runtime_kind: Option<String>,
+    /// Kanban stage: backlog | todo | dev | review | done (feat-065).
+    /// Defaults to "dev" when omitted.
+    pub stage: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +102,9 @@ pub struct UpdateColumnRequest {
     pub required_artifact_types: Option<Vec<String>>,
     /// `Some(None)` clears the runtime_kind binding. `None` leaves it unchanged.
     pub runtime_kind: Option<Option<String>>,
+    /// Kanban stage: backlog | todo | dev | review | done (feat-065).
+    /// `None` leaves it unchanged.
+    pub stage: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -176,6 +184,13 @@ pub async fn create_board(
                     MAX_COLUMN_NAME_LEN
                 )));
             }
+            let stage = c
+                .stage
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|e| AppError::validation(format!("invalid stage: {e}")))?
+                .unwrap_or_default();
             Ok(NewColumnSpec {
                 name: trimmed,
                 position: c.position,
@@ -185,6 +200,7 @@ pub async fn create_board(
                 required_fields: c.required_fields.clone().unwrap_or_default(),
                 required_artifact_types: c.required_artifact_types.clone().unwrap_or_default(),
                 runtime_kind: c.runtime_kind.as_deref(),
+                stage,
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -344,6 +360,13 @@ pub async fn create_column(
             MAX_COLUMN_NAME_LEN
         )));
     }
+    let stage = body
+        .stage
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|e| AppError::validation(format!("invalid stage: {e}")))?
+        .unwrap_or_default();
     let column = ColumnStore::create(
         &state.db,
         &board_id,
@@ -355,6 +378,7 @@ pub async fn create_column(
         body.required_fields.as_deref(),
         body.required_artifact_types.as_deref(),
         body.runtime_kind.as_deref(),
+        stage,
     )?;
     let column_json = serde_json::to_value(&column).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("failed to serialize column for SSE: {e}"))
@@ -386,6 +410,12 @@ pub async fn update_column(
             )));
         }
     }
+    let stage = body
+        .stage
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|e| AppError::validation(format!("invalid stage: {e}")))?;
     let column = ColumnStore::update(
         &state.db,
         &id,
@@ -397,6 +427,7 @@ pub async fn update_column(
         body.required_fields.as_deref(),
         body.required_artifact_types.as_deref(),
         body.runtime_kind.as_ref().map(|s| s.as_deref()),
+        stage,
     )?;
     Ok(Json(DataResponse { data: column }))
 }

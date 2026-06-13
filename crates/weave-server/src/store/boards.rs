@@ -42,7 +42,7 @@ pub struct BoardDetail {
 /// existing callers (HTTP API, default board template) can ignore
 /// them. `Default` is derived so test fixtures can use
 /// `..Default::default()` to leave them unset.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NewColumnSpec<'a> {
     pub name: &'a str,
     pub position: Option<i64>,
@@ -52,6 +52,23 @@ pub struct NewColumnSpec<'a> {
     pub required_fields: Vec<String>,
     pub required_artifact_types: Vec<String>,
     pub runtime_kind: Option<&'a str>,
+    pub stage: crate::store::columns::ColumnStage,
+}
+
+impl<'a> Default for NewColumnSpec<'a> {
+    fn default() -> Self {
+        Self {
+            name: "",
+            position: None,
+            specialist_id: None,
+            auto_trigger: false,
+            freeze_description: false,
+            required_fields: Vec::new(),
+            required_artifact_types: Vec::new(),
+            runtime_kind: None,
+            stage: crate::store::columns::ColumnStage::Dev,
+        }
+    }
 }
 
 /// Stateless store for board persistence.
@@ -84,6 +101,7 @@ impl BoardStore {
                     Some(&spec.required_fields),
                     Some(&spec.required_artifact_types),
                     spec.runtime_kind,
+                    spec.stage,
                 )?;
             }
             Ok(board)

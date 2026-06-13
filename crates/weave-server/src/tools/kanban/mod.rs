@@ -47,7 +47,7 @@ mod tests {
     //!   gate (description frozen on exit, required fields on entry) as
     //!   well as the "all gates pass" happy path.
     use super::*;
-    use crate::store::columns::ColumnStore;
+    use crate::store::columns::{ColumnStage, ColumnStore};
     use crate::store::kanban_test_helpers::{make_test_db, seed_workspace_with_board};
     use crate::tools::test_support::make_context_for_workspace;
     use crate::tools::ToolExecutor;
@@ -125,6 +125,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
@@ -262,6 +263,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
@@ -279,6 +281,7 @@ mod tests {
             ]),
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
@@ -293,6 +296,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;

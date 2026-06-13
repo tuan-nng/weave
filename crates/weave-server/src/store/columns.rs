@@ -23,6 +23,9 @@
 //!     must be present on tasks entering this column. Schema-only for
 //!     feat-028 (the real artifacts table is feat-031).
 
+use std::fmt;
+use std::str::FromStr;
+
 use rusqlite::Connection;
 use serde::Serialize;
 use uuid::Uuid;
@@ -30,6 +33,65 @@ use uuid::Uuid;
 use crate::db::Db;
 use crate::error::AppError;
 use chrono::Utc;
+
+/// Kanban column stage — controls prompt variation, available tools,
+/// and allowed target-column transitions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnStage {
+    Backlog,
+    Todo,
+    #[default]
+    Dev,
+    Review,
+    Done,
+}
+
+impl ColumnStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::Dev => "dev",
+            Self::Review => "review",
+            Self::Done => "done",
+        }
+    }
+
+    /// Numeric index for transition-distance calculations.
+    pub(crate) fn index(&self) -> i8 {
+        match self {
+            Self::Backlog => 0,
+            Self::Todo => 1,
+            Self::Dev => 2,
+            Self::Review => 3,
+            Self::Done => 4,
+        }
+    }
+}
+
+impl FromStr for ColumnStage {
+    type Err = AppError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "backlog" => Ok(Self::Backlog),
+            "todo" => Ok(Self::Todo),
+            "dev" => Ok(Self::Dev),
+            "review" => Ok(Self::Review),
+            "done" => Ok(Self::Done),
+            _ => Err(AppError::validation(format!(
+                "invalid column stage '{s}'; valid values: backlog, todo, dev, review, done"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for ColumnStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Domain representation of a column row.
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +118,10 @@ pub struct Column {
     /// set the session's `runtime_kind`. NULL means "inherit from the
     /// workspace's first provider" (the pre-feat-055 default).
     pub runtime_kind: Option<String>,
+    /// Kanban stage — controls prompt variation, available tools, and
+    /// allowed target-column transitions. Defaults to `Dev` (most
+    /// permissive) for existing columns.
+    pub stage: ColumnStage,
     pub created_at: String,
 }
 
@@ -90,6 +156,7 @@ impl ColumnStore {
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<&str>,
+        stage: ColumnStage,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         db.with_transaction(|conn| {
@@ -104,6 +171,7 @@ impl ColumnStore {
                 required_fields,
                 required_artifact_types,
                 runtime_kind,
+                stage,
             )
         })
     }
@@ -125,6 +193,7 @@ impl ColumnStore {
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<&str>,
+        stage: ColumnStage,
     ) -> Result<Column, AppError> {
         validate_auto_trigger(auto_trigger, specialist_id)?;
         let resolved_position = match position {
@@ -138,11 +207,11 @@ impl ColumnStore {
             "INSERT INTO columns
                 (id, board_id, name, position, specialist_id, auto_trigger,
                  freeze_description, required_fields, required_artifact_types,
-                 runtime_kind, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 runtime_kind, stage, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
                        freeze_description, required_fields, required_artifact_types,
-                       runtime_kind, created_at",
+                       runtime_kind, stage, created_at",
             rusqlite::params![
                 Uuid::new_v4().to_string(),
                 board_id,
@@ -154,6 +223,7 @@ impl ColumnStore {
                 req_fields_json,
                 req_artifacts_json,
                 runtime_kind,
+                stage.as_str(),
                 Utc::now().to_rfc3339(),
             ],
             Self::map_row,
@@ -179,6 +249,7 @@ impl ColumnStore {
         required_fields: Option<&[String]>,
         required_artifact_types: Option<&[String]>,
         runtime_kind: Option<Option<&str>>,
+        stage: Option<ColumnStage>,
     ) -> Result<Column, AppError> {
         // Resolve the effective auto_trigger/specialist_id for validation.
         // The `Option<Option<T>>` pattern lets the caller pass:
@@ -239,6 +310,11 @@ impl ColumnStore {
             params.push(Box::new(rk.map(|x| x.to_string())));
             idx += 1;
         }
+        if let Some(s) = stage {
+            sets.push(format!("stage = ?{idx}"));
+            params.push(Box::new(s.as_str().to_string()));
+            idx += 1;
+        }
 
         // No-op when nothing to update — return current state.
         if sets.is_empty() {
@@ -250,7 +326,7 @@ impl ColumnStore {
             "UPDATE columns SET {} WHERE id = ?{cid_idx}
              RETURNING id, board_id, name, position, specialist_id, auto_trigger,
                        freeze_description, required_fields, required_artifact_types,
-                       runtime_kind, created_at",
+                       runtime_kind, stage, created_at",
             sets.join(", ")
         );
         params.push(Box::new(column_id.to_string()));
@@ -274,7 +350,7 @@ impl ColumnStore {
             .query_row(
                 "SELECT id, board_id, name, position, specialist_id, auto_trigger,
                         freeze_description, required_fields, required_artifact_types,
-                        runtime_kind, created_at
+                        runtime_kind, stage, created_at
                  FROM columns WHERE id = ?1",
                 [column_id],
                 Self::map_row,
@@ -294,7 +370,7 @@ impl ColumnStore {
         let mut stmt = conn.prepare(
             "SELECT id, board_id, name, position, specialist_id, auto_trigger,
                     freeze_description, required_fields, required_artifact_types,
-                    runtime_kind, created_at
+                    runtime_kind, stage, created_at
              FROM columns WHERE board_id = ?1
              ORDER BY position ASC, id ASC",
         )?;
@@ -334,6 +410,8 @@ impl ColumnStore {
             parse_string_vec("required_fields", &req_fields_json).unwrap_or_default();
         let required_artifact_types =
             parse_string_vec("required_artifact_types", &req_artifacts_json).unwrap_or_default();
+        let stage_str: String = row.get(10)?;
+        let stage = ColumnStage::from_str(&stage_str).unwrap_or_default();
         Ok(Column {
             id: row.get(0)?,
             board_id: row.get(1)?,
@@ -345,7 +423,8 @@ impl ColumnStore {
             required_fields,
             required_artifact_types,
             runtime_kind: row.get(9)?,
-            created_at: row.get(10)?,
+            stage,
+            created_at: row.get(11)?,
         })
     }
 }
@@ -450,7 +529,17 @@ mod tests {
         // Seed inserts 'test-col' at position 0, so the next default
         // position is 0 + POSITION_STEP (1000).
         let col = ColumnStore::create(
-            &db, &bid, "To Do", None, None, false, None, None, None, None,
+            &db,
+            &bid,
+            "To Do",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            ColumnStage::Dev,
         )
         .unwrap();
         assert_eq!(col.name, "To Do");
@@ -477,6 +566,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
         assert_eq!(col.position, 2048);
@@ -487,7 +577,17 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
         let result = ColumnStore::create(
-            &db, &bid, "Broken", None, None, true, None, None, None, None,
+            &db,
+            &bid,
+            "Broken",
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            ColumnStage::Dev,
         );
         assert!(matches!(
             result,
@@ -510,6 +610,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
         assert!(col.auto_trigger);
@@ -533,6 +634,7 @@ mod tests {
             Some(&req_fields),
             Some(&req_artifacts),
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
         assert!(col.freeze_description);
@@ -548,6 +650,7 @@ mod tests {
             &db,
             &cid,
             Some("Renamed"),
+            None,
             None,
             None,
             None,
@@ -577,6 +680,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(updated.auto_trigger);
@@ -588,6 +692,7 @@ mod tests {
             None,
             None,
             Some(false),
+            None,
             None,
             None,
             None,
@@ -613,6 +718,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         // Now try to clear specialist while auto_trigger is still on
@@ -622,6 +728,7 @@ mod tests {
             None,
             None,
             Some(None),
+            None,
             None,
             None,
             None,
@@ -653,6 +760,7 @@ mod tests {
             Some(&req_fields),
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(updated.freeze_description);
@@ -675,6 +783,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
         ColumnStore::create(
@@ -688,6 +797,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
         ColumnStore::create(
@@ -701,6 +811,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap();
 
@@ -811,8 +922,20 @@ mod tests {
         let db = Db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, bid, _) = seed_workspace_with_board(&db);
         // Create a column without runtime_kind — it should be NULL.
-        let col = ColumnStore::create(&db, &bid, "Test", None, None, false, None, None, None, None)
-            .unwrap();
+        let col = ColumnStore::create(
+            &db,
+            &bid,
+            "Test",
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            ColumnStage::Dev,
+        )
+        .unwrap();
         assert!(col.runtime_kind.is_none());
 
         // Create a column with runtime_kind — it should be persisted.
@@ -827,6 +950,7 @@ mod tests {
             None,
             None,
             Some("claude-code"),
+            ColumnStage::Dev,
         )
         .unwrap();
         assert_eq!(col.runtime_kind.as_deref(), Some("claude-code"));
@@ -843,6 +967,7 @@ mod tests {
             None,
             None,
             Some(Some("codex")),
+            None,
         )
         .unwrap();
         assert_eq!(updated.runtime_kind.as_deref(), Some("codex"));
@@ -859,6 +984,7 @@ mod tests {
             None,
             None,
             Some(None),
+            None,
         )
         .unwrap();
         assert!(updated.runtime_kind.is_none());

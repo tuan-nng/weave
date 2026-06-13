@@ -41,7 +41,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use crate::store::boards::Board;
-use crate::store::columns::Column;
+use crate::store::columns::{Column, ColumnStage};
 use crate::store::tasks::Task;
 
 /// One row of Section 9 (Lane History): a peer task in the same
@@ -140,7 +140,7 @@ fn escape_table_cell(s: &str) -> String {
 }
 
 fn is_backlog_column(column: &Column) -> bool {
-    column.name.trim().eq_ignore_ascii_case("Backlog")
+    column.stage == ColumnStage::Backlog
 }
 
 fn render_section_1_assignment(ctx: &KanbanPromptContext, out: &mut String) {
@@ -318,42 +318,174 @@ fn render_section_10_lane_handoff(ctx: &KanbanPromptContext, out: &mut String) {
     }
 }
 
-fn render_section_11_available_tools(_ctx: &KanbanPromptContext, out: &mut String) {
+fn render_section_11_available_tools(ctx: &KanbanPromptContext, out: &mut String) {
     write_section_header(out, "Available Tools");
-    let _ = writeln!(
-        out,
-        "- `update_card` — change title, description, status, fields"
-    );
-    let _ = writeln!(out, "- `update_task` — change the task body");
-    let _ = writeln!(out, "- `move_card` — advance the card to the next column");
-    let _ = writeln!(out, "- `list_artifacts` — see what evidence is attached");
-    let _ = writeln!(out, "- `provide_artifact` — attach new evidence");
-    let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+    match ctx.column.stage {
+        ColumnStage::Backlog => {
+            let _ = writeln!(
+                out,
+                "- `update_card` — change title, description, status, fields"
+            );
+            let _ = writeln!(out, "- `update_task` — change the task body");
+            let _ = writeln!(
+                out,
+                "- `move_card` — advance the card to the next column (Todo or Dev)"
+            );
+            let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+        }
+        ColumnStage::Todo => {
+            let _ = writeln!(
+                out,
+                "- `update_card` — change title, description, status, fields"
+            );
+            let _ = writeln!(out, "- `update_task` — change the task body");
+            let _ = writeln!(
+                out,
+                "- `move_card` — advance the card to the next column (Dev)"
+            );
+            let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+        }
+        ColumnStage::Dev => {
+            let _ = writeln!(
+                out,
+                "- `update_card` — change title, description, status, fields"
+            );
+            let _ = writeln!(out, "- `update_task` — change the task body");
+            let _ = writeln!(
+                out,
+                "- `move_card` — advance the card to the next column (Review)"
+            );
+            let _ = writeln!(out, "- `list_artifacts` — see what evidence is attached");
+            let _ = writeln!(out, "- `provide_artifact` — attach new evidence");
+            let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+        }
+        ColumnStage::Review => {
+            let _ = writeln!(
+                out,
+                "- `update_card` — change title, description, status, fields"
+            );
+            let _ = writeln!(out, "- `update_task` — change the task body");
+            let _ = writeln!(
+                out,
+                "- `move_card` — advance the card to the next column (Done)"
+            );
+            let _ = writeln!(out, "- `list_artifacts` — see what evidence is attached");
+            let _ = writeln!(out, "- `provide_artifact` — attach new evidence");
+            let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+        }
+        ColumnStage::Done => {
+            let _ = writeln!(out, "- `list_artifacts` — see what evidence is attached");
+            let _ = writeln!(out, "- `create_note` — leave context for the next lane");
+        }
+    }
 }
 
-fn render_section_12_instructions(_ctx: &KanbanPromptContext, out: &mut String) {
+fn render_section_12_instructions(ctx: &KanbanPromptContext, out: &mut String) {
     write_section_header(out, "Instructions");
-    let _ = writeln!(out, "1. Read your Objective carefully.");
-    let _ = writeln!(
-        out,
-        "2. Check Story Readiness (Section 5) — if any item is MISSING, fix it before proceeding."
-    );
-    let _ = writeln!(
-        out,
-        "3. Check Artifact Gates (Section 6) — for each MISSING type, call provide_artifact to attach the required evidence."
-    );
-    let _ = writeln!(
-        out,
-        "4. When your work is complete, call move_card to advance to the next column."
-    );
-    let _ = writeln!(
-        out,
-        "5. If you are blocked, call update_card with a comment explaining the blocker — do not advance the card without resolution."
-    );
-    let _ = writeln!(
-        out,
-        "6. Refer to your specialist system prompt for role-specific behavior — sections 1-11 above provide task-specific context only."
-    );
+    match ctx.column.stage {
+        ColumnStage::Backlog => {
+            let _ = writeln!(out, "1. Read your Objective carefully.");
+            let _ = writeln!(
+                out,
+                "2. Check Story Readiness (Section 5) — if any item is MISSING, fix it before proceeding."
+            );
+            let _ = writeln!(
+                out,
+                "3. Check Artifact Gates (Section 6) — for each MISSING type, call provide_artifact to attach the required evidence."
+            );
+            let _ = writeln!(
+                out,
+                "4. When your work is complete, call move_card to advance to the next column (Todo or Dev)."
+            );
+            let _ = writeln!(
+                out,
+                "5. If you are blocked, call update_card with a comment explaining the blocker — do not advance the card without resolution."
+            );
+            let _ = writeln!(
+                out,
+                "6. Refer to your specialist system prompt for role-specific behavior — sections 1-11 above provide task-specific context only."
+            );
+        }
+        ColumnStage::Todo => {
+            let _ = writeln!(out, "1. Read your Objective carefully.");
+            let _ = writeln!(
+                out,
+                "2. Break the task into actionable sub-steps if it is complex."
+            );
+            let _ = writeln!(
+                out,
+                "3. Check Artifact Gates (Section 6) — for each MISSING type, call provide_artifact to attach the required evidence."
+            );
+            let _ = writeln!(
+                out,
+                "4. When planning is complete, call move_card to advance to Dev."
+            );
+            let _ = writeln!(
+                out,
+                "5. If you are blocked, call update_card with a comment explaining the blocker."
+            );
+            let _ = writeln!(
+                out,
+                "6. Refer to your specialist system prompt for role-specific behavior."
+            );
+        }
+        ColumnStage::Dev => {
+            let _ = writeln!(out, "1. Read your Objective carefully.");
+            let _ = writeln!(out, "2. Implement the changes described in the Objective.");
+            let _ = writeln!(
+                out,
+                "3. Check Artifact Gates (Section 6) — for each MISSING type, call provide_artifact to attach the required evidence."
+            );
+            let _ = writeln!(
+                out,
+                "4. When your work is complete, call move_card to advance to Review."
+            );
+            let _ = writeln!(
+                out,
+                "5. If you are blocked, call update_card with a comment explaining the blocker — do not advance the card without resolution."
+            );
+            let _ = writeln!(
+                out,
+                "6. Refer to your specialist system prompt for role-specific behavior."
+            );
+        }
+        ColumnStage::Review => {
+            let _ = writeln!(
+                out,
+                "1. Read the Objective and verify the implementation matches."
+            );
+            let _ = writeln!(
+                out,
+                "2. Check Artifact Gates (Section 6) — review all attached evidence."
+            );
+            let _ = writeln!(
+                out,
+                "3. If changes are needed, call update_task with verification_report noting the issues."
+            );
+            let _ = writeln!(
+                out,
+                "4. When review is complete, call move_card to advance to Done."
+            );
+            let _ = writeln!(
+                out,
+                "5. If the work is not ready, call update_card with a comment explaining what needs fixing."
+            );
+            let _ = writeln!(
+                out,
+                "6. Refer to your specialist system prompt for role-specific behavior."
+            );
+        }
+        ColumnStage::Done => {
+            let _ = writeln!(
+                out,
+                "1. This card is complete. No further action is needed."
+            );
+            let _ = writeln!(
+                out,
+                "2. Optionally call create_note to leave a summary for future reference."
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +531,7 @@ mod tests {
             required_fields: vec![],
             required_artifact_types: vec![],
             runtime_kind: None,
+            stage: ColumnStage::Dev,
             created_at: "2026-06-12T00:00:00Z".into(),
         }
     }
@@ -420,12 +553,21 @@ mod tests {
         present: Vec<&str>,
     ) -> KanbanPromptContext {
         let mut column = column_with(column_name);
+        // Set stage based on column name for tests.
+        column.stage = match column_name.to_ascii_lowercase().as_str() {
+            "backlog" => ColumnStage::Backlog,
+            "to do" | "todo" => ColumnStage::Todo,
+            "in progress" | "dev" => ColumnStage::Dev,
+            "review" => ColumnStage::Review,
+            "done" => ColumnStage::Done,
+            _ => ColumnStage::Dev,
+        };
         column.required_artifact_types = required_artifact_types
             .into_iter()
             .map(String::from)
             .collect();
         let mut task = task_with(title, description);
-        if column_name.eq_ignore_ascii_case("Backlog") {
+        if column.stage == ColumnStage::Backlog {
             task.acceptance_criteria = Some("- a\n- b".into());
         }
         KanbanPromptContext {
@@ -722,7 +864,8 @@ mod tests {
 
     #[test]
     fn test_section_11_available_tools_lists_kanban_tools() {
-        let ctx = ctx_with("T", None, "Backlog", vec![], vec![]);
+        // Use "In Progress" (Dev stage) which lists all 6 tools.
+        let ctx = ctx_with("T", None, "In Progress", vec![], vec![]);
         let out = build_kanban_prompt(ctx);
         let body = extract_section(&out, "Available Tools").unwrap();
         for tool in [
@@ -735,6 +878,45 @@ mod tests {
         ] {
             assert!(body.contains(tool), "missing tool {tool} in: {body}");
         }
+    }
+
+    #[test]
+    fn test_section_11_backlog_omits_artifact_tools() {
+        let ctx = ctx_with("T", None, "Backlog", vec![], vec![]);
+        let out = build_kanban_prompt(ctx);
+        let body = extract_section(&out, "Available Tools").unwrap();
+        assert!(
+            body.contains("update_card"),
+            "backlog should have update_card"
+        );
+        assert!(body.contains("move_card"), "backlog should have move_card");
+        assert!(
+            !body.contains("list_artifacts"),
+            "backlog should NOT have list_artifacts"
+        );
+        assert!(
+            !body.contains("provide_artifact"),
+            "backlog should NOT have provide_artifact"
+        );
+    }
+
+    #[test]
+    fn test_section_11_done_is_read_only() {
+        let ctx = ctx_with("T", None, "Done", vec![], vec![]);
+        let out = build_kanban_prompt(ctx);
+        let body = extract_section(&out, "Available Tools").unwrap();
+        assert!(
+            !body.contains("move_card"),
+            "done stage should NOT have move_card"
+        );
+        assert!(
+            !body.contains("update_card"),
+            "done stage should NOT have update_card"
+        );
+        assert!(
+            body.contains("list_artifacts"),
+            "done should have list_artifacts"
+        );
     }
 
     #[test]

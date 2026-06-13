@@ -397,6 +397,7 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::store::artifacts::seed_artifact_row;
+    use crate::store::columns::ColumnStage;
     use crate::store::kanban_test_helpers::{
         make_test_db, make_test_state, seed_provider_and_specialist,
     };
@@ -416,6 +417,7 @@ mod tests {
             required_fields: vec![],
             required_artifact_types: vec![],
             runtime_kind: None,
+            stage: ColumnStage::Dev,
             created_at: "2026-06-02T00:00:00Z".into(),
         }
     }

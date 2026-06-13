@@ -45,7 +45,7 @@ mod tests {
     //!   adds the required type, and re-blocks when the artifact is
     //!   moved to a column with a different gate.
     use super::*;
-    use crate::store::columns::ColumnStore;
+    use crate::store::columns::{ColumnStage, ColumnStore};
     use crate::store::kanban_test_helpers::{make_test_db, seed_workspace_with_board};
     use crate::tools::kanban::MoveCardTool;
     use crate::tools::test_support::make_context_for_workspace;
@@ -178,6 +178,7 @@ mod tests {
             None,
             Some(&["screenshot".to_string()]),
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
@@ -195,6 +196,7 @@ mod tests {
             None,
             Some(&["test_results".to_string()]),
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;

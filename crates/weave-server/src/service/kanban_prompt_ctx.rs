@@ -127,6 +127,7 @@ mod tests {
     use super::*;
     use crate::db::Db;
     use crate::store::artifacts::seed_artifact_row;
+    use crate::store::columns::ColumnStage;
     use crate::store::kanban_test_helpers::{make_test_state, seed_workspace_with_board};
     use chrono::Utc;
     use rusqlite::params;
@@ -206,6 +207,7 @@ mod tests {
             required_fields: vec![],
             required_artifact_types: vec![],
             runtime_kind: None,
+            stage: ColumnStage::Backlog,
             created_at: "2026-06-12T00:00:00Z".into(),
         }
     }

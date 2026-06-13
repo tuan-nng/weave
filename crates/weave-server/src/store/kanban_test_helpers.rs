@@ -74,8 +74,8 @@ pub fn seed_workspace_with_board(db: &Db) -> (String, String, String) {
 
     db.conn()
         .execute(
-            "INSERT INTO columns (id, board_id, name, position, created_at)
-             VALUES (?1, ?2, 'test-col', 0, ?3)",
+            "INSERT INTO columns (id, board_id, name, position, stage, created_at)
+             VALUES (?1, ?2, 'test-col', 0, 'dev', ?3)",
             rusqlite::params![column_id, board_id, now],
         )
         .expect("insert column");
@@ -113,16 +113,16 @@ pub fn seed_workspace_with_two_columns(db: &Db) -> (String, String, String, Stri
 
     db.conn()
         .execute(
-            "INSERT INTO columns (id, board_id, name, position, created_at)
-             VALUES (?1, ?2, 'col-1', 0, ?3)",
+            "INSERT INTO columns (id, board_id, name, position, stage, created_at)
+             VALUES (?1, ?2, 'col-1', 0, 'dev', ?3)",
             rusqlite::params![col1_id, board_id, now],
         )
         .expect("insert col1");
 
     db.conn()
         .execute(
-            "INSERT INTO columns (id, board_id, name, position, created_at)
-             VALUES (?1, ?2, 'col-2', 1024, ?3)",
+            "INSERT INTO columns (id, board_id, name, position, stage, created_at)
+             VALUES (?1, ?2, 'col-2', 1024, 'dev', ?3)",
             rusqlite::params![col2_id, board_id, now],
         )
         .expect("insert col2");

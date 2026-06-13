@@ -23,12 +23,36 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::db::Db;
+use crate::error::AppError;
 use crate::service::kanban::check_transition_gates;
 use crate::store::artifacts::ArtifactStore;
-use crate::store::columns::ColumnStore;
+use crate::store::columns::{Column, ColumnStore};
 use crate::store::tasks::{TaskStore, VALID_TASK_STATUSES};
 use crate::tools::fs::{check_optional_status, error, optional_string, require_string, success};
 use crate::tools::{ToolContext, ToolExecutor, ToolResult};
+
+/// Validate that a column move does not skip more than one stage.
+///
+/// Same-column moves are not transitions and should be handled by the
+/// caller before calling this function. The rule: the absolute
+/// difference between source and dest stage indices must be ≤ 2
+/// (allowing one skip, e.g., backlog→dev).
+fn validate_stage_transition(source: &Column, dest: &Column) -> Result<(), AppError> {
+    if source.id == dest.id {
+        return Ok(());
+    }
+    let src_idx = source.stage.index();
+    let dst_idx = dest.stage.index();
+    let distance = (dst_idx - src_idx).abs();
+    if distance > 2 {
+        return Err(AppError::validation(format!(
+            "cannot move from '{}' ({}) to '{}' ({}) — skips more than one stage; \
+             move through intermediate stages first",
+            source.name, source.stage, dest.name, dest.stage,
+        )));
+    }
+    Ok(())
+}
 
 pub struct MoveCardTool {
     pub db: Arc<Db>,
@@ -127,7 +151,14 @@ impl ToolExecutor for MoveCardTool {
             ));
         }
 
-        // 3. Transition gates. `check_transition_gates` itself short-circuits
+        // 3. Stage transition check. Moves that skip more than one stage
+        //    are rejected (e.g., backlog→review is forbidden; backlog→dev
+        //    is allowed). Same-column moves short-circuit here.
+        if let Err(e) = validate_stage_transition(&source_column, &dest_column) {
+            return error(e.to_string());
+        }
+
+        // 4. Transition gates. `check_transition_gates` itself short-circuits
         //    on same-column moves and the all-defaults case, so this is
         //    a no-op for the common path. The artifact-type set is
         //    pre-loaded here (feat-031) so the gate stays a pure
@@ -174,7 +205,7 @@ impl ToolExecutor for MoveCardTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::columns::ColumnStore;
+    use crate::store::columns::{ColumnStage, ColumnStore};
     use crate::store::kanban_test_helpers::make_test_db;
     use crate::tools::test_support::make_context;
     use tempfile::TempDir;
@@ -258,6 +289,7 @@ mod tests {
             None,
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
@@ -277,6 +309,7 @@ mod tests {
             },
             None,
             None,
+            ColumnStage::Dev,
         )
         .unwrap()
         .id;
